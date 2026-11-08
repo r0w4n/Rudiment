@@ -143,7 +143,12 @@ const audio = {
     return true;
   },
   async start(options, onFrame, onDone) {
-    await this.ensure(); this.stop(); const generation = this.generation;
+    // Invalidate the current run before audio decoding. A Stop/Restart action
+    // while ensure() is pending increments generation again, preventing this
+    // asynchronous start from reviving a session the user already stopped.
+    this.stop(); const generation = this.generation;
+    await this.ensure();
+    if(generation!==this.generation)return {cancelled:true,state:this.state};
     const transport = Tone.getTransport(), tempoMap=(options.tempoMap||[]).slice().sort((a,b)=>a.beat-b.beat),sourceBpm=options.sourceBpm||options.bpm,tempoScale=options.bpm/sourceBpm,offset = options.offsetBeat || 0,initialBpm=tempoAtBeat(offset,tempoMap,sourceBpm)*tempoScale,countBeats = options.countInBars * options.meter;
     const remaining = Math.max(0, options.totalBeats - offset), startDelay = .16;
     const countInSeconds=countBeats*60/initialBpm,runAudio = this.raw.currentTime + startDelay + countInSeconds;
@@ -470,7 +475,9 @@ function sendMidiState(extra={}) { midiCallback?.({kind:'state',ports:WebMidi.en
 function bindMidiInputs() {
   if(!WebMidi.enabled)return;
   for(const input of WebMidi.inputs){input.removeListener('midimessage');input.addListener('midimessage',event=>{
-    if(selectedInput&&selectedInput.id!==input.id)return;
+    // Never merge multiple kits implicitly. With no selected port, input is
+    // deliberately silent until the user chooses one.
+    if(!selectedInput||selectedInput.id!==input.id)return;
     const raw=Array.from(event.rawData||[]),status=raw[0]||0,data1=raw[1]||0,data2=raw[2]||0,command=status&0xf0,channel=(status&0x0f)+1;
     const type=command===0x90?(data2===0?'note_off':'note_on'):command===0x80?'note_off':command===0xb0?'cc':'other';
     midiCallback?.({kind:'message',type,note:data1,velocity:data2,channel,timestamp:event.timestamp,rawBytes:raw,inputId:input.id,inputName:input.name||'MIDI input'});
@@ -508,7 +515,7 @@ function bindDrop(callback){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeVoices:audio.voices.size,clickGain:audio.clickGain?.gain.value??0,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),activeVoices:audio.voices.size,clickGain:audio.clickGain?.gain.value??0,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,closeMidiLibrary,bindDrop,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},

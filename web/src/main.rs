@@ -13,6 +13,12 @@ use std::{
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
+type FrameCallback = Closure<dyn FnMut(f64, f64, f64)>;
+type DoneCallback = Closure<dyn FnMut()>;
+type CallbackSlot<T> = Rc<RefCell<Option<T>>>;
+type HitInput = Rc<dyn Fn(f64, Instrument, u8, InputSource, Option<u8>, Option<u8>)>;
+type MidiFileCallback = Closure<dyn FnMut(Uint8Array, String, String, JsValue)>;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = rudiment, js_name = ensureAudio)]
@@ -470,6 +476,7 @@ fn App() -> impl IntoView {
     let imported_name = RwSignal::new(String::new());
     let saved_imports = RwSignal::new(Vec::<SavedMidiImport>::new());
     let selected_import = RwSignal::new(None::<String>);
+    let restoring_import = RwSignal::new(false);
     let phase = RwSignal::new("idle".to_string());
     let bpm = RwSignal::new(60.0);
     let count_in = RwSignal::new(1u8);
@@ -593,9 +600,8 @@ fn App() -> impl IntoView {
         feedback.set("Run complete — saved on this device".into());
     });
 
-    let frame_holder: Rc<RefCell<Option<Closure<dyn FnMut(f64, f64, f64)>>>> =
-        Rc::new(RefCell::new(None));
-    let done_holder: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let frame_holder: CallbackSlot<FrameCallback> = Rc::new(RefCell::new(None));
+    let done_holder: CallbackSlot<DoneCallback> = Rc::new(RefCell::new(None));
     let launch_run: Rc<dyn Fn(f64, u8)> = {
         let finish_run = finish_run.clone();
         let frame_holder = frame_holder.clone();
@@ -782,7 +788,7 @@ fn App() -> impl IntoView {
 
     let save_for_hit = save_current_settings.clone();
     let start_for_hit = start_new_run.clone();
-    let hit_input: Rc<dyn Fn(f64, Instrument, u8, InputSource, Option<u8>, Option<u8>)> = Rc::new(
+    let hit_input: HitInput = Rc::new(
         move |timestamp, instrument, velocity, source, raw_note, raw_channel| {
             if !snare_muted.get_untracked() && !play_snare(velocity) {
                 audio_state.set("Audio is locked — start practice once to monitor drums".into());
@@ -894,55 +900,55 @@ fn App() -> impl IntoView {
         },
     );
 
-    let file_callback: Rc<Closure<dyn FnMut(Uint8Array, String, String, JsValue)>> = Rc::new(
-        Closure::wrap(Box::new(
-            move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
-                if matches!(
-                    phase.get_untracked().as_str(),
-                    "running" | "count_in" | "paused"
-                ) {
-                    stop_audio();
-                    observed.set(vec![]);
-                    live.set(vec![]);
-                    progress.set(-1.0);
-                    clear_score_feedback();
-                    phase.set("idle".into());
-                }
-                if !error.is_empty() {
-                    import_error.set(Some(error));
-                    return;
-                }
-                let save_to_library = save_to_library.as_bool().unwrap_or(true);
-                let data = bytes.to_vec();
-                match parse_midi(&data, &name, None) {
-                    Ok(parsed) => {
+    let file_callback: Rc<MidiFileCallback> = Rc::new(Closure::wrap(Box::new(
+        move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
+            if matches!(
+                phase.get_untracked().as_str(),
+                "running" | "count_in" | "paused"
+            ) {
+                stop_audio();
+                observed.set(vec![]);
+                live.set(vec![]);
+                progress.set(-1.0);
+                clear_score_feedback();
+                phase.set("idle".into());
+            }
+            if !error.is_empty() {
+                import_error.set(Some(error));
+                return;
+            }
+            let save_to_library = save_to_library.as_bool().unwrap_or(true);
+            let data = bytes.to_vec();
+            match parse_midi(&data, &name, None) {
+                Ok(parsed) => {
+                    if !restoring_import.get_untracked() {
                         bpm.set(parsed.tempo_bpm.clamp(30.0, 240.0).round());
-                        import_error.set(None);
-                        imported_bytes.set(data.clone());
-                        imported_name.set(name.clone());
-                        let metadata =
-                            serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
-                        let bytes_copy = Uint8Array::from(data.as_slice());
-                        let hash = parsed.content_hash.clone();
-                        if save_to_library {
-                            selected_import.set(Some(hash.clone()));
-                            let last_hash = hash.clone();
-                            spawn_local(async move {
-                                if let Err(error) =
-                                    JsFuture::from(save_last_import(JsValue::from_str(&last_hash)))
-                                        .await
-                                {
-                                    import_error.set(Some(format!(
+                    }
+                    import_error.set(None);
+                    imported_bytes.set(data.clone());
+                    imported_name.set(name.clone());
+                    let metadata = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
+                    let bytes_copy = Uint8Array::from(data.as_slice());
+                    let hash = parsed.content_hash.clone();
+                    if save_to_library {
+                        selected_import.set(Some(hash.clone()));
+                        let last_hash = hash.clone();
+                        spawn_local(async move {
+                            if let Err(error) =
+                                JsFuture::from(save_last_import(JsValue::from_str(&last_hash)))
+                                    .await
+                            {
+                                import_error.set(Some(format!(
                                     "MIDI loaded, but the last-selected setting could not be saved: {}",
                                     error.as_string().unwrap_or_else(|| format!("{error:?}"))
                                 )));
-                                }
-                                match JsFuture::from(save_import(&hash, &name, &bytes_copy, metadata)).await
+                            }
+                            match JsFuture::from(save_import(&hash, &name, &bytes_copy, metadata)).await
                             {
                                 Ok(_) => match JsFuture::from(load_imports()).await {
                                     Ok(value) => match serde_wasm_bindgen::from_value::<Vec<SavedMidiImport>>(value) {
                                         Ok(mut items) => {
-                                            items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                            items.sort_by_key(|item| item.name.to_lowercase());
                                             saved_imports.set(items);
                                         }
                                         Err(error) => import_error.set(Some(format!(
@@ -958,31 +964,30 @@ fn App() -> impl IntoView {
                                     error.as_string().unwrap_or_else(|| format!("{error:?}"))
                                 ))),
                             }
-                            });
-                        } else {
-                            selected_import.set(None);
-                            spawn_local(async move {
-                                if let Err(error) =
-                                    JsFuture::from(save_last_import(JsValue::NULL)).await
-                                {
-                                    import_error.set(Some(format!(
+                        });
+                    } else {
+                        selected_import.set(None);
+                        spawn_local(async move {
+                            if let Err(error) =
+                                JsFuture::from(save_last_import(JsValue::NULL)).await
+                            {
+                                import_error.set(Some(format!(
                                     "Bundled MIDI loaded, but the last-selected setting could not be cleared: {}",
                                     error.as_string().unwrap_or_else(|| format!("{error:?}"))
                                 )));
-                                }
-                            });
-                        }
-                        exercise.set(parsed);
-                        result_modal_open.set(false);
-                        phase.set("idle".into());
-                        feedback.set("MIDI imported — review sticking and press Start".into());
+                            }
+                        });
                     }
-                    Err(err) => import_error.set(Some(err.to_string())),
+                    exercise.set(parsed);
+                    result_modal_open.set(false);
+                    phase.set("idle".into());
+                    feedback.set("MIDI imported — review sticking and press Start".into());
                 }
-            },
-        )
-            as Box<dyn FnMut(Uint8Array, String, String, JsValue)>),
-    );
+                Err(err) => import_error.set(Some(err.to_string())),
+            }
+        },
+    )
+        as Box<dyn FnMut(Uint8Array, String, String, JsValue)>));
 
     let save_for_midi = save_current_settings.clone();
     let midi_hit = hit_input.clone();
@@ -1098,7 +1103,7 @@ fn App() -> impl IntoView {
             match JsFuture::from(load_imports()).await {
                 Ok(value) => match serde_wasm_bindgen::from_value::<Vec<SavedMidiImport>>(value) {
                     Ok(mut items) => {
-                        items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                        items.sort_by_key(|item| item.name.to_lowercase());
                         saved_imports.set(items);
                     }
                     Err(error) => import_error
@@ -1124,12 +1129,14 @@ fn App() -> impl IntoView {
                         Ok(saved) => {
                             selected_import.set(Some(saved.hash));
                             let function = callback.as_ref().as_ref().unchecked_ref::<Function>();
+                            restoring_import.set(true);
                             let _ = function.call3(
                                 &JsValue::NULL,
                                 &Uint8Array::from(saved.bytes.as_slice()),
                                 &JsValue::from_str(&saved.name),
                                 &JsValue::from_str(""),
                             );
+                            restoring_import.set(false);
                         }
                         Err(error) => import_error.set(Some(format!(
                             "The last MIDI file could not be restored: {error}"
@@ -1147,10 +1154,10 @@ fn App() -> impl IntoView {
         });
     }
     spawn_local(async move {
-        if let Ok(value) = JsFuture::from(load_sessions()).await {
-            if let Ok(items) = serde_wasm_bindgen::from_value::<Vec<SessionRecord>>(value) {
-                history.set(items);
-            }
+        if let Ok(value) = JsFuture::from(load_sessions()).await
+            && let Ok(items) = serde_wasm_bindgen::from_value::<Vec<SessionRecord>>(value)
+        {
+            history.set(items);
         }
     });
     spawn_local(async move {
@@ -1510,7 +1517,7 @@ fn App() -> impl IntoView {
             <section class="feedback-strip" aria-live="polite"><div class=move || format!("feedback-orb {}",feedback.get().split_whitespace().next().unwrap_or("ready").to_lowercase())></div><strong>{move || feedback.get()}</strong><span class="live-assessment">{move || {let (score,perfect,good,early,late,missed)=live_accuracy(&live.get());format!("SCORE {}% · P {perfect} · G {good} · E {early} · L {late} · M {missed}",display_score(score))}}</span><span>{move || audio_state.get()}</span></section>
             <section class="practice-controls">
               <div class="transport">
-                <div class="transport-secondary"><button on:click=move |_|{stop_audio();result_modal_open.set(false);phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let reset=reset_run.clone();move |_|reset()}>"↻ Restart"</button></div>
+                <div class="transport-secondary"><button on:click={let reset=reset_run.clone();move |_|{reset();feedback.set("Stopped — results were not saved".into());}}>"■ Stop"</button><button on:click={let reset=reset_run.clone();move |_|reset()}>"↻ Restart"</button></div>
                 <button class="primary start-button" on:click={let launch=start_click.clone();let start=start_new_run.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>{stop_audio();phase.set("paused".into());feedback.set("Paused".into());},"paused"=>launch(progress.get_untracked().max(0.0),0),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>"Start practice"}}<small>{move || if count_in.get()>0{format!("{} bar count-in",count_in.get())}else{"No count-in".into()}}</small></button>
               </div>
             </section>

@@ -32,6 +32,39 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(page.getByText('Stopped — results were not saved')).toBeVisible();
 });
 
+test('stopping while audio loads cannot revive the practice transport', async ({ page }) => {
+  await page.route('**/audio/snare-*.m4a', async route => {
+    await new Promise(resolve => setTimeout(resolve, 350));
+    await route.continue();
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await page.getByRole('button', { name: /Stop/ }).click();
+  await expect(page.getByText('Stopped — results were not saved')).toBeVisible();
+  await page.waitForTimeout(700);
+  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
+  const diagnostics = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
+  expect(diagnostics.activeRun).toBe(false);
+  expect(diagnostics.transportTicks).toBe(0);
+  await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
+});
+
+test('Stop clears live scoring and painted note feedback', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  await page.keyboard.press('j');
+  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(1);
+  await page.getByRole('button', { name: /Stop/ }).click();
+  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
+  await expect(page.locator('.unmatched-hit-marker')).toHaveCount(0);
+  await expect(page.locator('.live-assessment')).toContainText('SCORE —%');
+  await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
+});
+
 test('percussion engraving aligns the snare in a staff space and shows two complete systems', async ({ page }) => {
   await page.goto('/');
   const geometry = await page.locator('#notation').evaluate((notation) => {
@@ -287,6 +320,27 @@ test('bundled MIDI imports through the visible import callback and broken files 
   await expect(page.locator('.error-row')).toContainText(/malformed|truncated/i);
 });
 
+test('restoring the last MIDI exercise preserves the saved practice tempo', async ({ page }) => {
+  await page.goto('/');
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Import MIDI' }).click();
+  await (await chooserPromise).setFiles('web/public/exercises/quarter-note-reference.mid');
+  await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
+  await page.getByLabel('Tempo in BPM').fill('137');
+  await expect.poll(() => page.evaluate(() => new Promise<number | undefined>((resolve, reject) => {
+    const request = indexedDB.open('rudiment');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const get = request.result.transaction('settings').objectStore('settings').get('app');
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => resolve(get.result?.value?.bpm);
+    };
+  }))).toBe(137);
+  await page.reload();
+  await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
+  await expect(page.getByLabel('Tempo in BPM')).toHaveValue('137');
+});
+
 test('simulated Web MIDI preserves message details and filters non-attacks', async ({ page }) => {
   await page.addInitScript(() => {
     const input = {
@@ -347,6 +401,41 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await page.reload();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await expect(page.getByText('Current snare: note 40, channel 10')).toBeVisible();
+});
+
+test('multiple MIDI inputs remain silent until one device is selected', async ({ page }) => {
+  await page.addInitScript(() => {
+    const makeInput = (id: string, name: string) => {
+      const input = {
+        id, name, manufacturer: 'Rudiment Test', type: 'input', state: 'connected', connection: 'open',
+        onmidimessage: null as null | ((event: unknown) => void), onstatechange: null,
+        open: async () => input, close: async () => input,
+        addEventListener: () => {}, removeEventListener: () => {},
+        dispatch: (data: number[]) => input.onmidimessage?.({ data: new Uint8Array(data), timeStamp: performance.now() }),
+      };
+      return input;
+    };
+    const first = makeInput('kit-a', 'Kit A'), second = makeInput('kit-b', 'Kit B');
+    const access = { inputs: new Map([[first.id, first], [second.id, second]]), outputs: new Map(), sysexEnabled: false, onstatechange: null, addEventListener: () => {}, removeEventListener: () => {} };
+    Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
+    Object.assign(window, { __rudimentMidiInputs: { first, second } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'MIDI connection' }).click();
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByText('MIDI diagnostics').click();
+  await page.evaluate(() => {
+    const { first, second } = (window as any).__rudimentMidiInputs;
+    first.dispatch([0x99, 38, 90]); second.dispatch([0x99, 38, 100]);
+  });
+  await expect(page.locator('.diagnostics')).toContainText('No MIDI messages received yet.');
+  await page.getByLabel('Input device').selectOption('kit-b');
+  await page.evaluate(() => {
+    const { first, second } = (window as any).__rudimentMidiInputs;
+    first.dispatch([0x99, 38, 91]); second.dispatch([0x99, 38, 101]);
+  });
+  await expect(page.locator('.diagnostics')).toContainText('velocity 101');
+  await expect(page.locator('.diagnostics')).not.toContainText('velocity 91');
 });
 
 test('previously authorised sole MIDI input reconnects automatically', async ({ page }) => {

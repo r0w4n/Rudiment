@@ -1,6 +1,6 @@
 //! Pure musical domain model for Rudiment. This crate deliberately has no web/UI dependencies.
 
-use midly::{MetaMessage, MidiMessage, Smf, Timing, TrackEventKind};
+use midly::{Format, MetaMessage, MidiMessage, Smf, Timing, TrackEventKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -319,12 +319,11 @@ pub fn parse_midi(
                     channel,
                     message: MidiMessage::NoteOn { key, vel: _ },
                 } => {
-                    if let Some(indices) = pending.get_mut(&(channel.as_int(), key.as_int())) {
-                        if !indices.is_empty() {
-                            let index = indices.remove(0);
-                            notes[index].duration_ticks =
-                                Some(tick.saturating_sub(notes[index].tick));
-                        }
+                    if let Some(indices) = pending.get_mut(&(channel.as_int(), key.as_int()))
+                        && !indices.is_empty()
+                    {
+                        let index = indices.remove(0);
+                        notes[index].duration_ticks = Some(tick.saturating_sub(notes[index].tick));
                     }
                 }
                 _ => {}
@@ -333,6 +332,16 @@ pub fn parse_midi(
         names.push(name);
         candidates.push(notes);
         lyrics_by_track.push(lyrics);
+    }
+    // Format-0 files place every channel in one physical track. When that
+    // track contains channel 10 percussion, melodic channels are accompaniment
+    // rather than additional drum instruments and must not enter notation or
+    // scoring.
+    if smf.header.format == Format::SingleTrack
+        && let Some(notes) = candidates.first_mut()
+        && notes.iter().any(|note| note.channel == 9)
+    {
+        notes.retain(|note| note.channel == 9);
     }
     tempo_events.entry(0).or_insert(500_000);
     let tempo_map: Vec<TempoChange> = tempo_events
@@ -394,32 +403,25 @@ pub fn parse_midi(
             names[track_index]
         ));
     }
-    // Exporters commonly put sticking text on a conductor/annotation track
-    // while the notes live on the drum track. Prefer local annotations, then
-    // merge the remaining aligned R/L annotations by absolute tick.
+    // Exporters commonly split sticking text between the drum track and a
+    // conductor/annotation track. Local annotations win at the same tick, but
+    // annotations on other tracks fill any local gaps.
     let local_lyrics = &lyrics_by_track[track_index];
-    let merged_lyrics;
-    let lyrics = if local_lyrics.is_empty() {
-        merged_lyrics = lyrics_by_track
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != track_index)
-            .fold(
-                BTreeMap::<u64, Vec<String>>::new(),
-                |mut merged, (_, track)| {
-                    for (tick, values) in track {
-                        merged
-                            .entry(*tick)
-                            .or_default()
-                            .extend(values.iter().cloned());
-                    }
-                    merged
-                },
-            );
-        &merged_lyrics
-    } else {
-        local_lyrics
-    };
+    let mut merged_lyrics = local_lyrics.clone();
+    for (index, track) in lyrics_by_track.iter().enumerate() {
+        if index == track_index {
+            continue;
+        }
+        for (tick, values) in track {
+            if !local_lyrics.contains_key(tick) {
+                merged_lyrics
+                    .entry(*tick)
+                    .or_default()
+                    .extend(values.iter().cloned());
+            }
+        }
+    }
+    let lyrics = &merged_lyrics;
     let mut tick_counts: HashMap<u64, usize> = HashMap::new();
     for note in &raw_notes {
         *tick_counts.entry(note.tick).or_default() += 1;
@@ -827,17 +829,30 @@ fn prefer_match_plan(candidate: MatchPlan, current: MatchPlan) -> bool {
                             && !matches!(current.action, MatchAction::Match))))))
 }
 
-fn optimal_instrument_matches(
-    expected: &[ExpectedHit],
-    observed: &[ObservedHit],
-    expected_indices: &[usize],
-    observed_indices: &[usize],
+struct MatchingContext<'a> {
+    expected: &'a [ExpectedHit],
+    observed: &'a [ObservedHit],
     bpm: f64,
     start_ms: f64,
     latency_ms: f64,
     match_ms: f64,
-    tempo_map: &[TempoChange],
+    tempo_map: &'a [TempoChange],
+}
+
+fn optimal_instrument_matches(
+    context: &MatchingContext<'_>,
+    expected_indices: &[usize],
+    observed_indices: &[usize],
 ) -> Vec<(usize, usize, f64)> {
+    let MatchingContext {
+        expected,
+        observed,
+        bpm,
+        start_ms,
+        latency_ms,
+        match_ms,
+        tempo_map,
+    } = context;
     let mut expected_order = expected_indices.to_vec();
     expected_order.sort_by(|left, right| {
         expected[*left]
@@ -873,9 +888,9 @@ fn optimal_instrument_matches(
             let expected_index = expected_order[row];
             let observed_index = observed_order[column];
             let target =
-                start_ms + elapsed_ms_at_beat(expected[expected_index].beat, bpm, tempo_map);
+                start_ms + elapsed_ms_at_beat(expected[expected_index].beat, *bpm, tempo_map);
             let error = observed[observed_index].timestamp_ms - latency_ms - target;
-            if error.is_finite() && error.abs() <= match_ms {
+            if error.is_finite() && error.abs() <= *match_ms {
                 let child = plans[row + 1][column + 1];
                 let matched = MatchPlan {
                     matched: child.matched + 1,
@@ -905,7 +920,7 @@ fn optimal_instrument_matches(
                 let expected_index = expected_order[row];
                 let observed_index = observed_order[column];
                 let target =
-                    start_ms + elapsed_ms_at_beat(expected[expected_index].beat, bpm, tempo_map);
+                    start_ms + elapsed_ms_at_beat(expected[expected_index].beat, *bpm, tempo_map);
                 matches.push((
                     expected_index,
                     observed_index,
@@ -982,6 +997,15 @@ pub fn score_session_with_tempo_map(
         }
     }
     let (_, _, match_ms) = config.boundaries();
+    let matching_context = MatchingContext {
+        expected,
+        observed,
+        bpm,
+        start_ms,
+        latency_ms,
+        match_ms,
+        tempo_map,
+    };
     for instrument in instruments {
         let expected_indices = expected
             .iter()
@@ -993,17 +1017,9 @@ pub fn score_session_with_tempo_map(
             .enumerate()
             .filter_map(|(index, hit)| (hit.instrument == instrument).then_some(index))
             .collect::<Vec<_>>();
-        for (expected_index, observed_index, error) in optimal_instrument_matches(
-            expected,
-            observed,
-            &expected_indices,
-            &observed_indices,
-            bpm,
-            start_ms,
-            latency_ms,
-            match_ms,
-            tempo_map,
-        ) {
+        for (expected_index, observed_index, error) in
+            optimal_instrument_matches(&matching_context, &expected_indices, &observed_indices)
+        {
             matches[expected_index] = Some((observed_index, error));
             used[observed_index] = true;
         }
@@ -1263,6 +1279,40 @@ mod tests {
         );
         let other = parse_midi(&bytes, "parallel.mid", Some(2)).unwrap();
         assert_eq!(other.selected_track, 2);
+    }
+    #[test]
+    fn format_zero_with_channel_ten_ignores_melodic_channels() {
+        let exercise = parse_midi(&mixed_format_zero_fixture(), "mixed.mid", None).unwrap();
+        assert_eq!(exercise.hits.len(), 2);
+        assert!(exercise.hits.iter().all(|hit| hit.channel == 9));
+        assert_eq!(
+            exercise
+                .hits
+                .iter()
+                .map(|hit| hit.instrument)
+                .collect::<Vec<_>>(),
+            vec![Instrument::Snare, Instrument::Kick]
+        );
+        assert_eq!(exercise.playable_tracks.len(), 1);
+        assert!(
+            !exercise.playable_tracks[0]
+                .instruments
+                .contains(&Instrument::OtherPercussion)
+        );
+    }
+    #[test]
+    fn partial_local_sticking_is_completed_from_annotation_tracks() {
+        let exercise = parse_midi(&partial_sticking_fixture(), "partial.mid", None).unwrap();
+        assert_eq!(
+            exercise.hits.iter().map(|hit| hit.hand).collect::<Vec<_>>(),
+            vec![Hand::R, Hand::L]
+        );
+        assert!(
+            !exercise
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no aligned R/L"))
+        );
     }
     #[test]
     fn six_eight_midi_uses_three_quarter_note_beats_per_measure() {
@@ -1854,6 +1904,124 @@ mod tests {
                 timing: Timing::Metrical(u15::new(480)),
             },
             tracks: vec![conductor, drums, other],
+        };
+        let mut out = vec![];
+        smf.write_std(&mut out).unwrap();
+        out
+    }
+    fn mixed_format_zero_fixture() -> Vec<u8> {
+        use midly::{
+            Format, Header, Smf, TrackEvent, TrackEventKind,
+            num::{u4, u7, u15, u28},
+        };
+        let track = vec![
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(60),
+                        vel: u7::new(100),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(9),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(38),
+                        vel: u7::new(100),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(480),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(0),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(64),
+                        vel: u7::new(100),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(9),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(36),
+                        vel: u7::new(100),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+            },
+        ];
+        let smf = Smf {
+            header: Header {
+                format: Format::SingleTrack,
+                timing: Timing::Metrical(u15::new(480)),
+            },
+            tracks: vec![track],
+        };
+        let mut out = vec![];
+        smf.write_std(&mut out).unwrap();
+        out
+    }
+    fn partial_sticking_fixture() -> Vec<u8> {
+        use midly::{
+            Format, Header, Smf, TrackEvent, TrackEventKind,
+            num::{u4, u7, u15, u28},
+        };
+        let annotations = vec![
+            TrackEvent {
+                delta: u28::new(480),
+                kind: TrackEventKind::Meta(MetaMessage::Lyric(b"L")),
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+            },
+        ];
+        let drums = vec![
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::Lyric(b"R")),
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(9),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(38),
+                        vel: u7::new(100),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(480),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(9),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(38),
+                        vel: u7::new(100),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+            },
+        ];
+        let smf = Smf {
+            header: Header {
+                format: Format::Parallel,
+                timing: Timing::Metrical(u15::new(480)),
+            },
+            tracks: vec![annotations, drums],
         };
         let mut out = vec![];
         smf.write_std(&mut out).unwrap();
