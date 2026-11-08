@@ -95,9 +95,9 @@ fn nearest_written_value(beats: f64) -> f64 {
         1.0 / 6.0,
         0.125,
     ]
-        .into_iter()
-        .find(|value| *value <= beats + 0.001)
-        .unwrap_or(0.25)
+    .into_iter()
+    .find(|value| *value <= beats + 0.001)
+    .unwrap_or(0.25)
 }
 
 fn rhythmic_grid(positions: &[f64]) -> f64 {
@@ -217,8 +217,19 @@ pub struct Exercise {
     pub meter_denominator: u8,
     pub hits: Vec<ExpectedHit>,
     pub track_names: Vec<String>,
+    #[serde(default)]
+    pub playable_tracks: Vec<PlayableTrack>,
     pub selected_track: usize,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlayableTrack {
+    /// The original SMF track index. This deliberately differs from the
+    /// position in `playable_tracks` when a conductor track is present.
+    pub index: usize,
+    pub name: String,
+    pub instruments: Vec<Instrument>,
 }
 
 #[derive(Debug, Error)]
@@ -274,7 +285,10 @@ pub fn parse_midi(
                 TrackEventKind::Meta(MetaMessage::TimeSignature(n, d, _, _)) => {
                     meter = (n, 2u8.saturating_pow(d as u32))
                 }
-                TrackEventKind::Meta(MetaMessage::Lyric(raw)) => {
+                TrackEventKind::Meta(MetaMessage::Lyric(raw))
+                | TrackEventKind::Meta(MetaMessage::Text(raw))
+                | TrackEventKind::Meta(MetaMessage::Marker(raw))
+                | TrackEventKind::Meta(MetaMessage::CuePoint(raw)) => {
                     let text = String::from_utf8_lossy(raw).trim().to_uppercase();
                     if text == "R" || text == "L" {
                         lyrics.entry(tick).or_default().push(text);
@@ -330,6 +344,28 @@ pub fn parse_midi(
         })
         .collect();
     let tempo = tempo_map[0].bpm;
+    let has_channel_ten = candidates.iter().flatten().any(|note| note.channel == 9);
+    let playable_tracks = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, notes)| {
+            !notes.is_empty() && (!has_channel_ten || notes.iter().any(|note| note.channel == 9))
+        })
+        .map(|(index, notes)| {
+            let mut instruments = notes
+                .iter()
+                .map(|note| Instrument::from_gm(note.note))
+                .filter(|instrument| *instrument != Instrument::Unknown)
+                .collect::<Vec<_>>();
+            instruments.sort_by_key(|instrument| *instrument as u8);
+            instruments.dedup();
+            PlayableTrack {
+                index,
+                name: names[index].clone(),
+                instruments,
+            }
+        })
+        .collect::<Vec<_>>();
     let track_index = selected_track
         .filter(|i| *i < candidates.len())
         .unwrap_or_else(|| {
@@ -337,14 +373,12 @@ pub fn parse_midi(
                 .iter()
                 .enumerate()
                 .max_by_key(|(i, ns)| {
-                    let percussion = ns
+                    let channel_ten = ns.iter().filter(|note| note.channel == 9).count();
+                    let recognised = ns
                         .iter()
-                        .filter(|note| {
-                            note.channel == 9
-                                || Instrument::from_gm(note.note) != Instrument::Unknown
-                        })
+                        .filter(|note| Instrument::from_gm(note.note) != Instrument::Unknown)
                         .count();
-                    (percussion, ns.len(), usize::MAX - *i)
+                    (channel_ten, recognised, ns.len(), usize::MAX - *i)
                 })
                 .map(|(i, _)| i)
                 .unwrap_or(0)
@@ -354,13 +388,38 @@ pub fn parse_midi(
         return Err(MidiError::NoNotes);
     }
     let mut warnings = vec![];
-    if candidates.iter().filter(|n| !n.is_empty()).count() > 1 && selected_track.is_none() {
+    if playable_tracks.len() > 1 && selected_track.is_none() {
         warnings.push(format!(
             "Multiple note tracks found; selected ‘{}’. Choose another track if needed.",
             names[track_index]
         ));
     }
-    let lyrics = &lyrics_by_track[track_index];
+    // Exporters commonly put sticking text on a conductor/annotation track
+    // while the notes live on the drum track. Prefer local annotations, then
+    // merge the remaining aligned R/L annotations by absolute tick.
+    let local_lyrics = &lyrics_by_track[track_index];
+    let merged_lyrics;
+    let lyrics = if local_lyrics.is_empty() {
+        merged_lyrics = lyrics_by_track
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != track_index)
+            .fold(
+                BTreeMap::<u64, Vec<String>>::new(),
+                |mut merged, (_, track)| {
+                    for (tick, values) in track {
+                        merged
+                            .entry(*tick)
+                            .or_default()
+                            .extend(values.iter().cloned());
+                    }
+                    merged
+                },
+            );
+        &merged_lyrics
+    } else {
+        local_lyrics
+    };
     let mut tick_counts: HashMap<u64, usize> = HashMap::new();
     for note in &raw_notes {
         *tick_counts.entry(note.tick).or_default() += 1;
@@ -452,6 +511,7 @@ pub fn parse_midi(
         meter_denominator: meter.1,
         hits,
         track_names: names,
+        playable_tracks,
         selected_track: track_index,
         warnings,
     })
@@ -504,6 +564,11 @@ pub fn paradiddle() -> Exercise {
         meter_denominator: 4,
         hits,
         track_names: vec!["Paradiddle".into()],
+        playable_tracks: vec![PlayableTrack {
+            index: 0,
+            name: "Paradiddle".into(),
+            instruments: vec![Instrument::Snare],
+        }],
         selected_track: 0,
         warnings: vec![],
     }
@@ -807,8 +872,8 @@ fn optimal_instrument_matches(
 
             let expected_index = expected_order[row];
             let observed_index = observed_order[column];
-            let target = start_ms
-                + elapsed_ms_at_beat(expected[expected_index].beat, bpm, tempo_map);
+            let target =
+                start_ms + elapsed_ms_at_beat(expected[expected_index].beat, bpm, tempo_map);
             let error = observed[observed_index].timestamp_ms - latency_ms - target;
             if error.is_finite() && error.abs() <= match_ms {
                 let child = plans[row + 1][column + 1];
@@ -839,8 +904,8 @@ fn optimal_instrument_matches(
             MatchAction::Match => {
                 let expected_index = expected_order[row];
                 let observed_index = observed_order[column];
-                let target = start_ms
-                    + elapsed_ms_at_beat(expected[expected_index].beat, bpm, tempo_map);
+                let target =
+                    start_ms + elapsed_ms_at_beat(expected[expected_index].beat, bpm, tempo_map);
                 matches.push((
                     expected_index,
                     observed_index,
@@ -881,15 +946,7 @@ pub fn score_session_with_config(
     latency_ms: f64,
     config: ScoringConfig,
 ) -> SessionSummary {
-    score_session_with_tempo_map(
-        expected,
-        observed,
-        bpm,
-        start_ms,
-        latency_ms,
-        config,
-        &[],
-    )
+    score_session_with_tempo_map(expected, observed, bpm, start_ms, latency_ms, config, &[])
 }
 
 pub fn score_session_with_tempo_map(
@@ -1003,7 +1060,7 @@ pub fn score_session_with_tempo_map(
                 && (obs.timestamp_ms
                     - latency_ms
                     - (start_ms + elapsed_ms_at_beat(exp.beat, bpm, tempo_map)))
-                    .abs()
+                .abs()
                     <= match_ms
         });
         let judgement = if near_other {
@@ -1170,6 +1227,12 @@ mod tests {
         let bytes = parallel_fixture((3, 2));
         let e = parse_midi(&bytes, "parallel.mid", None).unwrap();
         assert_eq!(e.track_names, vec!["Conductor", "Drums", "Other"]);
+        assert_eq!(e.playable_tracks.len(), 1);
+        assert_eq!(e.playable_tracks[0].index, 1);
+        assert_eq!(
+            e.playable_tracks[0].instruments,
+            vec![Instrument::Snare, Instrument::Kick, Instrument::PedalHat]
+        );
         assert_eq!(e.selected_track, 1);
         assert_eq!((e.meter_numerator, e.meter_denominator), (3, 4));
         assert!((e.tempo_bpm - 100.0).abs() < 0.01);
@@ -1184,8 +1247,17 @@ mod tests {
             e.hits.iter().map(|hit| hit.instrument).collect::<Vec<_>>(),
             vec![Instrument::Kick, Instrument::Snare, Instrument::PedalHat]
         );
+        assert_eq!(
+            e.hits.iter().map(|hit| hit.hand).collect::<Vec<_>>(),
+            vec![Hand::R, Hand::L, Hand::R]
+        );
         assert!(
-            e.warnings
+            !e.warnings
+                .iter()
+                .any(|warning| warning.contains("no aligned R/L"))
+        );
+        assert!(
+            !e.warnings
                 .iter()
                 .any(|warning| warning.contains("Multiple note tracks"))
         );
@@ -1275,13 +1347,19 @@ mod tests {
         for (beats, expected_duration) in cases {
             let mut hits = rhythm_hits(&beats);
             infer_notation(&mut hits, (4, 4));
-            assert!(hits.iter().all(|hit| {
-                (hit.notation_duration_beats - expected_duration).abs() < 0.001
-            }), "expected duration {expected_duration}, got {:?}", hits.iter().map(|hit| hit.notation_duration_beats).collect::<Vec<_>>());
-            assert!(hits
-                .iter()
-                .zip(beats)
-                .all(|(hit, beat)| (hit.notation_beat - beat).abs() < 0.001));
+            assert!(
+                hits.iter()
+                    .all(|hit| { (hit.notation_duration_beats - expected_duration).abs() < 0.001 }),
+                "expected duration {expected_duration}, got {:?}",
+                hits.iter()
+                    .map(|hit| hit.notation_duration_beats)
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                hits.iter()
+                    .zip(beats)
+                    .all(|(hit, beat)| (hit.notation_beat - beat).abs() < 0.001)
+            );
         }
     }
     #[test]
@@ -1486,10 +1564,11 @@ mod tests {
         assert_eq!(late.score, Some(53.7));
         assert_eq!(late.signed_mean_error_ms, Some(60.0));
         assert_eq!(late.timing_consistency_ms, Some(0.0));
-        assert!(late
-            .results
-            .iter()
-            .all(|result| result.judgement == Judgement::Late));
+        assert!(
+            late.results
+                .iter()
+                .all(|result| result.judgement == Judgement::Late)
+        );
 
         let first_ninety = expected
             .iter()
@@ -1559,7 +1638,10 @@ mod tests {
 
         let statistics = score_session(
             &expected,
-            &[obs(-10.0, Instrument::Snare), obs(1020.0, Instrument::Snare)],
+            &[
+                obs(-10.0, Instrument::Snare),
+                obs(1020.0, Instrument::Snare),
+            ],
             60.0,
             0.0,
             0.0,
@@ -1686,8 +1768,20 @@ mod tests {
                 kind: TrackEventKind::Meta(MetaMessage::TimeSignature(meter.0, meter.1, 24, 8)),
             },
             TrackEvent {
-                delta: u28::new(480),
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::Text(b"R")),
+            },
+            TrackEvent {
+                delta: u28::new(240),
+                kind: TrackEventKind::Meta(MetaMessage::Marker(b"L")),
+            },
+            TrackEvent {
+                delta: u28::new(240),
                 kind: TrackEventKind::Meta(MetaMessage::Tempo(u24::new(400_000))),
+            },
+            TrackEvent {
+                delta: u28::new(240),
+                kind: TrackEventKind::Meta(MetaMessage::CuePoint(b"R")),
             },
             TrackEvent {
                 delta: u28::new(0),

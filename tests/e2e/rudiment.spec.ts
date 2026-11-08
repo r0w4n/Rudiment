@@ -23,12 +23,75 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await page.getByRole('button',{name:'Stats'}).click();
   await expect(page.getByRole('dialog',{name:'Practice statistics'})).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(page.getByText(/Count-in ·/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
+  await page.getByRole('button', { name: /Start practice/ }).click();
   await page.getByRole('button', { name: /Pause/ }).click();
   await expect(page.getByText('Paused', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: /Resume/ }).click();
   await page.getByRole('button', { name: /Stop/ }).click();
   await expect(page.getByText('Stopped — results were not saved')).toBeVisible();
+});
+
+test('percussion engraving aligns the snare in a staff space and shows two complete systems', async ({ page }) => {
+  await page.goto('/');
+  const geometry = await page.locator('#notation').evaluate((notation) => {
+    const svg = notation.querySelector('svg') as SVGSVGElement;
+    const head = notation.querySelector('.score-note .vf-notehead > text') as SVGGraphicsElement;
+    const bounds = head.getBBox();
+    const matrix = head.getCTM()!;
+    const headY = matrix.b * (bounds.x + bounds.width / 2) + matrix.d * (bounds.y + bounds.height / 2) + matrix.f;
+    const staves = JSON.parse(svg.dataset.staffBounds || '[]') as Array<{top:number,bottom:number}>;
+    return {
+      headY,
+      expectedSnareY: staves[0].top + ((staves[0].bottom - staves[0].top) / 4) * 1.5,
+      systems: Number(svg.dataset.systemCount),
+      svgHeight: svg.getBoundingClientRect().height,
+      viewportHeight: notation.getBoundingClientRect().height,
+    };
+  });
+  expect(Math.abs(geometry.headY - geometry.expectedSnareY)).toBeLessThan(2.5);
+  expect(geometry.systems).toBeGreaterThanOrEqual(2);
+  expect(geometry.svgHeight).toBeLessThanOrEqual(geometry.viewportHeight + 1);
+
+  await page.setViewportSize({ width: 820, height: 1180 });
+  await page.reload();
+  const tablet = await page.locator('#notation').evaluate((notation) => ({
+    systems: Number((notation.querySelector('svg') as SVGSVGElement).dataset.systemCount),
+    svgHeight: (notation.querySelector('svg') as SVGSVGElement).getBoundingClientRect().height,
+    viewportHeight: notation.getBoundingClientRect().height,
+  }));
+  expect(tablet.systems).toBeGreaterThanOrEqual(2);
+  expect(tablet.svgHeight).toBeLessThanOrEqual(tablet.viewportHeight + 1);
+});
+
+test('live BPM changes retime the active transport without restarting practice', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await page.waitForTimeout(350);
+  const before = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
+  await page.getByLabel('Tempo in BPM').fill('120');
+  await expect(page.getByRole('button', { name: /Pause/ })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().transportBpm)).toBeCloseTo(120, 0);
+  await page.waitForTimeout(250);
+  const after = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
+  expect(after.transportTicks).toBeGreaterThan(before.transportTicks);
+  await page.getByRole('button', { name: /Stop/ }).click();
+});
+
+test('navigation and configuration controls stop an active practice cleanly', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
+  await expect(page.getByText('Practice stopped', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await page.locator('.midi-library summary').click();
+  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
+  await expect(page.getByText('Practice stopped', { exact: true })).toBeVisible();
 });
 
 test('demo hits complete through scoring and persist locally', async ({ page }) => {
@@ -167,12 +230,17 @@ test('bundled MIDI imports through the visible import callback and broken files 
   await expect(page.locator('.score-note')).toHaveCount(32);
   await expect(page.locator('#notation')).toContainText('R');
   await expect(page.locator('#notation')).toContainText('L');
+  await expect(page.locator('.warning-row')).toHaveCount(0);
+  await expect(page.locator('.file-details')).toBeHidden();
 
   const quarterChooser=page.waitForEvent('filechooser');
   await page.getByRole('button',{name:'Import MIDI'}).click();
   await (await quarterChooser).setFiles('web/public/exercises/quarter-note-reference.mid');
   await expect(page.getByText('quarter-note-reference',{exact:true}).first()).toBeVisible();
   await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
+  await expect(page.locator('.warning-row')).toHaveCount(0);
+  await expect(page.locator('.file-details')).toBeHidden();
+  await expect(page.getByLabel('Drum track')).toBeHidden();
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve, reject) => {
     const request = indexedDB.open('rudiment');
     request.onerror = () => reject(request.error);

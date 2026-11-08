@@ -36,7 +36,7 @@ function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),w
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
-  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], voices:new Set(), raf: 0, generation: 0, state: 'locked',
+  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], voices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null,
   async ensure() {
     this.state = 'loading';
     // Start/resume the context immediately while the Connect click still has
@@ -129,6 +129,18 @@ const audio = {
   stop() {
     this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
     const transport = Tone.getTransport(); transport.stop(); transport.cancel(0); transport.seconds = 0;
+    this.activeRun=null;
+  },
+  setTempo(bpm) {
+    const requested=Math.max(30,Math.min(240,Number(bpm)||60)),run=this.activeRun;
+    if(!run)return false;
+    run.tempoScale=requested/run.sourceBpm;
+    const transport=Tone.getTransport(),elapsed=transport.ticks/transport.PPQ;
+    const rawBeat=run.offset+elapsed-run.countBeats,exerciseBeat=Math.max(run.offset,rawBeat);
+    const value=tempoAtBeat(exerciseBeat,run.tempoMap,run.sourceBpm)*run.tempoScale;
+    transport.bpm.setValueAtTime(value,Tone.now());
+    if(rawBeat<0)run.runPerformance=performance.now()+(-rawBeat)*60000/value;
+    return true;
   },
   async start(options, onFrame, onDone) {
     await this.ensure(); this.stop(); const generation = this.generation;
@@ -136,8 +148,9 @@ const audio = {
     const remaining = Math.max(0, options.totalBeats - offset), startDelay = .16;
     const countInSeconds=countBeats*60/initialBpm,runAudio = this.raw.currentTime + startDelay + countInSeconds;
     const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
+    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,runPerformance};
     let step = 0; transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
-    for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>transport.bpm.setValueAtTime(change.bpm*tempoScale,time),position);}
+    for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time),position);}
     transport.scheduleRepeat(time => {
       const localBeat = step / subdivision, globalBeat = localBeat < countBeats ? localBeat : offset + localBeat - countBeats;
       if (options.metronome) this.click(time, Number.isInteger(globalBeat) && Math.round(globalBeat) % options.meter === 0, options.timbre);
@@ -150,7 +163,7 @@ const audio = {
       // scheduling lead-in. Without the clamp, resuming visibly jumps the
       // playhead backwards before the Tone transport starts.
       const now = performance.now(), elapsedBeats=transport.ticks/transport.PPQ;
-      const beat = offset + elapsedBeats-countBeats; onFrame(beat, now, runPerformance);
+      const beat = offset + elapsedBeats-countBeats; onFrame(beat, now, this.activeRun?.runPerformance??runPerformance);
       if (elapsedBeats >= countBeats+remaining) { this.stop(); onDone(); } else this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
@@ -163,8 +176,8 @@ const audio = {
   }
 };
 
-const SCORE_TOP_MARGIN=42,SCORE_ROW_HEIGHT=196,SCORE_BOTTOM_MARGIN=24;
-let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, rowHeight:SCORE_ROW_HEIGHT, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
+let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
 let scoreResizeObserver=null;
 const handText = hand => hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·';
 const durationTable=[[4,'w',false,false],[3,'h',true,false],[2,'h',false,false],[1.5,'q',true,false],[1,'q',false,false],[.75,'8',true,false],[2/3,'q',false,true],[.5,'8',false,false],[.375,'16',true,false],[1/3,'8',false,true],[.25,'16',false,false],[1/6,'16',false,true],[.125,'32',false,false]];
@@ -186,7 +199,7 @@ function tupletsFor(slots) {
 }
 function pitchForHit(hit) {
   const note=Number(hit.note),byNote={
-    35:'f/4',36:'f/4',37:'b/4/x',38:'b/4',39:'a/5/x',40:'b/4',
+    35:'f/4',36:'f/4',37:'c/5/x',38:'c/5',39:'a/5/x',40:'c/5',
     41:'g/4',42:'g/5/x',43:'a/4',44:'g/5/x',45:'b/4',46:'g/5/x',
     47:'d/5',48:'e/5',49:'a/5/x',50:'f/5',51:'d/5/x',52:'a/5/x',
     53:'f/5/D2',54:'g/5/x',55:'a/5/x',56:'c/5',57:'a/5/x',
@@ -197,7 +210,7 @@ function pitchForHit(hit) {
     80:'a/5/x',81:'a/5/x'
   };
   if(Number.isInteger(note)&&byNote[note])return byNote[note];
-  return ({kick:'f/4',snare:'b/4',closed_hat:'g/5/x',open_hat:'g/5/x',pedal_hat:'g/5/x',ride:'d/5/x',crash:'a/5/x',tom:'c/5',other_percussion:'c/5/x'})[hit.instrument]??'b/4';
+  return ({kick:'f/4',snare:'c/5',closed_hat:'g/5/x',open_hat:'g/5/x',pedal_hat:'g/5/x',ride:'d/5/x',crash:'a/5/x',tom:'c/5',other_percussion:'c/5/x'})[hit.instrument]??'c/5';
 }
 function instrumentForHit(hit) {
   if(hit.instrument)return hit.instrument;
@@ -225,7 +238,7 @@ function renderScore(exercise) {
   const singleLine=exercise.staff_mode==='single_line'&&hits.length>0&&hits.every(hit=>instrumentForHit(hit)==='snare');
   const width=Math.max(280,element.clientWidth),availableWidth=Math.max(240,width-28);
   const compactLandscape=window.innerHeight<=600&&window.innerWidth>window.innerHeight;
-  const scoreTopMargin=compactLandscape?38:SCORE_TOP_MARGIN,scoreRowHeight=compactLandscape?138:SCORE_ROW_HEIGHT,scoreBottomMargin=compactLandscape?10:SCORE_BOTTOM_MARGIN;
+  const scoreTopMargin=compactLandscape?25:SCORE_TOP_MARGIN,scoreBottomMargin=compactLandscape?7:SCORE_BOTTOM_MARGIN;
   const renderer=new Renderer(element,Renderer.Backends.SVG);
   const notesMeta=[],barLayouts=[],staves=[],barSlots=new Map(),barSlotBeats=new Map(),beams=[],tuplets=[],eventHitsByNote=new Map();
   const firstStave=new Stave(14,scoreTopMargin,availableWidth);
@@ -235,6 +248,10 @@ function renderScore(exercise) {
   const musicWidth=Math.max(120,availableWidth-headerWidth);
   const barsPerLine=Math.max(1,Math.min(compactLandscape?4:3,barCount,Math.floor(musicWidth/minimumBarWidth)));
   const barWidth=musicWidth/barsPerLine,lineCount=Math.ceil(barCount/barsPerLine);
+  const viewportHeight=Math.max(0,element.clientHeight);
+  const targetSystems=lineCount>=2&&viewportHeight>=230?2:1;
+  const fittedRowHeight=(viewportHeight-scoreTopMargin-scoreBottomMargin)/targetSystems;
+  const scoreRowHeight=Math.max(compactLandscape?98:108,Math.min(compactLandscape?118:SCORE_ROW_HEIGHT,fittedRowHeight||SCORE_ROW_HEIGHT));
   const height=scoreTopMargin+lineCount*scoreRowHeight+scoreBottomMargin;
   renderer.resize(width,height);
   const context=renderer.getContext(),systemBarCounts=[],systemWidths=[];
@@ -351,6 +368,7 @@ function renderScore(exercise) {
     svg.dataset.barsPerLine=String(barsPerLine);svg.dataset.staffLines=singleLine?'1':'5';
     svg.dataset.systemBarCounts=JSON.stringify(systemBarCounts);svg.dataset.systemWidths=JSON.stringify(systemWidths);
     svg.dataset.staffBounds=JSON.stringify(staves.map(stave=>({top:stave.getYForLine(singleLine?2:0),bottom:stave.getYForLine(singleLine?2:4)})));
+    svg.dataset.systemRowHeight=String(scoreRowHeight);svg.dataset.systemCount=String(lineCount);
   }
   for (const meta of notesMeta) {
     const group=meta.note.getSVGElement?.();
@@ -366,12 +384,12 @@ function renderScore(exercise) {
   }
   const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
   const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
-  scoreData={notes:notesMeta,svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,rowHeight:scoreRowHeight,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  scoreData={notes:notesMeta,svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
   applyJudgements(previousJudgements);updateScore(previousBeat,null);
   if(typeof ResizeObserver!=='undefined'){
     scoreResizeObserver??=new ResizeObserver(entries=>{
-      const observedWidth=entries[0]?.contentRect.width??scoreData.container?.clientWidth??0;
-      if(scoreData.exercise&&Math.abs(observedWidth-scoreData.viewportWidth)>1)renderScore(scoreData.exercise);
+      const rect=entries[0]?.contentRect,observedWidth=rect?.width??scoreData.container?.clientWidth??0,observedHeight=rect?.height??scoreData.container?.clientHeight??0;
+      if(scoreData.exercise&&(Math.abs(observedWidth-scoreData.viewportWidth)>1||Math.abs(observedHeight-scoreData.viewportHeight)>2))renderScore(scoreData.exercise);
     });
     scoreResizeObserver.observe(element);
   }
@@ -490,8 +508,8 @@ function bindDrop(callback){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeVoices:audio.voices.size,clickGain:audio.clickGain?.gain.value??0,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
-  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeVoices:audio.voices.size,clickGain:audio.clickGain?.gain.value??0,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
+  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,closeMidiLibrary,bindDrop,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')

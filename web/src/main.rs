@@ -2,11 +2,14 @@ use js_sys::{Array, Date, Function, Promise, Uint8Array};
 use leptos::prelude::*;
 use rudiment_core::{
     Exercise, ExpectedHit, InputSource, Instrument, Judgement, ObservedHit, SCORING_VERSION,
-    ScoringConfig, SessionSummary, TempoChange, beat_at_elapsed_ms, elapsed_ms_at_beat,
-    paradiddle, parse_midi, score_session_with_tempo_map,
+    ScoringConfig, SessionSummary, TempoChange, beat_at_elapsed_ms, elapsed_ms_at_beat, paradiddle,
+    parse_midi, score_session_with_tempo_map,
 };
 use serde::{Deserialize, Serialize};
-use std::{cell::{Cell, RefCell}, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
@@ -22,6 +25,8 @@ extern "C" {
     fn set_volumes(snare: f64, click: f64);
     #[wasm_bindgen(js_namespace = rudiment, js_name = startAudio)]
     fn start_audio(options: JsValue, frame: &Function, done: &Function) -> Promise;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = setAudioTempo)]
+    fn set_audio_tempo(bpm: f64) -> bool;
     #[wasm_bindgen(js_namespace = rudiment, js_name = stopAudio)]
     fn stop_audio();
     #[wasm_bindgen(js_namespace = rudiment, js_name = startCalibration)]
@@ -240,11 +245,10 @@ fn live_accuracy(items: &[LiveJudgement]) -> (Option<f64>, usize, usize, usize, 
         .iter()
         .filter(|item| item.judgement == Judgement::Missed)
         .count();
-    let mut score = (assessed.iter().map(|item| item.note_score).sum::<f64>()
-        / assessed.len() as f64
-        * 10.0)
-        .round()
-        / 10.0;
+    let mut score =
+        (assessed.iter().map(|item| item.note_score).sum::<f64>() / assessed.len() as f64 * 10.0)
+            .round()
+            / 10.0;
     if perfect < assessed.len() && score >= 100.0 {
         score = 99.9;
     }
@@ -274,6 +278,69 @@ fn expanded_tempo_map(exercise: &Exercise, loops: u8) -> Vec<TempoChange> {
                 })
         })
         .collect()
+}
+
+fn scaled_tempo_map(exercise: &Exercise, loops: u8, bpm: f64) -> Vec<TempoChange> {
+    let scale = bpm / exercise.tempo_bpm.max(1.0);
+    expanded_tempo_map(exercise, loops)
+        .into_iter()
+        .map(|mut change| {
+            change.bpm *= scale;
+            change
+        })
+        .collect()
+}
+
+fn retime_tempo_map(
+    existing: &[TempoChange],
+    exercise: &Exercise,
+    loops: u8,
+    beat: f64,
+    bpm: f64,
+) -> Vec<TempoChange> {
+    let source = expanded_tempo_map(exercise, loops);
+    let scale = bpm / exercise.tempo_bpm.max(1.0);
+    let source_current = source
+        .iter()
+        .take_while(|change| change.beat <= beat + 0.000_001)
+        .last()
+        .map(|change| change.bpm)
+        .unwrap_or(exercise.tempo_bpm);
+    let mut result = existing
+        .iter()
+        .filter(|change| change.beat < beat - 0.000_001)
+        .cloned()
+        .collect::<Vec<_>>();
+    result.push(TempoChange {
+        tick: (beat.max(0.0) * exercise.ticks_per_beat as f64).round() as u64,
+        beat: beat.max(0.0),
+        bpm: source_current * scale,
+    });
+    result.extend(
+        source
+            .into_iter()
+            .filter(|change| change.beat > beat + 0.000_001)
+            .map(|mut change| {
+                change.bpm *= scale;
+                change
+            }),
+    );
+    result
+}
+
+fn tempo_label(instrument: Instrument) -> &'static str {
+    match instrument {
+        Instrument::Snare => "snare",
+        Instrument::Kick => "kick",
+        Instrument::ClosedHat => "closed hi-hat",
+        Instrument::OpenHat => "open hi-hat",
+        Instrument::PedalHat => "pedal hi-hat",
+        Instrument::Ride => "ride",
+        Instrument::Crash => "crash",
+        Instrument::Tom => "toms",
+        Instrument::OtherPercussion => "other percussion",
+        Instrument::Unknown => "unknown notes",
+    }
 }
 
 fn json_compatible<T: Serialize>(value: &T) -> Result<JsValue, serde_wasm_bindgen::Error> {
@@ -325,11 +392,8 @@ fn visible_judgements(
             }),
             expected_beat: result.expected_beat.map(|beat| beat % exercise_length),
             actual_beat: result.observed_ms.map(|observed_ms| {
-                beat_at_elapsed_ms(
-                    observed_ms - latency_ms - session_start_ms,
-                    bpm,
-                    tempo_map,
-                ) % exercise_length
+                beat_at_elapsed_ms(observed_ms - latency_ms - session_start_ms, bpm, tempo_map)
+                    % exercise_length
             }),
             instrument: result.instrument,
             judgement: result.judgement,
@@ -443,6 +507,7 @@ fn App() -> impl IntoView {
     let calibration_errors = RwSignal::new(Vec::<f64>::new());
     let on_time_ms = RwSignal::new(40.0);
     let excellent_ms = RwSignal::new(20.0);
+    let runtime_tempo_map = RwSignal::new(scaled_tempo_map(&paradiddle(), 1, 60.0));
 
     let save_current_settings = Rc::new(move || {
         persist_settings(Settings {
@@ -468,12 +533,15 @@ fn App() -> impl IntoView {
     let finish_run: Rc<dyn Fn()> = Rc::new(move || {
         phase.set("finishing".into());
         let expected = expanded_hits(&exercise.get_untracked(), loops.get_untracked());
-        let current_exercise = exercise.get_untracked();
-        let tempo_map = expanded_tempo_map(&current_exercise, loops.get_untracked());
+        let tempo_map = runtime_tempo_map.get_untracked();
+        let scoring_bpm = tempo_map
+            .first()
+            .map(|change| change.bpm)
+            .unwrap_or(bpm.get_untracked());
         let summary = score_session_with_tempo_map(
             &expected,
             &observed.get_untracked(),
-            bpm.get_untracked(),
+            scoring_bpm,
             run_start_ms.get_untracked(),
             latency_ms.get_untracked(),
             ScoringConfig {
@@ -510,10 +578,8 @@ fn App() -> impl IntoView {
             })
             .max_by(|a, b| a.ended_at.cmp(&b.ended_at))
             .cloned();
-        comparison.set(
-            previous
-                .and_then(|item| Some(current.summary.score? - item.summary.score?)),
-        );
+        comparison
+            .set(previous.and_then(|item| Some(current.summary.score? - item.summary.score?)));
         if let Ok(value) = serde_wasm_bindgen::to_value(&current) {
             spawn_local(async move {
                 let _ = JsFuture::from(save_session(value)).await;
@@ -544,13 +610,27 @@ fn App() -> impl IntoView {
             let current_exercise = exercise.get_untracked();
             let total = exercise_beats(&current_exercise) * loops.get_untracked() as f64;
             let tempo_map = expanded_tempo_map(&current_exercise, loops.get_untracked());
-            let tempo_events = tempo_map.iter().map(|change|serde_json::json!({"beat":change.beat,"bpm":change.bpm})).collect::<Vec<_>>();
+            if offset <= 0.000_001 {
+                runtime_tempo_map.set(scaled_tempo_map(
+                    &current_exercise,
+                    loops.get_untracked(),
+                    bpm.get_untracked(),
+                ));
+            }
+            let tempo_events = tempo_map
+                .iter()
+                .map(|change| serde_json::json!({"beat":change.beat,"bpm":change.bpm}))
+                .collect::<Vec<_>>();
             let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":beats_per_bar(&current_exercise),"totalBeats":total,"offsetBeat":offset,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked()})).unwrap_or(JsValue::NULL);
-            let score_tempo_map = tempo_map.clone();
             let frame = Closure::wrap(Box::new(move |beat: f64, now: f64, start: f64| {
                 progress.set(beat);
+                let score_tempo_map = runtime_tempo_map.get_untracked();
+                let scoring_bpm = score_tempo_map
+                    .first()
+                    .map(|change| change.bpm)
+                    .unwrap_or(bpm.get_untracked());
                 let session_start =
-                    start - elapsed_ms_at_beat(offset, bpm.get_untracked(), &score_tempo_map);
+                    start - elapsed_ms_at_beat(offset, scoring_bpm, &score_tempo_map);
                 run_start_ms.set(session_start);
                 if beat >= 0.0 && phase.get_untracked() == "count_in" {
                     phase.set("running".into());
@@ -567,7 +647,7 @@ fn App() -> impl IntoView {
                     let summary = score_session_with_tempo_map(
                         &expected,
                         &observed.get_untracked(),
-                        bpm.get_untracked(),
+                        scoring_bpm,
                         session_start,
                         latency_ms.get_untracked(),
                         ScoringConfig {
@@ -586,7 +666,7 @@ fn App() -> impl IntoView {
                         summary,
                         now,
                         session_start,
-                        bpm.get_untracked(),
+                        scoring_bpm,
                         &score_tempo_map,
                         base,
                         latency_ms.get_untracked(),
@@ -651,6 +731,42 @@ fn App() -> impl IntoView {
         feedback.set("Ready — press Start to practise".into());
     });
 
+    let stop_for_navigation: Rc<dyn Fn()> = Rc::new(move || {
+        if matches!(
+            phase.get_untracked().as_str(),
+            "running" | "count_in" | "paused"
+        ) {
+            stop_audio();
+            observed.set(vec![]);
+            live.set(vec![]);
+            result.set(None);
+            progress.set(-1.0);
+            clear_score_feedback();
+            phase.set("idle".into());
+            feedback.set("Practice stopped".into());
+        }
+    });
+
+    let change_tempo: Rc<dyn Fn(f64)> = Rc::new(move |value| {
+        let value = value.clamp(30.0, 240.0);
+        bpm.set(value);
+        if matches!(
+            phase.get_untracked().as_str(),
+            "running" | "count_in" | "paused"
+        ) {
+            let current_exercise = exercise.get_untracked();
+            let beat = progress.get_untracked().max(0.0);
+            runtime_tempo_map.set(retime_tempo_map(
+                &runtime_tempo_map.get_untracked(),
+                &current_exercise,
+                loops.get_untracked(),
+                beat,
+                value,
+            ));
+            set_audio_tempo(value);
+        }
+    });
+
     let start_new_run: Rc<dyn Fn(u8)> = {
         let launch = launch_run.clone();
         Rc::new(move |count_bars| {
@@ -669,8 +785,7 @@ fn App() -> impl IntoView {
     let hit_input: Rc<dyn Fn(f64, Instrument, u8, InputSource, Option<u8>, Option<u8>)> = Rc::new(
         move |timestamp, instrument, velocity, source, raw_note, raw_channel| {
             if !snare_muted.get_untracked() && !play_snare(velocity) {
-                audio_state
-                    .set("Audio is locked — start practice once to monitor drums".into());
+                audio_state.set("Audio is locked — start practice once to monitor drums".into());
             }
             input_mode.set(source);
             if !calibration_targets.get_untracked().is_empty() {
@@ -718,11 +833,15 @@ fn App() -> impl IntoView {
             observed.update(|items| items.push(event));
             let expected = expanded_hits(&exercise.get_untracked(), loops.get_untracked());
             let session_start = run_start_ms.get_untracked();
-            let tempo_map = expanded_tempo_map(&exercise.get_untracked(), loops.get_untracked());
+            let tempo_map = runtime_tempo_map.get_untracked();
+            let scoring_bpm = tempo_map
+                .first()
+                .map(|change| change.bpm)
+                .unwrap_or(bpm.get_untracked());
             let summary = score_session_with_tempo_map(
                 &expected,
                 &observed.get_untracked(),
-                bpm.get_untracked(),
+                scoring_bpm,
                 session_start,
                 latency_ms.get_untracked(),
                 ScoringConfig {
@@ -737,7 +856,7 @@ fn App() -> impl IntoView {
                 summary,
                 timestamp,
                 session_start,
-                bpm.get_untracked(),
+                scoring_bpm,
                 &tempo_map,
                 base,
                 latency_ms.get_untracked(),
@@ -756,53 +875,69 @@ fn App() -> impl IntoView {
                     Judgement::Extra => "Extra hit",
                     _ => "Hit",
                 };
-                feedback.set(if matches!(
-                    result.judgement,
-                    Judgement::Perfect
-                        | Judgement::Good
-                        | Judgement::OnTime
-                        | Judgement::Early
-                        | Judgement::Late
-                ) {
-                    format!("{label} · {:+.0} ms", result.error_ms)
-                } else {
-                    label.into()
-                });
+                feedback.set(
+                    if matches!(
+                        result.judgement,
+                        Judgement::Perfect
+                            | Judgement::Good
+                            | Judgement::OnTime
+                            | Judgement::Early
+                            | Judgement::Late
+                    ) {
+                        format!("{label} · {:+.0} ms", result.error_ms)
+                    } else {
+                        label.into()
+                    },
+                );
             }
             live.set(visible);
         },
     );
 
-    let file_callback: Rc<Closure<dyn FnMut(Uint8Array, String, String, JsValue)>> = Rc::new(Closure::wrap(
-        Box::new(move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
-            if !error.is_empty() {
-                import_error.set(Some(error));
-                return;
-            }
-            let save_to_library = save_to_library.as_bool().unwrap_or(true);
-            let data = bytes.to_vec();
-            match parse_midi(&data, &name, None) {
-                Ok(parsed) => {
-                    bpm.set(parsed.tempo_bpm.clamp(30.0, 240.0).round());
-                    import_error.set(None);
-                    imported_bytes.set(data.clone());
-                    imported_name.set(name.clone());
-                    let metadata = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
-                    let bytes_copy = Uint8Array::from(data.as_slice());
-                    let hash = parsed.content_hash.clone();
-                    if save_to_library {
-                        selected_import.set(Some(hash.clone()));
-                        let last_hash = hash.clone();
-                        spawn_local(async move {
-                            if let Err(error) =
-                                JsFuture::from(save_last_import(JsValue::from_str(&last_hash))).await
-                            {
-                                import_error.set(Some(format!(
+    let file_callback: Rc<Closure<dyn FnMut(Uint8Array, String, String, JsValue)>> = Rc::new(
+        Closure::wrap(Box::new(
+            move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
+                if matches!(
+                    phase.get_untracked().as_str(),
+                    "running" | "count_in" | "paused"
+                ) {
+                    stop_audio();
+                    observed.set(vec![]);
+                    live.set(vec![]);
+                    progress.set(-1.0);
+                    clear_score_feedback();
+                    phase.set("idle".into());
+                }
+                if !error.is_empty() {
+                    import_error.set(Some(error));
+                    return;
+                }
+                let save_to_library = save_to_library.as_bool().unwrap_or(true);
+                let data = bytes.to_vec();
+                match parse_midi(&data, &name, None) {
+                    Ok(parsed) => {
+                        bpm.set(parsed.tempo_bpm.clamp(30.0, 240.0).round());
+                        import_error.set(None);
+                        imported_bytes.set(data.clone());
+                        imported_name.set(name.clone());
+                        let metadata =
+                            serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
+                        let bytes_copy = Uint8Array::from(data.as_slice());
+                        let hash = parsed.content_hash.clone();
+                        if save_to_library {
+                            selected_import.set(Some(hash.clone()));
+                            let last_hash = hash.clone();
+                            spawn_local(async move {
+                                if let Err(error) =
+                                    JsFuture::from(save_last_import(JsValue::from_str(&last_hash)))
+                                        .await
+                                {
+                                    import_error.set(Some(format!(
                                     "MIDI loaded, but the last-selected setting could not be saved: {}",
                                     error.as_string().unwrap_or_else(|| format!("{error:?}"))
                                 )));
-                            }
-                            match JsFuture::from(save_import(&hash, &name, &bytes_copy, metadata)).await
+                                }
+                                match JsFuture::from(save_import(&hash, &name, &bytes_copy, metadata)).await
                             {
                                 Ok(_) => match JsFuture::from(load_imports()).await {
                                     Ok(value) => match serde_wasm_bindgen::from_value::<Vec<SavedMidiImport>>(value) {
@@ -823,29 +958,31 @@ fn App() -> impl IntoView {
                                     error.as_string().unwrap_or_else(|| format!("{error:?}"))
                                 ))),
                             }
-                        });
-                    } else {
-                        selected_import.set(None);
-                        spawn_local(async move {
-                            if let Err(error) =
-                                JsFuture::from(save_last_import(JsValue::NULL)).await
-                            {
-                                import_error.set(Some(format!(
+                            });
+                        } else {
+                            selected_import.set(None);
+                            spawn_local(async move {
+                                if let Err(error) =
+                                    JsFuture::from(save_last_import(JsValue::NULL)).await
+                                {
+                                    import_error.set(Some(format!(
                                     "Bundled MIDI loaded, but the last-selected setting could not be cleared: {}",
                                     error.as_string().unwrap_or_else(|| format!("{error:?}"))
                                 )));
-                            }
-                        });
+                                }
+                            });
+                        }
+                        exercise.set(parsed);
+                        result_modal_open.set(false);
+                        phase.set("idle".into());
+                        feedback.set("MIDI imported — review sticking and press Start".into());
                     }
-                    exercise.set(parsed);
-                    result_modal_open.set(false);
-                    phase.set("idle".into());
-                    feedback.set("MIDI imported — review sticking and press Start".into());
+                    Err(err) => import_error.set(Some(err.to_string())),
                 }
-                Err(err) => import_error.set(Some(err.to_string())),
-            }
-        }) as Box<dyn FnMut(Uint8Array, String, String, JsValue)>,
-    ));
+            },
+        )
+            as Box<dyn FnMut(Uint8Array, String, String, JsValue)>),
+    );
 
     let save_for_midi = save_current_settings.clone();
     let midi_hit = hit_input.clone();
@@ -964,9 +1101,8 @@ fn App() -> impl IntoView {
                         items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                         saved_imports.set(items);
                     }
-                    Err(error) => {
-                        import_error.set(Some(format!("Saved MIDI library could not load: {error}")))
-                    }
+                    Err(error) => import_error
+                        .set(Some(format!("Saved MIDI library could not load: {error}"))),
                 },
                 Err(error) => import_error.set(Some(format!(
                     "Saved MIDI library storage failed: {}",
@@ -987,10 +1123,7 @@ fn App() -> impl IntoView {
                     match serde_wasm_bindgen::from_value::<SavedMidiImport>(value) {
                         Ok(saved) => {
                             selected_import.set(Some(saved.hash));
-                            let function = callback
-                                .as_ref()
-                                .as_ref()
-                                .unchecked_ref::<Function>();
+                            let function = callback.as_ref().as_ref().unchecked_ref::<Function>();
                             let _ = function.call3(
                                 &JsValue::NULL,
                                 &Uint8Array::from(saved.bytes.as_slice()),
@@ -1218,6 +1351,15 @@ fn App() -> impl IntoView {
     let save_tempo_down = save_current_settings.clone();
     let save_tempo_input = save_current_settings.clone();
     let save_tempo_up = save_current_settings.clone();
+    let tempo_down = change_tempo.clone();
+    let tempo_input = change_tempo.clone();
+    let tempo_up = change_tempo.clone();
+    let stop_for_connect = stop_for_navigation.clone();
+    let stop_for_stats = stop_for_navigation.clone();
+    let stop_for_settings = stop_for_navigation.clone();
+    let stop_for_import = stop_for_navigation.clone();
+    let stop_for_library = stop_for_navigation.clone();
+    let stop_for_track = stop_for_navigation.clone();
     let save_welcome = save_current_settings.clone();
     let save_metronome = save_current_settings.clone();
     let save_countin = save_current_settings.clone();
@@ -1236,10 +1378,10 @@ fn App() -> impl IntoView {
         <header class="topbar">
           <a class="brand" href="#" aria-label="Rudiment home"><span class="brand-mark">"R"</span><span>"Rudiment"</span></a>
           <div class="exercise-heading"><span class="eyebrow">"CURRENT EXERCISE"</span><strong>{move || exercise.get().title}</strong><small>"4/4 · sticking and accents"</small></div>
-          <div class="tempo-control"><button aria-label="Decrease tempo" on:click=move |_|{bpm.update(|v|*v=(*v-1.0).max(30.0));save_tempo_down();}>"−"</button><label><input aria-label="Tempo in BPM" type="number" min="30" max="240" prop:value=move || bpm.get().round().to_string() on:input=move |event|{if let Ok(value)=event_target_value(&event).parse::<f64>(){bpm.set(value.clamp(30.0,240.0));save_tempo_input();}}/><span>"BPM"</span></label><button aria-label="Increase tempo" on:click=move |_|{bpm.update(|v|*v=(*v+1.0).min(240.0));save_tempo_up();}>"+"</button></div>
-          <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label="MIDI connection" on:click={let connect=connect_action.clone();move |_|connect()}><span class="status-dot"></span>{move || midi_status.get()}</button>
-          <button id="stats-trigger" class="stats-trigger" aria-haspopup="dialog" aria-expanded=move || stats_open.get().to_string() on:click=move |_|{stats_open.set(true);focus_stats_close();}>"Stats"</button>
-          <button class="icon-button" aria-label="Open settings" on:click=move |_|settings_open.set(true)>"⚙"</button>
+          <div class="tempo-control"><button aria-label="Decrease tempo" on:click=move |_|{tempo_down(bpm.get_untracked()-1.0);save_tempo_down();}>"−"</button><label><input aria-label="Tempo in BPM" type="number" min="30" max="240" prop:value=move || bpm.get().round().to_string() on:input=move |event|{if let Ok(value)=event_target_value(&event).parse::<f64>(){tempo_input(value);save_tempo_input();}}/><span>"BPM"</span></label><button aria-label="Increase tempo" on:click=move |_|{tempo_up(bpm.get_untracked()+1.0);save_tempo_up();}>"+"</button></div>
+          <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label="MIDI connection" on:click={let connect=connect_action.clone();move |_|{stop_for_connect();connect();}}><span class="status-dot"></span>{move || midi_status.get()}</button>
+          <button id="stats-trigger" class="stats-trigger" aria-haspopup="dialog" aria-expanded=move || stats_open.get().to_string() on:click=move |_|{stop_for_stats();stats_open.set(true);focus_stats_close();}>"Stats"</button>
+          <button class="icon-button" aria-label="Open settings" on:click=move |_|{stop_for_settings();settings_open.set(true);}>"⚙"</button>
         </header>
 
           <section class="workspace">
@@ -1248,9 +1390,9 @@ fn App() -> impl IntoView {
               <div class="score-meta">
                 <div><span class="mode-badge">{move || if selected_midi.get().is_some(){"MIDI INPUT"}else{"DEMO INPUT"}}</span><span>{move || if selected_midi.get().is_some(){"Hit your drum to start; incoming kit events use your saved mapping."}else{"Hit your drum or press J to start."}}</span></div>
                 <div class="score-actions">
-                  <button on:click={let callback=choose_cb.clone();move |_|choose_midi(callback.as_ref().as_ref().unchecked_ref())}>"Import MIDI"</button>
+                  <button on:click={let callback=choose_cb.clone();move |_|{stop_for_import();choose_midi(callback.as_ref().as_ref().unchecked_ref());}}>"Import MIDI"</button>
                   <details class="midi-library">
-                    <summary>{move || format!("MIDI library · {}",saved_imports.get().len()+1)}</summary>
+                    <summary on:click=move |_|stop_for_library()>{move || format!("MIDI library · {}",saved_imports.get().len()+1)}</summary>
                     <div class="midi-library-menu">
                       <div class="midi-library-entry bundled-entry">
                         <button class="library-load" on:click={let callback=choose_cb.clone();move |_|{
@@ -1307,10 +1449,31 @@ fn App() -> impl IntoView {
                       }}
                     </div>
                   </details>
+                  <details class=move || if imported_bytes.get().is_empty()||(exercise.get().warnings.is_empty()&&exercise.get().playable_tracks.len()<2){"file-details hidden"}else{"file-details"}>
+                    <summary>"File details"</summary>
+                    <div class="file-details-menu">
+                      <label class={move || if exercise.get().playable_tracks.len()>1{"track-picker"}else{"track-picker hidden"}}>
+                        <span>"Drum track"</span>
+                        <select aria-label="Drum track" prop:value=move || exercise.get().selected_track.to_string() on:change=move |event|{
+                          stop_for_track();
+                          let index=event_target_value(&event).parse::<usize>().unwrap_or(0);
+                          if let Ok(parsed)=parse_midi(&imported_bytes.get_untracked(),&imported_name.get_untracked(),Some(index)){exercise.set(parsed);}
+                        }>
+                          {move || exercise.get().playable_tracks.into_iter().map(|track|{
+                            let instruments=track.instruments.into_iter().map(tempo_label).collect::<Vec<_>>().join(", ");
+                            let label=if instruments.is_empty(){track.name}else{format!("{} — {}",track.name,instruments)};
+                            view!{<option value=track.index.to_string()>{label}</option>}
+                          }).collect_view()}
+                        </select>
+                      </label>
+                      <ul class=move || if exercise.get().warnings.is_empty(){"file-warnings hidden"}else{"file-warnings"}>
+                        {move || exercise.get().warnings.into_iter().map(|warning|view!{<li>{warning}</li>}).collect_view()}
+                      </ul>
+                    </div>
+                  </details>
                 </div>
               </div>
               <div id="notation" class="notation" aria-live="off"></div>
-              <div class=move || if exercise.get().warnings.is_empty()&&exercise.get().track_names.len()<2{"warning-row hidden"}else{"warning-row"}><span>{move || exercise.get().warnings.join(" · ")}</span><label class={move || if exercise.get().track_names.len()>1&&!imported_bytes.get().is_empty(){"track-picker"}else{"track-picker hidden"}}>"MIDI track"<select prop:value=move || exercise.get().selected_track.to_string() on:change=move |event|{let index=event_target_value(&event).parse::<usize>().unwrap_or(0);if let Ok(parsed)=parse_midi(&imported_bytes.get_untracked(),&imported_name.get_untracked(),Some(index)){exercise.set(parsed);}}>{move || exercise.get().track_names.into_iter().enumerate().map(|(index,name)|view!{<option value=index.to_string()>{name}</option>}).collect_view()}</select></label></div>
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
               <div class="position-row"><span>{move || {let bar_beats=beats_per_bar(&exercise.get());let current=(progress.get().max(0.0)/bar_beats).floor() as usize+1;format!("BAR {current} / {}",(exercise_beats(&exercise.get())*loops.get() as f64/bar_beats) as usize)}}</span><div class="timeline"><i style=move || format!("width:{:.2}%",(progress.get().max(0.0)/(exercise_beats(&exercise.get())*loops.get() as f64)*100.0).clamp(0.0,100.0))></i></div><span>{move || format!("{} / {} LOOP",((progress.get().max(0.0)/exercise_beats(&exercise.get())).floor() as u8+1).min(loops.get()),loops.get())}</span></div>
               <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|{result_modal_open.set(false);restore_result_focus();}>
@@ -1412,7 +1575,7 @@ fn App() -> impl IntoView {
               <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);feedback.set("Calibration: tap with each click".into());let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
-            <section><h3>"Timing feedback"</h3><p class="help">"Perfect hits are green (±20 ms by default), Good hits light green, Early hits orange, Late hits purple and missed notes red. Matching closes outside ±100 ms."</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(20.0).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(40.0);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
+            <section><h3>"Timing feedback"</h3><p class="help">"Perfect hits are green (±20 ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±100 ms."</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(20.0).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(40.0);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
             <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);latency_ms.set(0.0);on_time_ms.set(40.0);excellent_ms.set(20.0);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" on:click=move |_|settings_open.set(false)></button>
@@ -1423,4 +1586,27 @@ fn App() -> impl IntoView {
 fn main() {
     console_error_panic_hook::set_once();
     mount_to_body(App);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_tempo_change_preserves_elapsed_history_and_retimes_future_beats() {
+        let exercise = paradiddle();
+        let original = scaled_tempo_map(&exercise, 1, 60.0);
+        let changed = retime_tempo_map(&original, &exercise, 1, 4.0, 120.0);
+        let base = changed[0].bpm;
+        assert!((elapsed_ms_at_beat(4.0, base, &changed) - 4_000.0).abs() < 0.01);
+        assert!((elapsed_ms_at_beat(8.0, base, &changed) - 6_000.0).abs() < 0.01);
+        assert_eq!(
+            changed
+                .iter()
+                .find(|change| change.beat == 4.0)
+                .unwrap()
+                .bpm,
+            120.0
+        );
+    }
 }
