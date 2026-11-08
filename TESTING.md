@@ -10,20 +10,20 @@ npm run build
 npm run test:e2e
 ```
 
-Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguity, Note On velocity zero, instrument mapping, onset-derived written duration (including the short-gate quarter-note reference), deterministic simultaneous-hit matching, configurable timing boundaries, timing sign, misses, extras and wrong instruments. Browser tests cover the first-run workspace, bundled and file import, score-integrated missed-note feedback, continuous playhead/pause/resume, rapid independent audio voices, keyboard/pad lifecycle, local persistence, responsive layout, looping and simulated MIDI permission/device/message/reconnect states.
+Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguity, Note On velocity zero, instrument mapping, onset-derived quarter/eighth/sixteenth/triplet values, mixed subdivisions and rests, short-gate quarter-note imports, deterministic simultaneous-hit matching, configurable timing boundaries, timing sign, misses, extras and wrong instruments. Browser tests cover the first-run workspace, bundled and file import, saved MIDI library restoration/deletion, statistics dialog behavior, removed snare demo controls, score-integrated missed-note feedback, continuous playhead/pause/resume, rapid independent audio voices, keyboard lifecycle, local persistence, responsive layout, looping and simulated MIDI permission/device/message/reconnect states.
 
 ## Demo checklist (no hardware)
 
 1. Open `http://127.0.0.1:5173` in Chrome. Confirm Single Paradiddle, 60 BPM, Demo input and “Try without drums” are visible.
-2. Tap Preview Acoustic snare. Confirm a recorded snare is heard and the audio state changes to ready.
+2. Start practice to unlock browser audio; confirm the count-in and exercise click sound.
 3. Start. Confirm four accented count-in clicks at 60 BPM, then the playhead begins at bar 1 and follows the notation.
-4. Press `J` and tap the pad. Confirm signed Hit/Early/Late feedback and audible velocity-sensitive snare playback.
+4. Press `J` for demo snare hits. Confirm signed Hit/Early/Late feedback and audible velocity-sensitive snare playback.
    Confirm Excellent/on-time notes turn green, early notes blue, late notes yellow, and expired misses red without relaying out the score. Adjust both timing thresholds in Settings and repeat.
 5. Pause/resume with Space, then test Stop and Restart. A natural completion must show and save a real 0–100 result.
 6. Practise the same tempo/input twice; confirm the second result compares against the previous run. Reload and check that the history count remains.
 7. Select “Load bundled .mid”. Confirm R/L sticking and accents render through the same import callback. Drag `single-stroke-roll.mid` onto the score and try the ambiguous fixture to inspect its warning.
-8. Open settings: preview all three click timbres, toggle the exercise click and app snare independently, change loops/follow mode, run eight-tap calibration and Reset it.
-9. Import `web/public/exercises/quarter-note-reference.mid`. Confirm eight quarter notes render even though each raw MIDI gate is only 110 ticks. The canonical model retains both the raw gate and inferred written duration.
+8. Open settings: preview all three click timbres, toggle the exercise click and app snare independently, change loops, run eight-tap calibration and Reset it.
+9. Import `web/public/exercises/quarter-note-reference.mid`. Confirm eight quarter notes render even though each raw MIDI gate is only 110 ticks. Open the MIDI library, reload the saved file, reload the browser and verify it restores the last selected import; delete it from the library and confirm the prompt.
 
 ## Physical Chrome + USB drum-kit checklist
 

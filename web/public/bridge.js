@@ -43242,6 +43242,16 @@ var RudimentBridge = (() => {
       if (!db.objectStoreNames.contains("profiles")) db.createObjectStore("profiles", { keyPath: "id" });
     }
   });
+  async function loadSavedImport(hash) {
+    const item = await (await dbPromise).get("imports", hash);
+    if (!item) throw new Error("This MIDI file is no longer in the local library.");
+    if (!midiFileCallback) throw new Error("MIDI import is not ready yet.");
+    midiFileCallback(new Uint8Array(item.bytes), item.name, "");
+  }
+  async function saveLastImport(hash) {
+    const db = await dbPromise, current = await db.get("settings", "app");
+    await db.put("settings", { key: "app", value: { ...current?.value || {}, lastImportHash: hash || null } });
+  }
   var put = async (store, value) => (await dbPromise).put(store, value);
   var all = async (store) => (await dbPromise).getAll(store);
   var clear = async (store) => (await dbPromise).clear(store);
@@ -43256,6 +43266,18 @@ var RudimentBridge = (() => {
     if (lower === upper) return [{ index: lower, weight: 1 }];
     return [{ index: lower, weight: Math.cos(mix * Math.PI / 2) }, { index: upper, weight: Math.sin(mix * Math.PI / 2) }];
   };
+  function tempoAtBeat(beat, map, initialBpm) {
+    let bpm = initialBpm;
+    for (const change of map) {
+      if (change.beat > beat) break;
+      bpm = change.bpm;
+    }
+    return bpm;
+  }
+  function transportPositionAtBeat(beat, meter) {
+    const bars = Math.floor(beat / meter), within = beat - bars * meter;
+    return `${bars}:${within}:0`;
+  }
   var audio = {
     raw: null,
     snareGain: null,
@@ -43395,25 +43417,30 @@ var RudimentBridge = (() => {
       await this.ensure();
       this.stop();
       const generation = this.generation;
-      const transport = getTransport(), beatSeconds = 60 / options.bpm, countBeats = options.countInBars * options.meter;
-      const offset = options.offsetBeat || 0, remaining = Math.max(0, options.totalBeats - offset), startDelay = 0.16;
-      const runAudio = this.raw.currentTime + startDelay + countBeats * beatSeconds, finishAudio = runAudio + remaining * beatSeconds + 0.14;
-      const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = beatSeconds / subdivision;
+      const transport = getTransport(), tempoMap = (options.tempoMap || []).slice().sort((a, b) => a.beat - b.beat), sourceBpm = options.sourceBpm || options.bpm, tempoScale = options.bpm / sourceBpm, offset = options.offsetBeat || 0, initialBpm = tempoAtBeat(offset, tempoMap, sourceBpm) * tempoScale, countBeats = options.countInBars * options.meter;
+      const remaining = Math.max(0, options.totalBeats - offset), startDelay = 0.16;
+      const countInSeconds = countBeats * 60 / initialBpm, runAudio = this.raw.currentTime + startDelay + countInSeconds;
+      const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = `${4 * subdivision}n`;
       let step = 0;
-      transport.bpm.value = options.bpm;
+      transport.bpm.value = initialBpm;
       transport.timeSignature = options.meter;
+      for (const change of tempoMap) {
+        if (change.beat <= offset) continue;
+        const position = transportPositionAtBeat(countBeats + change.beat - offset, options.meter);
+        transport.scheduleOnce((time) => transport.bpm.setValueAtTime(change.bpm * tempoScale, time), position);
+      }
       transport.scheduleRepeat((time) => {
         const localBeat = step / subdivision, globalBeat = localBeat < countBeats ? localBeat : offset + localBeat - countBeats;
         if (options.metronome) this.click(time, Number.isInteger(globalBeat) && Math.round(globalBeat) % options.meter === 0, options.timbre);
         step++;
-      }, interval, 0, (countBeats + remaining) * beatSeconds);
+      }, interval, 0);
       transport.start(`+${startDelay}`);
       const frame = () => {
         if (generation !== this.generation) return;
-        const now = performance.now(), lead = now - runPerformance;
-        const beat = offset + (countBeats > 0 ? lead : Math.max(0, lead)) / (beatSeconds * 1e3);
+        const now = performance.now(), elapsedBeats = transport.ticks / transport.PPQ;
+        const beat = offset + elapsedBeats - countBeats;
         onFrame(beat, now, runPerformance);
-        if (this.raw.currentTime >= finishAudio) {
+        if (elapsedBeats >= countBeats + remaining) {
           this.stop();
           onDone();
         } else this.raf = requestAnimationFrame(frame);
@@ -43438,15 +43465,19 @@ var RudimentBridge = (() => {
   var scoreData = { notes: [], svg: null, totalBeats: 16, meter: 4, container: null, bars: [], viewportWidth: 0, rowHeight: SCORE_ROW_HEIGHT, lastBeat: -Infinity, lastJudgements: [], judgementSignature: "" };
   var scoreResizeObserver = null;
   var handText = (hand) => hand === "R" ? "R" : hand === "L" ? "L" : "\xB7";
-  var durationTable = [[4, "w", false], [3, "h", true], [2, "h", false], [1.5, "q", true], [1, "q", false], [0.75, "8", true], [0.5, "8", false], [0.375, "16", true], [0.25, "16", false]];
+  var durationTable = [[4, "w", false, false], [3, "h", true, false], [2, "h", false, false], [1.5, "q", true, false], [1, "q", false, false], [0.75, "8", true, false], [2 / 3, "q", false, true], [0.5, "8", false, false], [0.375, "16", true, false], [1 / 3, "8", false, true], [0.25, "16", false, false], [1 / 6, "16", false, true], [0.125, "32", false, false]];
   var durationSpec = (beats) => durationTable.find(([value]) => Math.abs(value - beats) < 1e-3) ?? durationTable.at(-1);
-  var writtenDuration = (beats) => durationSpec(beats)[1];
+  var writtenDuration = (beats) => {
+    const [, duration, , tuplet] = durationSpec(beats);
+    return tuplet ? `${duration}t` : duration;
+  };
   function noteWithDuration(keys, beats, rest = false) {
-    const [value, duration, dotted] = durationSpec(beats), note = new StaveNote({ keys, duration: `${duration}${rest ? "r" : ""}`, clef: "percussion", stemDirection: 1 });
+    const [value, duration, dotted, tuplet] = durationSpec(beats), note = new StaveNote({ keys, duration: `${duration}${rest ? "r" : ""}`, clef: "percussion", stemDirection: 1 });
     if (dotted) {
       Dot.buildAndAttach([note], { all: !rest });
       note.applyTickMultiplier(3, 2);
     }
+    if (tuplet) note.rudimentTuplet = true;
     return note;
   }
   function restValues(gap) {
@@ -43458,6 +43489,20 @@ var RudimentBridge = (() => {
     }
     if (left > 1e-3) values.push(0.25);
     return values;
+  }
+  function tupletsFor(slots) {
+    const groups = [];
+    let run = [];
+    const flush = () => {
+      for (let index = 0; index + 2 < run.length; index += 3) groups.push(run.slice(index, index + 3));
+      run = [];
+    };
+    for (const slot of slots) {
+      if (slot.rudimentTuplet) run.push(slot);
+      else flush();
+    }
+    flush();
+    return groups.map((notes) => new Tuplet(notes, { numNotes: 3, notesOccupied: 2, bracketed: true }));
   }
   function pitchForHit(hit) {
     const note = Number(hit.note), byNote = {
@@ -43543,7 +43588,7 @@ var RudimentBridge = (() => {
     const singleLine = exercise.staff_mode === "single_line" && hits.length > 0 && hits.every((hit) => instrumentForHit(hit) === "snare");
     const width = Math.max(280, element.clientWidth), availableWidth = Math.max(240, width - 28);
     const renderer = new Renderer(element, Renderer.Backends.SVG);
-    const notesMeta = [], barLayouts = [], staves = [], barSlots = /* @__PURE__ */ new Map(), beams = [], eventHitsByNote = /* @__PURE__ */ new Map();
+    const notesMeta = [], barLayouts = [], staves = [], barSlots = /* @__PURE__ */ new Map(), beams = [], tuplets = [], eventHitsByNote = /* @__PURE__ */ new Map();
     const firstStave = new Stave(14, SCORE_TOP_MARGIN, availableWidth);
     firstStave.setConfigForLines(Array.from({ length: 5 }, (_, index) => ({ visible: !singleLine || index === 2 })));
     firstStave.setBegBarType(BarlineType.NONE).addClef("percussion").addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
@@ -43609,6 +43654,7 @@ var RudimentBridge = (() => {
         if (cursor < end - 1e-3) for (const value of restValues(end - cursor)) slots.push(noteWithDuration(["b/4"], value, true));
         barSlots.set(bar, slots);
         rowTickables.push(...slots);
+        tuplets.push(...tupletsFor(slots));
         beams.push(...Beam.generateBeams(slots, { groups: beamGroups, stemDirection: 1 }));
       }
       const voice = new Voice({ numBeats: (lastBar - firstBar) * metersPerBar, beatValue: 4 }).setStrict(false);
@@ -43618,6 +43664,7 @@ var RudimentBridge = (() => {
       for (const tickable of rowTickables) if (tickable.isRest?.()) tickable.getSVGElement?.()?.setAttribute("data-score-rest", "true");
     }
     for (const beam of beams) beam.setContext(context2).draw();
+    for (const tuplet of tuplets) tuplet.setContext(context2).draw();
     const svg = element.querySelector("svg");
     for (const [bar, slots] of barSlots) barLayouts[bar].xStart = slots[0]?.getAbsoluteX() ?? barLayouts[bar].xStart;
     for (let bar = 0; bar < barCount - 1; bar++) {
@@ -43668,6 +43715,7 @@ var RudimentBridge = (() => {
         group.dataset.systemRow = String(meta.row);
         group.dataset.scoreBar = String(meta.bar);
         group.dataset.dotted = String(durationSpec(meta.durationBeats)[2]);
+        group.dataset.tuplet = String(durationSpec(meta.durationBeats)[3]);
         group.dataset.midiNotes = eventHits.map((candidate) => candidate.note ?? 38).join(",");
         group.dataset.instruments = [...new Set(eventHits.map(instrumentForHit))].join(",");
         group.classList.add("score-note");
@@ -43751,7 +43799,7 @@ var RudimentBridge = (() => {
             halo.setAttribute("class", "judgement-halo");
             halo.setAttribute("cx", String(bounds.x + bounds.width / 2));
             halo.setAttribute("cy", String(bounds.y + bounds.height / 2));
-            halo.setAttribute("r", String(Math.max(6, bounds.width * 0.62)));
+            halo.setAttribute("r", String(Math.max(6, bounds.width * 0.72)));
             notehead.insertBefore(halo, head);
             if (judgement === "excellent") {
               group.classList.add("excellent-flash");
@@ -43902,6 +43950,7 @@ var RudimentBridge = (() => {
     }
   }
   function chooseMidi(callback) {
+    midiFileCallback = callback;
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".mid,.midi,audio/midi";
@@ -43918,7 +43967,9 @@ var RudimentBridge = (() => {
     }
   }
   var dropController;
+  var midiFileCallback;
   function bindDrop(callback) {
+    midiFileCallback = callback;
     dropController?.abort();
     dropController = new AbortController();
     const element = document.getElementById("score-card");
@@ -43947,10 +43998,6 @@ var RudimentBridge = (() => {
     ensureAudio: () => audio.ensure(),
     audioState: () => audio.state,
     audioDiagnostics: () => ({ state: audio.state, activeVoices: audio.voices.size, layerPeaks: [...audio.layerPeaks], layerGains: [...audio.layerGains], velocityGains: Array.from({ length: 127 }, (_, index) => velocityGain(index + 1)), velocityLayers: Array.from({ length: 127 }, (_, index) => velocityLayers(index + 1)) }),
-    previewSnare: async () => {
-      await audio.ensure();
-      audio.playSnare(112);
-    },
     playSnare: (velocity) => audio.playSnare(velocity),
     previewClick: async (timbre) => {
       await audio.ensure();
@@ -43986,6 +44033,16 @@ var RudimentBridge = (() => {
     },
     saveImport: (hash, name, bytes, metadata) => put("imports", { hash, name, bytes: Array.from(bytes), metadata, schemaVersion: 1 }),
     loadImports: () => all("imports"),
+    loadImport: (hash) => (async () => {
+      const db = await dbPromise;
+      return db.get("imports", hash);
+    })(),
+    loadSavedImport,
+    deleteImport: (hash) => (async () => {
+      const db = await dbPromise;
+      return db.delete("imports", hash);
+    })(),
+    saveLastImport,
     exportHistory: async () => downloadJson(JSON.stringify(await all("sessions"), null, 2), "rudiment-history.json")
   };
 })();

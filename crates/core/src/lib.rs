@@ -63,6 +63,13 @@ pub struct ExpectedHit {
     pub note: u8,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TempoChange {
+    pub tick: u64,
+    pub beat: f64,
+    pub bpm: f64,
+}
+
 #[derive(Debug, Clone)]
 struct RawMidiNote {
     tick: u64,
@@ -73,9 +80,64 @@ struct RawMidiNote {
 }
 
 fn nearest_written_value(beats: f64) -> f64 {
-    [4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.375, 0.25]
+    [
+        4.0,
+        3.0,
+        2.0,
+        1.5,
+        1.0,
+        0.75,
+        2.0 / 3.0,
+        0.5,
+        0.375,
+        1.0 / 3.0,
+        0.25,
+        1.0 / 6.0,
+        0.125,
+    ]
         .into_iter()
         .find(|value| *value <= beats + 0.001)
+        .unwrap_or(0.25)
+}
+
+fn rhythmic_grid(positions: &[f64]) -> f64 {
+    let intervals: Vec<f64> = positions
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|interval| *interval > 0.001)
+        .collect();
+    let candidates = [
+        4.0,
+        3.0,
+        2.0,
+        1.5,
+        1.0,
+        0.75,
+        2.0 / 3.0,
+        0.5,
+        0.375,
+        1.0 / 3.0,
+        0.25,
+        1.0 / 6.0,
+        0.125,
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|grid| {
+            let errors: Vec<f64> = intervals
+                .iter()
+                .map(|interval| {
+                    let multiple = (*interval / grid).round().max(1.0);
+                    (interval - multiple * grid).abs()
+                })
+                .collect();
+            (errors.iter().copied().fold(0.0, f64::max) <= 0.06)
+                .then(|| (grid, errors.iter().sum::<f64>()))
+        })
+        .min_by(|(a, a_error), (b, b_error)| {
+            a_error.total_cmp(b_error).then_with(|| b.total_cmp(a))
+        })
+        .map(|(grid, _)| grid)
         .unwrap_or(0.25)
 }
 
@@ -83,28 +145,43 @@ fn measure_beats(numerator: u8, denominator: u8) -> f64 {
     numerator as f64 * 4.0 / denominator.max(1) as f64
 }
 
-/// Infers written percussion values from quantised inter-onset spacing, never from short MIDI gate time.
+/// Infers written percussion values from onset spacing and bar context, never short MIDI gate time.
 fn infer_notation(hits: &mut [ExpectedHit], meter: (u8, u8)) {
     let bar_beats = measure_beats(meter.0, meter.1);
-    for hit in hits.iter_mut() {
-        hit.notation_beat = (hit.beat * 4.0).round() / 4.0;
-    }
-    let mut positions: Vec<f64> = hits.iter().map(|hit| hit.notation_beat).collect();
+    let mut positions: Vec<f64> = hits.iter().map(|hit| hit.beat).collect();
     positions.sort_by(f64::total_cmp);
     positions.dedup_by(|a, b| (*a - *b).abs() < 0.001);
+    let grid = rhythmic_grid(&positions);
+    for hit in hits.iter_mut() {
+        hit.notation_beat = (hit.beat / grid).round() * grid;
+    }
+    positions = hits.iter().map(|hit| hit.notation_beat).collect();
+    positions.sort_by(f64::total_cmp);
+    positions.dedup_by(|a, b| (*a - *b).abs() < 0.001);
+
     let mut counts: BTreeMap<i32, usize> = BTreeMap::new();
     for pair in positions.windows(2) {
         let delta = pair[1] - pair[0];
         if delta > 0.001 && delta <= bar_beats {
             let value = nearest_written_value(delta);
-            *counts.entry((value * 8.0) as i32).or_default() += 1;
+            *counts.entry((value * 24.0).round() as i32).or_default() += 1;
         }
     }
     let pulse = counts
         .into_iter()
         .max_by(|(a, ac), (b, bc)| ac.cmp(bc).then_with(|| b.cmp(a)))
-        .map(|(eighths, _)| eighths as f64 / 8.0)
+        .map(|(twenty_fourths, _)| twenty_fourths as f64 / 24.0)
         .unwrap_or(1.0);
+
+    let mut interval_counts: BTreeMap<i32, usize> = BTreeMap::new();
+    for pair in positions.windows(2) {
+        let delta = pair[1] - pair[0];
+        if delta > 0.001 && delta <= bar_beats {
+            *interval_counts
+                .entry((nearest_written_value(delta) * 24.0).round() as i32)
+                .or_default() += 1;
+        }
+    }
     for hit in hits.iter_mut() {
         let bar_end = ((hit.notation_beat / bar_beats).floor() + 1.0) * bar_beats;
         let next = positions
@@ -114,8 +191,15 @@ fn infer_notation(hits: &mut [ExpectedHit], meter: (u8, u8)) {
             .unwrap_or(bar_end)
             .min(bar_end);
         let gap = (next - hit.notation_beat).max(0.25);
+        let written_gap = nearest_written_value(gap);
+        let repeated_mixed_value = interval_counts
+            .get(&((written_gap * 24.0).round() as i32))
+            .copied()
+            .unwrap_or_default()
+            >= 2;
+        let infer_gap_as_note = gap <= pulse * 1.5 || repeated_mixed_value;
         hit.notation_duration_beats =
-            nearest_written_value(if gap <= pulse * 1.5 { gap } else { pulse }).min(gap);
+            nearest_written_value(if infer_gap_as_note { gap } else { pulse }).min(gap);
     }
 }
 
@@ -127,6 +211,8 @@ pub struct Exercise {
     pub schema_version: u16,
     pub ticks_per_beat: u16,
     pub tempo_bpm: f64,
+    #[serde(default)]
+    pub tempo_map: Vec<TempoChange>,
     pub meter_numerator: u8,
     pub meter_denominator: u8,
     pub hits: Vec<ExpectedHit>,
@@ -165,7 +251,7 @@ pub fn parse_midi(
         return Err(MidiError::TooManyEvents);
     }
 
-    let mut tempo = 500_000u32;
+    let mut tempo_events = BTreeMap::new();
     let mut meter = (4u8, 4u8);
     let mut names = vec![];
     let mut candidates: Vec<Vec<RawMidiNote>> = vec![];
@@ -182,8 +268,8 @@ pub fn parse_midi(
                 TrackEventKind::Meta(MetaMessage::TrackName(raw)) => {
                     name = String::from_utf8_lossy(raw).to_string()
                 }
-                TrackEventKind::Meta(MetaMessage::Tempo(v)) if tempo == 500_000 => {
-                    tempo = v.as_int()
+                TrackEventKind::Meta(MetaMessage::Tempo(v)) => {
+                    tempo_events.entry(tick).or_insert(v.as_int());
                 }
                 TrackEventKind::Meta(MetaMessage::TimeSignature(n, d, _, _)) => {
                     meter = (n, 2u8.saturating_pow(d as u32))
@@ -234,6 +320,16 @@ pub fn parse_midi(
         candidates.push(notes);
         lyrics_by_track.push(lyrics);
     }
+    tempo_events.entry(0).or_insert(500_000);
+    let tempo_map: Vec<TempoChange> = tempo_events
+        .into_iter()
+        .map(|(tick, micros_per_quarter)| TempoChange {
+            tick,
+            beat: tick as f64 / ppq as f64,
+            bpm: 60_000_000.0 / micros_per_quarter as f64,
+        })
+        .collect();
+    let tempo = tempo_map[0].bpm;
     let track_index = selected_track
         .filter(|i| *i < candidates.len())
         .unwrap_or_else(|| {
@@ -350,7 +446,8 @@ pub fn parse_midi(
         content_hash: hash,
         schema_version: 1,
         ticks_per_beat: ppq,
-        tempo_bpm: 60_000_000.0 / tempo as f64,
+        tempo_bpm: tempo,
+        tempo_map,
         meter_numerator: meter.0,
         meter_denominator: meter.1,
         hits,
@@ -398,6 +495,11 @@ pub fn paradiddle() -> Exercise {
         schema_version: 1,
         ticks_per_beat: 480,
         tempo_bpm: 60.0,
+        tempo_map: vec![TempoChange {
+            tick: 0,
+            beat: 0.0,
+            bpm: 60.0,
+        }],
         meter_numerator: 4,
         meter_denominator: 4,
         hits,
@@ -477,13 +579,71 @@ pub struct SessionSummary {
 }
 
 pub fn matching_window_ms(hits: &[ExpectedHit], idx: usize, bpm: f64) -> f64 {
-    let beat_ms = 60_000.0 / bpm.max(1.0);
+    matching_window_ms_with_tempo_map(hits, idx, bpm, &[])
+}
+
+pub fn elapsed_ms_at_beat(beat: f64, bpm: f64, tempo_map: &[TempoChange]) -> f64 {
+    if tempo_map.is_empty() {
+        return beat.max(0.0) * 60_000.0 / bpm.max(1.0);
+    }
+    let scale = bpm.max(1.0) / tempo_map[0].bpm.max(1.0);
+    let mut cursor = 0.0;
+    let mut current_bpm = tempo_map[0].bpm * scale;
+    let mut elapsed = 0.0;
+    for change in tempo_map.iter().skip(1) {
+        if change.beat >= beat {
+            break;
+        }
+        if change.beat > cursor {
+            elapsed += (change.beat - cursor) * 60_000.0 / current_bpm.max(1.0);
+        }
+        cursor = change.beat;
+        current_bpm = change.bpm * scale;
+    }
+    elapsed + (beat - cursor).max(0.0) * 60_000.0 / current_bpm.max(1.0)
+}
+
+pub fn beat_at_elapsed_ms(elapsed_ms: f64, bpm: f64, tempo_map: &[TempoChange]) -> f64 {
+    if tempo_map.is_empty() {
+        return elapsed_ms.max(0.0) * bpm.max(1.0) / 60_000.0;
+    }
+    let scale = bpm.max(1.0) / tempo_map[0].bpm.max(1.0);
+    let mut cursor = 0.0;
+    let mut current_bpm = tempo_map[0].bpm * scale;
+    let mut remaining = elapsed_ms.max(0.0);
+    for change in tempo_map.iter().skip(1) {
+        let segment_beats = change.beat - cursor;
+        if segment_beats <= 0.0 {
+            current_bpm = change.bpm * scale;
+            continue;
+        }
+        let segment_ms = segment_beats * 60_000.0 / current_bpm.max(1.0);
+        if remaining <= segment_ms {
+            return cursor + remaining * current_bpm / 60_000.0;
+        }
+        remaining -= segment_ms;
+        cursor = change.beat;
+        current_bpm = change.bpm * scale;
+    }
+    cursor + remaining * current_bpm / 60_000.0
+}
+
+pub fn matching_window_ms_with_tempo_map(
+    hits: &[ExpectedHit],
+    idx: usize,
+    bpm: f64,
+    tempo_map: &[TempoChange],
+) -> f64 {
     let current = hits[idx].beat;
     let distances = hits
         .iter()
         .enumerate()
         .filter(|(j, h)| *j != idx && h.beat != current)
-        .map(|(_, h)| (h.beat - current).abs() * beat_ms)
+        .map(|(_, h)| {
+            (elapsed_ms_at_beat(h.beat, bpm, tempo_map)
+                - elapsed_ms_at_beat(current, bpm, tempo_map))
+            .abs()
+        })
         .filter(|d| *d > 0.0);
     let nearest = distances.fold(f64::INFINITY, f64::min);
     if nearest.is_finite() {
@@ -519,6 +679,26 @@ pub fn score_session_with_config(
     latency_ms: f64,
     config: ScoringConfig,
 ) -> SessionSummary {
+    score_session_with_tempo_map(
+        expected,
+        observed,
+        bpm,
+        start_ms,
+        latency_ms,
+        config,
+        &[],
+    )
+}
+
+pub fn score_session_with_tempo_map(
+    expected: &[ExpectedHit],
+    observed: &[ObservedHit],
+    bpm: f64,
+    start_ms: f64,
+    latency_ms: f64,
+    config: ScoringConfig,
+    tempo_map: &[TempoChange],
+) -> SessionSummary {
     if expected.is_empty() {
         return SessionSummary {
             score: None,
@@ -533,14 +713,13 @@ pub fn score_session_with_config(
             results: vec![],
         };
     }
-    let beat_ms = 60_000.0 / bpm.max(1.0);
     let mut used = vec![false; observed.len()];
     let mut results = vec![];
     let mut errors = vec![];
     let mut timing_sum = 0.0;
     for (i, exp) in expected.iter().enumerate() {
-        let target = start_ms + exp.beat * beat_ms;
-        let window = matching_window_ms(expected, i, bpm);
+        let target = start_ms + elapsed_ms_at_beat(exp.beat, bpm, tempo_map);
+        let window = matching_window_ms_with_tempo_map(expected, i, bpm, tempo_map);
         let best = observed
             .iter()
             .enumerate()
@@ -586,8 +765,11 @@ pub fn score_session_with_config(
     for (oi, obs) in observed.iter().enumerate().filter(|(oi, _)| !used[*oi]) {
         let near_other = expected.iter().enumerate().any(|(i, exp)| {
             exp.instrument != obs.instrument
-                && (obs.timestamp_ms - latency_ms - (start_ms + exp.beat * beat_ms)).abs()
-                    <= matching_window_ms(expected, i, bpm)
+                && (obs.timestamp_ms
+                    - latency_ms
+                    - (start_ms + elapsed_ms_at_beat(exp.beat, bpm, tempo_map)))
+                    .abs()
+                    <= matching_window_ms_with_tempo_map(expected, i, bpm, tempo_map)
         });
         let judgement = if near_other {
             wrong += 1;
@@ -738,6 +920,9 @@ mod tests {
         assert_eq!(e.selected_track, 1);
         assert_eq!((e.meter_numerator, e.meter_denominator), (3, 4));
         assert!((e.tempo_bpm - 100.0).abs() < 0.01);
+        assert_eq!(e.tempo_map.len(), 2);
+        assert!((e.tempo_map[1].beat - 1.0).abs() < f64::EPSILON);
+        assert!((e.tempo_map[1].bpm - 150.0).abs() < 0.01);
         assert_eq!(
             e.hits.iter().map(|hit| hit.tick).collect::<Vec<_>>(),
             vec![0, 240, 720]
@@ -804,6 +989,120 @@ mod tests {
                 .map(|hit| hit.beat)
                 .collect::<Vec<_>>(),
             vec![0.0, 1.0, 2.0, 3.0]
+        );
+    }
+    fn rhythm_hits(beats: &[f64]) -> Vec<ExpectedHit> {
+        beats
+            .iter()
+            .enumerate()
+            .map(|(index, beat)| ExpectedHit {
+                id: format!("rhythm-{index}"),
+                tick: (*beat * 480.0).round() as u64,
+                beat: *beat,
+                notation_beat: *beat,
+                raw_duration_ticks: Some(20),
+                notation_duration_beats: 0.25,
+                instrument: Instrument::Snare,
+                velocity: 100,
+                accent: false,
+                hand: Hand::Unknown,
+                channel: 9,
+                note: 38,
+            })
+            .collect()
+    }
+    #[test]
+    fn regular_onsets_infer_quarters_eighths_sixteenths_and_triplets() {
+        let cases = [
+            (vec![0.0, 1.0, 2.0, 3.0], 1.0),
+            ((0..8).map(|i| i as f64 * 0.5).collect(), 0.5),
+            ((0..16).map(|i| i as f64 * 0.25).collect(), 0.25),
+            ((0..12).map(|i| i as f64 / 3.0).collect(), 1.0 / 3.0),
+        ];
+        for (beats, expected_duration) in cases {
+            let mut hits = rhythm_hits(&beats);
+            infer_notation(&mut hits, (4, 4));
+            assert!(hits.iter().all(|hit| {
+                (hit.notation_duration_beats - expected_duration).abs() < 0.001
+            }), "expected duration {expected_duration}, got {:?}", hits.iter().map(|hit| hit.notation_duration_beats).collect::<Vec<_>>());
+            assert!(hits
+                .iter()
+                .zip(beats)
+                .all(|(hit, beat)| (hit.notation_beat - beat).abs() < 0.001));
+        }
+    }
+    #[test]
+    fn mixed_subdivisions_and_genuine_gaps_use_onset_context() {
+        let mut mixed = rhythm_hits(&[0.0, 0.5, 1.5, 2.0, 3.0, 3.5]);
+        infer_notation(&mut mixed, (4, 4));
+        assert_eq!(
+            mixed
+                .iter()
+                .map(|hit| hit.notation_duration_beats)
+                .collect::<Vec<_>>(),
+            vec![0.5, 1.0, 0.5, 1.0, 0.5, 0.5]
+        );
+
+        let mut with_gap = rhythm_hits(&[0.0, 0.5, 1.0, 1.5, 2.0, 4.0]);
+        infer_notation(&mut with_gap, (4, 4));
+        assert_eq!(with_gap[4].notation_duration_beats, 0.5);
+        assert!((4.0 - (with_gap[4].notation_beat + with_gap[4].notation_duration_beats)) > 1.0);
+    }
+    #[test]
+    fn tempo_map_converts_beats_to_and_from_elapsed_time() {
+        let tempo_map = [
+            TempoChange {
+                tick: 0,
+                beat: 0.0,
+                bpm: 120.0,
+            },
+            TempoChange {
+                tick: 480,
+                beat: 1.0,
+                bpm: 60.0,
+            },
+        ];
+        assert!((elapsed_ms_at_beat(2.0, 120.0, &tempo_map) - 1500.0).abs() < 0.001);
+        assert!((beat_at_elapsed_ms(1500.0, 120.0, &tempo_map) - 2.0).abs() < 0.001);
+        assert!((elapsed_ms_at_beat(2.0, 60.0, &tempo_map) - 3000.0).abs() < 0.001);
+    }
+    #[test]
+    fn scoring_uses_tempo_map_times_without_changing_notation_beats() {
+        let exercise = rhythm_hits(&[0.0, 1.0, 2.0]);
+        let tempo_map = [
+            TempoChange {
+                tick: 0,
+                beat: 0.0,
+                bpm: 120.0,
+            },
+            TempoChange {
+                tick: 480,
+                beat: 1.0,
+                bpm: 60.0,
+            },
+        ];
+        let observed = [
+            obs(0.0, Instrument::Snare),
+            obs(500.0, Instrument::Snare),
+            obs(1500.0, Instrument::Snare),
+        ];
+        let summary = score_session_with_tempo_map(
+            &exercise,
+            &observed,
+            120.0,
+            0.0,
+            0.0,
+            ScoringConfig::default(),
+            &tempo_map,
+        );
+        assert_eq!(summary.matched, 3);
+        assert_eq!(
+            summary
+                .results
+                .iter()
+                .map(|result| result.expected_beat.unwrap())
+                .collect::<Vec<_>>(),
+            vec![0.0, 1.0, 2.0]
         );
     }
     #[test]
@@ -931,6 +1230,10 @@ mod tests {
             TrackEvent {
                 delta: u28::new(0),
                 kind: TrackEventKind::Meta(MetaMessage::TimeSignature(meter.0, meter.1, 24, 8)),
+            },
+            TrackEvent {
+                delta: u28::new(480),
+                kind: TrackEventKind::Meta(MetaMessage::Tempo(u24::new(400_000))),
             },
             TrackEvent {
                 delta: u28::new(0),

@@ -19,7 +19,7 @@ This is a *revised implementation spec*, not a claim that Rudiment has been impl
 - **R4 monitored MIDI audio:** each strike allocates an independent sample voice and cleanup path. Audio lock is explicit, Connect also performs the required user-gesture unlock, and automated coverage schedules forty overlapping hits without voice loss.
   A physical Alesis capture subsequently exposed a 27.6 dB peak mismatch between bundled velocity layers; decode-time peak normalisation now level-matches the layers before applying the velocity curve, preventing quieter layers from being perceived as dropped triggers.
 - **R5 rhythmic MIDI notation:** note-off matching preserves raw gate ticks, while a separate onset/meter inference selects written quarter/eighth/sixteenth duration. The new 80 BPM fixture proves 110-tick gates at 480-tick IOIs render as quarter notes; unsupported ambiguity continues to produce warnings rather than invented notation.
-- **R6 GitHub Pages:** the Pages workflow runs locked Rust/browser checks, builds once for browser acceptance and again with the repository subpath, verifies required WASM/JS/audio assets, and deploys through the official Pages actions. A live deployment remains unverified until the repository is pushed and the workflow runs.
+- **R6 GitHub Pages:** the Pages workflow runs locked Rust/browser checks, builds once for browser acceptance and again with the repository subpath, verifies required WASM/JS/audio assets, and deploys through the official Pages actions. The repository's Pages source must be set to **GitHub Actions** once in repository settings; a restricted workflow token cannot modify that setting. A live deployment remains unverified until the repository is pushed and the workflow runs.
 
 Hardware assertions remain deliberately separate: Web MIDI reconnect, byte filtering and rapid audio allocation are browser-simulated; no physical USB drum kit or subjective loudspeaker/headphone test was available for this implementation pass.
 
@@ -29,7 +29,7 @@ Hardware assertions remain deliberately separate: Web MIDI reconnect, byte filte
 - The playhead interpolates within each bar and moves to its next bar/system using the same beat position supplied by the playback clock.
 - Vertical viewport tracking eases toward the active system on playback frames, keeping the active and following system visible without re-rendering during playback.
 - Resize-only reflow preserves the current beat and judgement feedback; fresh sessions return to the opening system.
-- Detected-hit timing feedback uses translucent colored circles behind noteheads; missed-note indicators remain unchanged.
+- Detected-hit timing feedback uses slightly larger, more vivid colored circles behind noteheads; missed-note indicators remain unchanged.
 - Playback no longer dims past notes or adds a glow to the current note, keeping note glyphs visually stable as the playhead passes.
 - The smoothly interpolated playhead now uses rendered notehead positions as beat anchors, aligning its position with each written note without snapping at note times.
 - Adjacent measures share continuous stave lines and a single barline; playhead interpolation reaches the next measure's opening position without a boundary snap.
@@ -41,3 +41,11 @@ Hardware assertions remain deliberately separate: Web MIDI reconnect, byte filte
 - Simultaneous MIDI hits are engraved as chords, with durations, dotted values, rests, accents, sticking, and beams formatted by VexFlow.
 - System spacing now uses a shared measure width; short final systems keep their proportional width. Measure numbers and increased system spacing improve score navigation.
 - Bar lengths and playback/count-in measure boundaries use the numerator and denominator, including compound meters such as 6/8. Playback timing remains based on the MIDI event beats.
+
+## Implementation addendum — MIDI tempo maps and practice workflow
+
+- MIDI onset inference now selects rhythmic grids from observed intervals, including triplets and genuine gaps, while preserving raw gate durations as metadata.
+- Parsed tempo-map events are carried into Tone.Transport playback, playhead progress and session scoring so tempo changes remain aligned with musical beats.
+- Imported MIDI files are deduplicated and stored in a browser-local library, with load, delete and last-selected-file restoration.
+- Added a Statistics dialog for session count, personal best, average hit rate and recent results; removed the demo snare preview/pad while retaining keyboard, MIDI and app audio input.
+- Added regression coverage for tempo-map scoring, triplet engraving, statistics behavior and the saved MIDI library.

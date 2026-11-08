@@ -10,11 +10,18 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(page.locator('#notation')).toContainText('R');
   await expect(page.locator('#notation')).toContainText('L');
   await expect(page.getByRole('button',{name:'MIDI connection'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Stats'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Play snare hit'})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/Preview Acoustic snare/})).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Connect MIDI drums'})).toHaveCount(0);
   await page.waitForTimeout(450);
   await page.screenshot({ path: 'artifacts/first-run-practice.png', fullPage: true });
 
   await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect(page.getByText(/Count-in ·/)).toBeVisible();
+  await page.getByRole('button',{name:'Stats'}).click();
+  await expect(page.getByRole('dialog',{name:'Practice statistics'})).toBeVisible();
+  await page.keyboard.press('Escape');
   await expect(page.getByText(/Count-in ·/)).toBeVisible();
   await page.getByRole('button', { name: /Pause/ }).click();
   await expect(page.getByText('Paused', { exact: true })).toBeVisible();
@@ -25,8 +32,6 @@ test('first-use workspace renders real notation and lifecycle controls', async (
 
 test('demo hits complete through scoring and persist locally', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: /Preview Acoustic snare/ }).click();
-  await expect(page.getByText(/Acoustic snare ready/)).toBeVisible();
   await page.getByLabel('Tempo in BPM').fill('240');
   await expect(page.getByLabel('Tempo in BPM')).toHaveValue('240');
   await page.getByRole('button', { name: 'Open settings' }).click();
@@ -35,10 +40,9 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
 
   await page.getByRole('button', { name: /Start practice/ }).click();
   await page.evaluate(async () => {
-    const pad = document.querySelector('[aria-label="Play snare hit"]');
     await new Promise(resolve => setTimeout(resolve, 165));
     for (let i = 0; i < 32; i++) {
-      pad?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'mouse' }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
       await new Promise(resolve => setTimeout(resolve, 125));
     }
   });
@@ -50,6 +54,14 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await page.screenshot({ path: 'artifacts/completed-result.png', fullPage: true });
 
   await page.reload();
+  await page.getByRole('button',{name:'Stats'}).click();
+  const stats=page.getByRole('dialog',{name:'Practice statistics'});
+  await expect(stats).toBeVisible();
+  await expect(stats).toContainText('1');
+  await expect(page.getByRole('button',{name:'Close statistics'})).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(stats).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Stats'})).toBeFocused();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await expect(page.getByText('1 completed session(s) stored only in this browser.')).toBeVisible();
 });
@@ -76,7 +88,16 @@ test('bundled MIDI imports through the visible import callback and broken files 
       count.onsuccess = () => resolve(count.result);
     };
   }))).toBeGreaterThanOrEqual(2);
+  await page.locator('.midi-library summary').click();
+  await expect(page.getByRole('button',{name:'quarter-note-reference.mid',exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'single-paradiddle.mid',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'single-paradiddle.mid',exact:true}).click();
+  await expect(page.locator('.score-note')).toHaveCount(32);
+  const quarterLibrary=page.locator('.midi-library').getByRole('button',{name:'quarter-note-reference.mid',exact:true});
+  await quarterLibrary.click();
+  await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
   await page.reload();
+  await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve, reject) => {
     const request = indexedDB.open('rudiment');
     request.onerror = () => reject(request.error);
@@ -86,6 +107,10 @@ test('bundled MIDI imports through the visible import callback and broken files 
       count.onsuccess = () => resolve(count.result);
     };
   }))).toBeGreaterThanOrEqual(2);
+  await page.locator('.midi-library summary').click();
+  page.once('dialog',dialog=>dialog.accept());
+  await page.locator('.midi-library').getByRole('button',{name:'Delete quarter-note-reference.mid'}).click();
+  await expect(page.locator('.midi-library summary')).toContainText('1');
 
   const chooserPromise = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'Import MIDI' }).click();
@@ -308,6 +333,16 @@ test('kit MIDI maps to drum staff positions with mixed rhythms and compact final
   expect(new Set(chordY).size).toBeGreaterThan(1);
 });
 
+test('triplet onsets render as grouped triplet notation',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>{
+    const hits=Array.from({length:12},(_,index)=>({beat:index/3,notation_beat:index/3,notation_duration_beats:1/3,instrument:'snare',note:38,hand:index%2?'L':'R'}));
+    (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Triplet Test',meter_numerator:4,meter_denominator:4,hits});
+  });
+  await expect(page.locator('.score-note[data-written-duration="8t"]')).toHaveCount(12);
+  await expect(page.locator('.vf-tuplet')).toHaveCount(4);
+});
+
 test('playhead interpolates between noteheads and aligns with each note beat',async({page})=>{
   await page.goto('/');
   const hit=page.locator('.score-note[data-beat="1"]');
@@ -361,11 +396,12 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   const halo=hit.locator(':scope > .vf-notehead > .judgement-halo');
   await expect(halo).toHaveCount(1);
   expect(await halo.evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(56, 174, 142)');
+  await expect.poll(async()=>Number(await halo.evaluate(element=>getComputedStyle(element).opacity))).toBeGreaterThan(.6);
   const haloSize=await halo.evaluate(element=>{
     const head=element.parentElement!.querySelector(':scope > text')!,bounds=head.getBBox();
     return {radius:Number(element.getAttribute('r')),headWidth:bounds.width};
   });
-  expect(haloSize.radius).toBeCloseTo(haloSize.headWidth*.62,5);
+  expect(haloSize.radius).toBeCloseTo(haloSize.headWidth*.72,5);
   expect(await halo.evaluate(element=>element.compareDocumentPosition(element.parentElement!.querySelector(':scope > text')!)&Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
   const marker=page.locator('.unmatched-hit-marker');await expect(marker).toHaveCount(1);await expect(marker).toHaveAttribute('data-beat','1.25');
   const markerX=Number(await marker.getAttribute('cx')),expectedX=await hit.evaluate(element=>{const box=(element as SVGGElement).getBBox();return box.x+box.width/2;});expect(markerX).not.toBeCloseTo(expectedX,1);
@@ -395,8 +431,7 @@ test('restarting practice clears the previous session note colours',async({page}
 test('rapid repeated monitored strikes allocate an audio voice for every hit', async ({ page }) => {
   await page.goto('/');
   await page.evaluate(() => { const prototype=AudioBufferSourceNode.prototype,original=prototype.start;(window as unknown as {__voiceStarts:number}).__voiceStarts=0;prototype.start=function(...args){(window as unknown as {__voiceStarts:number}).__voiceStarts++;return original.apply(this,args as [number]);}; });
-  await page.getByRole('button',{name:/Preview Acoustic snare/}).click();
-  await expect(page.getByText('Acoustic snare ready')).toBeVisible();
+  await page.evaluate(()=>(window as unknown as {rudiment:{ensureAudio():Promise<void>}}).rudiment.ensureAudio());
   const levels=await page.evaluate(()=>(window as unknown as {rudiment:{audioDiagnostics():{layerPeaks:number[],layerGains:number[],velocityGains:number[],velocityLayers:Array<Array<{index:number,weight:number}>>},playSnare(velocity:number):boolean}}).rudiment.audioDiagnostics());
   expect(levels.layerPeaks).toHaveLength(4);
   expect(levels.layerGains).toHaveLength(4);
@@ -406,7 +441,7 @@ test('rapid repeated monitored strikes allocate an audio voice for every hit', a
   for(const blend of levels.velocityLayers)expect(blend.reduce((sum,layer)=>sum+layer.weight*layer.weight,0)).toBeCloseTo(1,5);
   const beforeLow=await page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts);expect(await page.evaluate(()=>(window as unknown as {rudiment:{playSnare(velocity:number):boolean}}).rudiment.playSnare(1))).toBe(true);await expect.poll(()=>page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBeGreaterThan(beforeLow);
   const beforeZero=await page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts);expect(await page.evaluate(()=>(window as unknown as {rudiment:{playSnare(velocity:number):boolean}}).rudiment.playSnare(0))).toBe(false);expect(await page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBe(beforeZero);
-  await page.evaluate(() => {const pad=document.querySelector('[aria-label="Play snare hit"]');for(let i=0;i<40;i++)pad?.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'mouse'}));});
+  await page.evaluate(() => {for(let i=0;i<40;i++)window.dispatchEvent(new KeyboardEvent('keydown',{key:'j',bubbles:true}));});
   await expect.poll(()=>page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBeGreaterThanOrEqual(41);
 });
 
@@ -436,6 +471,6 @@ test('permission denial and narrow layout remain usable', async ({ page }) => {
   await expect(page.locator('.midi-state')).toContainText('MIDI error · Permission denied by user');
   await expect(page.getByRole('button',{name:'Connect / rescan MIDI'})).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Play snare hit' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Play snare hit' })).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/narrow-practice.png', fullPage: true });
 });
