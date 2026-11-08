@@ -1,0 +1,9 @@
+/target/
+/dist/
+/dist-pages/
+/node_modules/
+/web/dist/
+/.DS_Store
+*.log
+/test-results/
+

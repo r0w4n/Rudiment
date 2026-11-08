@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "gm-drums-v1",
+  "name": "General MIDI percussion fallback",
+  "verifiedAgainst": "General MIDI Level 1 percussion note map",
+  "matcher": null,
+  "requiresPadConfirmation": true,
+  "bindings": [
+    { "channel": 10, "note": 36, "instrument": "kick" },
+    { "channel": 10, "note": 38, "instrument": "snare" },
+    { "channel": 10, "note": 42, "instrument": "closed_hat" },
+    { "channel": 10, "note": 44, "instrument": "pedal_hat" },
+    { "channel": 10, "note": 46, "instrument": "open_hat" },
+    { "channel": 10, "note": 49, "instrument": "crash" },
+    { "channel": 10, "note": 51, "instrument": "ride" }
+  ],
+  "latencyMs": 0
+}
