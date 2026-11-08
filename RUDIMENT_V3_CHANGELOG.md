@@ -30,8 +30,10 @@ Hardware assertions remain deliberately separate: Web MIDI reconnect, byte filte
 - Vertical viewport tracking eases toward the active system on playback frames, keeping the active and following system visible without re-rendering during playback.
 - Resize-only reflow preserves the current beat and judgement feedback; fresh sessions return to the opening system.
 - Detected-hit timing feedback uses slightly larger, more vivid colored circles behind noteheads; missed-note indicators remain unchanged.
+- Missed-note red dots are positioned from the missed notehead's SVG bounds and remain centered beneath the glyph on every stave system.
 - Playback no longer dims past notes or adds a glow to the current note, keeping note glyphs visually stable as the playhead passes.
 - The smoothly interpolated playhead now uses rendered notehead positions as beat anchors, aligning its position with each written note without snapping at note times.
+- Playhead height now follows each percussion staff's actual top and bottom line coordinates, so it crosses the full stave on every system, including single-line rudiments.
 - Adjacent measures share continuous stave lines and a single barline; playhead interpolation reaches the next measure's opening position without a boundary snap.
 - Measures on each system are formatted as one continuous rhythmic voice, keeping note spacing consistent across barlines.
 

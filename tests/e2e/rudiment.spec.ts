@@ -231,6 +231,18 @@ test('score wraps responsively and follows playback vertically without horizonta
   await expect(svg).toHaveAttribute('data-staff-lines','5');
   const desktopRows=await page.locator('.score-note').evaluateAll(notes=>new Set(notes.map(note=>note.getAttribute('data-system-row'))).size);
   expect(desktopRows).toBeGreaterThan(1);
+  const playheadCoversStaves=await page.evaluate(()=>{
+    const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    const svg=document.querySelector('svg')!,barsPerLine=Number(svg.dataset.barsPerLine),meter=4;
+    const bounds=JSON.parse(svg.dataset.staffBounds!) as Array<{top:number;bottom:number}>;
+    return bounds.map((staff,row)=>{
+      app.updateScore(row*barsPerLine*meter+.1,[]);
+      const line=document.querySelector('#playhead')!;
+      return Number(line.getAttribute('y1'))<=staff.top&&Number(line.getAttribute('y2'))>=staff.bottom;
+    });
+  });
+  expect(playheadCoversStaves.length).toBeGreaterThan(1);
+  expect(playheadCoversStaves.every(Boolean)).toBe(true);
   const barSpacing=await page.evaluate(()=>{
     const center=(note:Element)=>{const bounds=(note.querySelector('.vf-notehead > text') as SVGGraphicsElement).getBBox();return bounds.x+bounds.width/2;};
     const firstBar=[...document.querySelectorAll('.score-note[data-score-bar="0"]')],secondBar=[...document.querySelectorAll('.score-note[data-score-bar="1"]')];
@@ -408,6 +420,21 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1.5,[{expected_beat:1,actual_beat:null,judgement:'missed',error_ms:0,excellent:false,event_id:null}]));
   await expect(hit).toHaveAttribute('data-judgement','missed');
   await expect(hit.locator('.judgement-halo')).toHaveCount(0);
+  const missedMarker=hit.locator('.missed-note-marker');
+  await expect(missedMarker).toHaveCount(1);
+  const markerPosition=await missedMarker.evaluate(element=>{
+    const head=element.parentElement!.querySelector(':scope > text')!,bounds=head.getBBox();
+    const markerRect=element.getBoundingClientRect(),headRect=head.getBoundingClientRect();
+    return {
+      cx:Number(element.getAttribute('cx')),cy:Number(element.getAttribute('cy')),centerX:bounds.x+bounds.width/2,centerY:bounds.y+bounds.height/2,
+      screenCenterX:markerRect.x+markerRect.width/2,headScreenCenterX:headRect.x+headRect.width/2,
+      screenCenterY:markerRect.y+markerRect.height/2,headScreenCenterY:headRect.y+headRect.height/2
+    };
+  });
+  expect(markerPosition.cx).toBeCloseTo(markerPosition.centerX,5);
+  expect(markerPosition.cy).toBeCloseTo(markerPosition.centerY,5);
+  expect(markerPosition.screenCenterX).toBeCloseTo(markerPosition.headScreenCenterX,0);
+  expect(markerPosition.screenCenterY).toBeCloseTo(markerPosition.headScreenCenterY,0);
   expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
   await expect(marker).toHaveCount(0);
 });

@@ -238,7 +238,8 @@ function renderScore(exercise) {
   }
   for(let bar=0;bar<barCount;bar++){
     const row=Math.floor(bar/barsPerLine),stave=staves[row];
-    barLayouts.push({index:bar,startBeat:bar*metersPerBar,endBeat:(bar+1)*metersPerBar,row,xStart:stave.getNoteStartX(),xEnd:stave.getNoteEndX(),y:stave.getY(),anchors:[]});
+    const firstLine=singleLine?2:0,lastLine=singleLine?2:4;
+    barLayouts.push({index:bar,startBeat:bar*metersPerBar,endBeat:(bar+1)*metersPerBar,row,xStart:stave.getNoteStartX(),xEnd:stave.getNoteEndX(),y:stave.getY(),y1:stave.getYForLine(firstLine)-12,y2:stave.getYForLine(lastLine)+12,anchors:[]});
   }
   for(let row=0;row<lineCount;row++){
     const firstBar=row*barsPerLine,lastBar=Math.min(barCount,firstBar+barsPerLine),rowTickables=[];
@@ -308,6 +309,7 @@ function renderScore(exercise) {
   if(svg){
     svg.dataset.barsPerLine=String(barsPerLine);svg.dataset.staffLines=singleLine?'1':'5';
     svg.dataset.systemBarCounts=JSON.stringify(systemBarCounts);svg.dataset.systemWidths=JSON.stringify(systemWidths);
+    svg.dataset.staffBounds=JSON.stringify(staves.map(stave=>({top:stave.getYForLine(singleLine?2:0),bottom:stave.getYForLine(singleLine?2:4)})));
   }
   for (const meta of notesMeta) {
     const group=meta.note.getSVGElement?.();
@@ -335,7 +337,7 @@ function renderScore(exercise) {
     bar.anchors=[...anchors.values()].sort((a,b)=>a.beat-b.beat);
   }
   const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
-  const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('y1',singleLine?'-28':'-38'); line.setAttribute('y2',singleLine?'34':'62'); line.setAttribute('class','playhead-line'); svg?.appendChild(line);
+  const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
   scoreData={notes:notesMeta,svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,rowHeight:SCORE_ROW_HEIGHT,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
   applyJudgements(previousJudgements);updateScore(previousBeat,null);
   if(typeof ResizeObserver!=='undefined'){
@@ -354,17 +356,25 @@ function positionAtBeat(beat) {
   let before=anchors[0],after=anchors.at(-1);
   for(const anchor of anchors){if(anchor.beat<=value)before=anchor;if(anchor.beat>=value){after=anchor;break;}}
   const ratio=Math.max(0,Math.min(1,(value-before.beat)/Math.max(.001,after.beat-before.beat)));
-  return {x:before.x+(after.x-before.x)*ratio,y:bar.y,row:bar.row,bar:index};
+  return {x:before.x+(after.x-before.x)*ratio,y:bar.y,y1:bar.y1,y2:bar.y2,row:bar.row,bar:index};
 }
 function applyJudgements(judgements) {
   const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
   scoreData.lastJudgements=judgements;
-  for(const meta of scoreData.notes){const group=meta.note.getSVGElement?.();if(!group)continue;delete group.dataset.judgement;group.classList.remove('excellent-flash');group.querySelector('.judgement-halo')?.remove();}
+  for(const meta of scoreData.notes){const group=meta.note.getSVGElement?.();if(!group)continue;delete group.dataset.judgement;group.classList.remove('excellent-flash');group.querySelector('.judgement-halo,.missed-note-marker')?.remove();}
   for(const result of judgements){
     if(Number.isFinite(result.expected_beat)){
       const meta=scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001),group=meta?.note.getSVGElement?.();if(!group)continue;
       const judgement=result.excellent?'excellent':result.judgement;
       group.dataset.judgement=judgement;
+      if(judgement==='missed'){
+        const notehead=group.querySelector('.vf-notehead'),head=notehead?.querySelector(':scope > text');
+        if(notehead&&head){
+          const bounds=head.getBBox(),marker=document.createElementNS('http://www.w3.org/2000/svg','circle');
+          marker.setAttribute('class','missed-note-marker');marker.setAttribute('cx',String(bounds.x+bounds.width/2));marker.setAttribute('cy',String(bounds.y+bounds.height/2));marker.setAttribute('r',String(Math.max(3,bounds.width*.36)));
+          notehead.insertBefore(marker,head);
+        }
+      }
       if(['on_time','excellent','early','late'].includes(judgement)){
         const notehead=group.querySelector('.vf-notehead'),head=notehead?.querySelector(':scope > text');
         if(notehead&&head){
@@ -388,7 +398,7 @@ function updateScore(beat, judgements) {
   if(Array.isArray(judgements))applyJudgements(judgements);
   scoreData.lastBeat=beat;
   const position=positionAtBeat(beat),playhead=svg.querySelector('#playhead');
-  if(playhead){playhead.style.transform=`translate3d(${position.x}px,${position.y}px,0)`;playhead.dataset.x=String(position.x);playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);playhead.classList.toggle('visible',beat>=0&&beat<=scoreData.totalBeats);}
+  if(playhead){playhead.style.transform=`translate3d(${position.x}px,0,0)`;playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.x=String(position.x);playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);playhead.classList.toggle('visible',beat>=0&&beat<=scoreData.totalBeats);}
   if(beat>=0){
     const target=Math.min(position.row*scoreData.rowHeight,Math.max(0,container.scrollHeight-container.clientHeight));
     const distance=target-container.scrollTop;
@@ -401,6 +411,7 @@ function clearScoreFeedback() {
   for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
     delete group.dataset.judgement;group.classList.remove('excellent-flash');
+    group.querySelector('.missed-note-marker')?.remove();
     group.getAnimations?.().forEach(animation=>animation.cancel());
   }
   scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;
