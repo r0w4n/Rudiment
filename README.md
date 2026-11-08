@@ -40,6 +40,12 @@ The static release is written to `dist/`. `npm run fixtures` deterministically r
 - `web/js/bridge.js`: narrow browser adapter for Tone.js/Web Audio, WEBMIDI.js, VexFlow and IndexedDB (`idb`). Tone.Transport is the sole musical scheduler; scoring and the requestAnimationFrame playhead share its explicitly bridged timeline.
 - `web/public`: local MIDI fixtures, source-verified CC0 acoustic snare layers, versioned JSON prescriptions/profiles and the generated browser bundle.
 
+## Timing assessment
+
+Scoring v2 uses calibrated Web MIDI timestamps against the musical transport clock. Hits within ±20 ms are Perfect; ±20–40 ms are Good; −40–100 ms are Early; +40–100 ms are Late; and notes outside ±100 ms are missed. The Perfect and Good boundaries are centralised configuration values, while ±100 ms is the default matching limit.
+
+Each expected note contributes continuously: 100 points through the Perfect boundary, a linear 100→80 points across the Good band, then a linear 80→1 points through the Early/Late band. Misses contribute zero and extras contribute no points or penalty. The session score is the mean across expected notes, rounded to one decimal place; any non-Perfect result keeps the displayed score below 100%. Results also retain signed error, mean absolute error and standard deviation for timing-bias and consistency feedback.
+
 All imports, settings, mappings and sessions remain in IndexedDB on the current device. Imported MIDI files are available in a local library, and session summaries can be reviewed in the Statistics dialog. There is no telemetry or upload path.
 
 ## Supported scope

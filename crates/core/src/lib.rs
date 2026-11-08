@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
-pub const SCORING_VERSION: &str = "v1";
+pub const SCORING_VERSION: &str = "v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -529,6 +529,9 @@ pub enum InputSource {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Judgement {
+    Perfect,
+    Good,
+    /// Read-only compatibility for sessions saved by scoring v1.
     OnTime,
     Early,
     Late,
@@ -539,34 +542,110 @@ pub enum Judgement {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct ScoringConfig {
-    pub on_time_ms: f64,
-    pub excellent_ms: f64,
+    pub perfect_ms: f64,
+    pub good_ms: f64,
+    pub match_ms: f64,
+    pub good_floor_score: f64,
+    pub match_edge_score: f64,
 }
 impl Default for ScoringConfig {
     fn default() -> Self {
         Self {
-            on_time_ms: 35.0,
-            excellent_ms: 15.0,
+            perfect_ms: 20.0,
+            good_ms: 40.0,
+            match_ms: 100.0,
+            good_floor_score: 80.0,
+            match_edge_score: 1.0,
         }
     }
+}
+
+impl ScoringConfig {
+    fn boundaries(self) -> (f64, f64, f64) {
+        let perfect = self.perfect_ms.max(0.0);
+        let good = self.good_ms.max(perfect);
+        let matched = self.match_ms.max(good);
+        (perfect, good, matched)
+    }
+
+    pub fn classify(self, timing_error_ms: f64) -> Judgement {
+        let (perfect, good, matched) = self.boundaries();
+        let magnitude = timing_error_ms.abs();
+        if magnitude <= perfect {
+            Judgement::Perfect
+        } else if magnitude <= good {
+            Judgement::Good
+        } else if magnitude <= matched && timing_error_ms < 0.0 {
+            Judgement::Early
+        } else if magnitude <= matched {
+            Judgement::Late
+        } else {
+            Judgement::Missed
+        }
+    }
+
+    pub fn note_score(self, timing_error_ms: f64) -> f64 {
+        let (perfect, good, matched) = self.boundaries();
+        let magnitude = timing_error_ms.abs();
+        if magnitude <= perfect {
+            100.0
+        } else if magnitude <= good {
+            interpolate(
+                magnitude,
+                perfect,
+                good,
+                100.0,
+                self.good_floor_score.clamp(0.0, 100.0),
+            )
+        } else if magnitude <= matched {
+            interpolate(
+                magnitude,
+                good,
+                matched,
+                self.good_floor_score.clamp(0.0, 100.0),
+                self.match_edge_score.clamp(0.0, 100.0),
+            )
+        } else {
+            0.0
+        }
+    }
+}
+
+fn interpolate(value: f64, start: f64, end: f64, start_score: f64, end_score: f64) -> f64 {
+    if (end - start).abs() < f64::EPSILON {
+        return end_score;
+    }
+    let progress = ((value - start) / (end - start)).clamp(0.0, 1.0);
+    start_score + (end_score - start_score) * progress
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HitResult {
     pub expected_id: Option<String>,
     pub expected_beat: Option<f64>,
+    #[serde(default)]
+    pub expected_timestamp_ms: Option<f64>,
     pub observed_ms: Option<f64>,
+    #[serde(default)]
+    pub actual_timestamp_ms: Option<f64>,
     pub error_ms: Option<f64>,
     pub window_ms: f64,
     pub instrument: Instrument,
+    #[serde(default)]
+    pub midi_note: Option<u8>,
     pub judgement: Judgement,
+    /// Read-only compatibility for the v1 "Excellent" flag.
     #[serde(default)]
     pub excellent: bool,
+    #[serde(default)]
+    pub note_score: f64,
+    #[serde(default)]
+    pub missed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionSummary {
-    pub score: Option<u8>,
+    pub score: Option<f64>,
     pub matched: usize,
     pub expected: usize,
     pub missed: usize,
@@ -574,6 +653,8 @@ pub struct SessionSummary {
     pub wrong_instrument: usize,
     pub mean_abs_error_ms: Option<f64>,
     pub signed_mean_error_ms: Option<f64>,
+    #[serde(default)]
+    pub timing_consistency_ms: Option<f64>,
     pub scoring_version: String,
     pub results: Vec<HitResult>,
 }
@@ -653,7 +734,128 @@ pub fn matching_window_ms_with_tempo_map(
     }
 }
 
-/// Deterministic nearest-time, same-instrument, one-to-one matcher and Score v1.
+#[derive(Clone, Copy, Debug, Default)]
+enum MatchAction {
+    #[default]
+    Done,
+    SkipExpected,
+    SkipObserved,
+    Match,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MatchPlan {
+    matched: usize,
+    exact_notes: usize,
+    total_error_ms: f64,
+    action: MatchAction,
+}
+
+fn prefer_match_plan(candidate: MatchPlan, current: MatchPlan) -> bool {
+    candidate.matched > current.matched
+        || (candidate.matched == current.matched
+            && (candidate.exact_notes > current.exact_notes
+                || (candidate.exact_notes == current.exact_notes
+                    && (candidate.total_error_ms < current.total_error_ms
+                        || (candidate.total_error_ms == current.total_error_ms
+                            && matches!(candidate.action, MatchAction::Match)
+                            && !matches!(current.action, MatchAction::Match))))))
+}
+
+fn optimal_instrument_matches(
+    expected: &[ExpectedHit],
+    observed: &[ObservedHit],
+    expected_indices: &[usize],
+    observed_indices: &[usize],
+    bpm: f64,
+    start_ms: f64,
+    latency_ms: f64,
+    match_ms: f64,
+    tempo_map: &[TempoChange],
+) -> Vec<(usize, usize, f64)> {
+    let mut expected_order = expected_indices.to_vec();
+    expected_order.sort_by(|left, right| {
+        expected[*left]
+            .beat
+            .total_cmp(&expected[*right].beat)
+            .then(left.cmp(right))
+    });
+    let mut observed_order = observed_indices.to_vec();
+    observed_order.sort_by(|left, right| {
+        observed[*left]
+            .timestamp_ms
+            .total_cmp(&observed[*right].timestamp_ms)
+            .then(left.cmp(right))
+    });
+    let rows = expected_order.len();
+    let columns = observed_order.len();
+    let mut plans = vec![vec![MatchPlan::default(); columns + 1]; rows + 1];
+
+    for row in (0..rows).rev() {
+        for column in (0..columns).rev() {
+            let mut best = MatchPlan {
+                action: MatchAction::SkipExpected,
+                ..plans[row + 1][column]
+            };
+            let skip_observed = MatchPlan {
+                action: MatchAction::SkipObserved,
+                ..plans[row][column + 1]
+            };
+            if prefer_match_plan(skip_observed, best) {
+                best = skip_observed;
+            }
+
+            let expected_index = expected_order[row];
+            let observed_index = observed_order[column];
+            let target = start_ms
+                + elapsed_ms_at_beat(expected[expected_index].beat, bpm, tempo_map);
+            let error = observed[observed_index].timestamp_ms - latency_ms - target;
+            if error.is_finite() && error.abs() <= match_ms {
+                let child = plans[row + 1][column + 1];
+                let matched = MatchPlan {
+                    matched: child.matched + 1,
+                    exact_notes: child.exact_notes
+                        + usize::from(
+                            observed[observed_index].raw_note
+                                == Some(expected[expected_index].note),
+                        ),
+                    total_error_ms: child.total_error_ms + error.abs(),
+                    action: MatchAction::Match,
+                };
+                if prefer_match_plan(matched, best) {
+                    best = matched;
+                }
+            }
+            plans[row][column] = best;
+        }
+    }
+
+    let mut matches = Vec::with_capacity(plans[0][0].matched);
+    let (mut row, mut column) = (0, 0);
+    while row < rows && column < columns {
+        match plans[row][column].action {
+            MatchAction::SkipExpected => row += 1,
+            MatchAction::SkipObserved => column += 1,
+            MatchAction::Match => {
+                let expected_index = expected_order[row];
+                let observed_index = observed_order[column];
+                let target = start_ms
+                    + elapsed_ms_at_beat(expected[expected_index].beat, bpm, tempo_map);
+                matches.push((
+                    expected_index,
+                    observed_index,
+                    observed[observed_index].timestamp_ms - latency_ms - target,
+                ));
+                row += 1;
+                column += 1;
+            }
+            MatchAction::Done => break,
+        }
+    }
+    matches
+}
+
+/// Deterministic maximum-cardinality, minimum-error, one-to-one matcher and Score v2.
 pub fn score_session(
     expected: &[ExpectedHit],
     observed: &[ObservedHit],
@@ -709,67 +911,100 @@ pub fn score_session_with_tempo_map(
             wrong_instrument: 0,
             mean_abs_error_ms: None,
             signed_mean_error_ms: None,
+            timing_consistency_ms: None,
             scoring_version: SCORING_VERSION.into(),
             results: vec![],
         };
     }
     let mut used = vec![false; observed.len()];
-    let mut results = vec![];
-    let mut errors = vec![];
-    let mut timing_sum = 0.0;
-    for (i, exp) in expected.iter().enumerate() {
-        let target = start_ms + elapsed_ms_at_beat(exp.beat, bpm, tempo_map);
-        let window = matching_window_ms_with_tempo_map(expected, i, bpm, tempo_map);
-        let best = observed
+    let mut matches = vec![None; expected.len()];
+    let mut instruments = Vec::new();
+    for hit in expected {
+        if !instruments.contains(&hit.instrument) {
+            instruments.push(hit.instrument);
+        }
+    }
+    let (_, _, match_ms) = config.boundaries();
+    for instrument in instruments {
+        let expected_indices = expected
             .iter()
             .enumerate()
-            .filter(|(oi, o)| !used[*oi] && o.instrument == exp.instrument)
-            .map(|(oi, o)| (oi, o.timestamp_ms - latency_ms - target))
-            .filter(|(_, e)| e.abs() <= window)
-            .min_by(|a, b| a.1.abs().total_cmp(&b.1.abs()).then(a.0.cmp(&b.0)));
-        if let Some((oi, error)) = best {
-            used[oi] = true;
+            .filter_map(|(index, hit)| (hit.instrument == instrument).then_some(index))
+            .collect::<Vec<_>>();
+        let observed_indices = observed
+            .iter()
+            .enumerate()
+            .filter_map(|(index, hit)| (hit.instrument == instrument).then_some(index))
+            .collect::<Vec<_>>();
+        for (expected_index, observed_index, error) in optimal_instrument_matches(
+            expected,
+            observed,
+            &expected_indices,
+            &observed_indices,
+            bpm,
+            start_ms,
+            latency_ms,
+            match_ms,
+            tempo_map,
+        ) {
+            matches[expected_index] = Some((observed_index, error));
+            used[observed_index] = true;
+        }
+    }
+
+    let mut results = Vec::with_capacity(expected.len() + observed.len());
+    let mut errors = vec![];
+    let mut score_sum = 0.0;
+    for (i, exp) in expected.iter().enumerate() {
+        let target = start_ms + elapsed_ms_at_beat(exp.beat, bpm, tempo_map);
+        if let Some((oi, error)) = matches[i] {
             errors.push(error);
-            timing_sum += (1.0 - error.abs() / window).clamp(0.0, 1.0);
+            let judgement = config.classify(error);
+            let note_score = config.note_score(error);
+            score_sum += note_score;
             results.push(HitResult {
                 expected_id: Some(exp.id.clone()),
                 expected_beat: Some(exp.beat),
+                expected_timestamp_ms: Some(target),
                 observed_ms: Some(observed[oi].timestamp_ms),
+                actual_timestamp_ms: Some(observed[oi].timestamp_ms),
                 error_ms: Some(error),
-                window_ms: window,
+                window_ms: match_ms,
                 instrument: exp.instrument,
-                judgement: if error.abs() <= config.on_time_ms {
-                    Judgement::OnTime
-                } else if error < 0.0 {
-                    Judgement::Early
-                } else {
-                    Judgement::Late
-                },
-                excellent: error.abs() <= config.excellent_ms,
+                midi_note: Some(exp.note),
+                judgement,
+                excellent: judgement == Judgement::Perfect,
+                note_score,
+                missed: false,
             });
         } else {
             results.push(HitResult {
                 expected_id: Some(exp.id.clone()),
                 expected_beat: Some(exp.beat),
+                expected_timestamp_ms: Some(target),
                 observed_ms: None,
+                actual_timestamp_ms: None,
                 error_ms: None,
-                window_ms: window,
+                window_ms: match_ms,
                 instrument: exp.instrument,
+                midi_note: Some(exp.note),
                 judgement: Judgement::Missed,
                 excellent: false,
+                note_score: 0.0,
+                missed: true,
             });
         }
     }
     let mut wrong = 0usize;
     let mut extras = 0usize;
     for (oi, obs) in observed.iter().enumerate().filter(|(oi, _)| !used[*oi]) {
-        let near_other = expected.iter().enumerate().any(|(i, exp)| {
+        let near_other = expected.iter().any(|exp| {
             exp.instrument != obs.instrument
                 && (obs.timestamp_ms
                     - latency_ms
                     - (start_ms + elapsed_ms_at_beat(exp.beat, bpm, tempo_map)))
                     .abs()
-                    <= matching_window_ms_with_tempo_map(expected, i, bpm, tempo_map)
+                    <= match_ms
         });
         let judgement = if near_other {
             wrong += 1;
@@ -781,26 +1016,43 @@ pub fn score_session_with_tempo_map(
         results.push(HitResult {
             expected_id: None,
             expected_beat: None,
+            expected_timestamp_ms: None,
             observed_ms: Some(obs.timestamp_ms),
+            actual_timestamp_ms: Some(obs.timestamp_ms),
             error_ms: None,
             window_ms: 0.0,
             instrument: obs.instrument,
+            midi_note: obs.raw_note,
             judgement,
             excellent: false,
+            note_score: 0.0,
+            missed: false,
         });
         let _ = oi;
     }
     let n = expected.len();
     let matched = errors.len();
     let missed = n - matched;
-    let hit_rate = matched as f64 / n as f64;
-    let timing_quality = timing_sum / n as f64;
-    let extra_penalty = 0.10 * (extras as f64 / n as f64).min(1.0);
-    let score = (100.0 * (0.70 * hit_rate + 0.30 * timing_quality - extra_penalty).clamp(0.0, 1.0))
-        .round() as u8;
+    let mut score = (score_sum / n as f64 * 10.0).round() / 10.0;
+    if results
+        .iter()
+        .take(n)
+        .any(|result| result.judgement != Judgement::Perfect)
+        && score >= 100.0
+    {
+        score = 99.9;
+    }
     let mean_abs = (!errors.is_empty())
         .then(|| errors.iter().map(|v| v.abs()).sum::<f64>() / errors.len() as f64);
     let signed = (!errors.is_empty()).then(|| errors.iter().sum::<f64>() / errors.len() as f64);
+    let consistency = signed.map(|mean| {
+        (errors
+            .iter()
+            .map(|error| (error - mean).powi(2))
+            .sum::<f64>()
+            / errors.len() as f64)
+            .sqrt()
+    });
     SessionSummary {
         score: Some(score),
         matched,
@@ -810,6 +1062,7 @@ pub fn score_session_with_tempo_map(
         wrong_instrument: wrong,
         mean_abs_error_ms: mean_abs,
         signed_mean_error_ms: signed,
+        timing_consistency_ms: consistency,
         scoring_version: SCORING_VERSION.into(),
         results,
     }
@@ -839,9 +1092,9 @@ mod tests {
             .collect();
         let a = score_session(&e.hits, &o, 60.0, 0.0, 0.0);
         let b = score_session(&e.hits, &o, 60.0, 0.0, 0.0);
-        assert_eq!(a.score, Some(100));
+        assert_eq!(a.score, Some(100.0));
         assert_eq!(a, b);
-        assert_eq!(a.scoring_version, "v1");
+        assert_eq!(a.scoring_version, "v2");
     }
     #[test]
     fn early_late_and_missing_extra_classify() {
@@ -853,7 +1106,7 @@ mod tests {
         assert_eq!(s.results[1].judgement, Judgement::Late);
         assert_eq!(s.missed, 1);
         assert_eq!(s.extras, 1);
-        assert!(s.score.unwrap() < 100);
+        assert!(s.score.unwrap() < 100.0);
     }
     #[test]
     fn wrong_instrument_never_matches() {
@@ -962,7 +1215,7 @@ mod tests {
         );
         assert_eq!(s.matched, 1);
         assert_eq!(s.missed, 0);
-        assert_eq!(s.results[0].judgement, Judgement::OnTime);
+        assert_eq!(s.results[0].judgement, Judgement::Good);
     }
     #[test]
     fn quarter_note_onsets_ignore_short_gate_duration() {
@@ -1123,8 +1376,9 @@ mod tests {
         simultaneous[1].id = "second".into();
         let observed = vec![obs(10.0, Instrument::Snare), obs(35.0, Instrument::Snare)];
         let config = ScoringConfig {
-            on_time_ms: 35.0,
-            excellent_ms: 12.0,
+            perfect_ms: 12.0,
+            good_ms: 35.0,
+            ..ScoringConfig::default()
         };
         let a = score_session_with_config(&simultaneous, &observed, 60.0, 0.0, 0.0, config);
         let b = score_session_with_config(&simultaneous, &observed, 60.0, 0.0, 0.0, config);
@@ -1132,7 +1386,207 @@ mod tests {
         assert_eq!(a.matched, 2);
         assert!(a.results[0].excellent);
         assert!(!a.results[1].excellent);
-        assert_eq!(a.results[1].judgement, Judgement::OnTime);
+        assert_eq!(a.results[1].judgement, Judgement::Good);
+    }
+
+    fn expected_sequence(count: usize, spacing_beats: f64) -> Vec<ExpectedHit> {
+        let template = paradiddle().hits[0].clone();
+        (0..count)
+            .map(|index| ExpectedHit {
+                id: format!("expected-{index}"),
+                tick: (index as f64 * spacing_beats * 480.0).round() as u64,
+                beat: index as f64 * spacing_beats,
+                notation_beat: index as f64 * spacing_beats,
+                ..template.clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn timing_boundaries_are_exact_and_have_no_gaps() {
+        let config = ScoringConfig::default();
+        for error in [-20.0, 0.0, 20.0] {
+            assert_eq!(config.classify(error), Judgement::Perfect);
+        }
+        for error in [-40.0, -20.000_001, 20.000_001, 40.0] {
+            assert_eq!(config.classify(error), Judgement::Good);
+        }
+        assert_eq!(config.classify(-40.000_001), Judgement::Early);
+        assert_eq!(config.classify(-100.0), Judgement::Early);
+        assert_eq!(config.classify(40.000_001), Judgement::Late);
+        assert_eq!(config.classify(100.0), Judgement::Late);
+        assert_eq!(config.classify(-100.000_001), Judgement::Missed);
+        assert_eq!(config.classify(100.000_001), Judgement::Missed);
+    }
+
+    #[test]
+    fn continuous_note_scores_follow_the_documented_piecewise_curve() {
+        let config = ScoringConfig::default();
+        for (error, expected_score) in [
+            (0.0, 100.0),
+            (20.0, 100.0),
+            (30.0, 90.0),
+            (40.0, 80.0),
+            (60.0, 53.666_666_666_7),
+            (90.0, 14.166_666_666_7),
+            (100.0, 1.0),
+            (100.000_001, 0.0),
+        ] {
+            assert!((config.note_score(error) - expected_score).abs() < 0.000_001);
+            assert!((config.note_score(-error) - expected_score).abs() < 0.000_001);
+        }
+    }
+
+    #[test]
+    fn acceptance_perfect_and_single_good_scores() {
+        let expected = expected_sequence(100, 0.25);
+        let perfect_observed = expected
+            .iter()
+            .enumerate()
+            .map(|(index, hit)| {
+                obs(
+                    hit.beat * 1000.0 + if index % 2 == 0 { -20.0 } else { 20.0 },
+                    hit.instrument,
+                )
+            })
+            .collect::<Vec<_>>();
+        let perfect = score_session(&expected, &perfect_observed, 60.0, 0.0, 0.0);
+        assert_eq!(perfect.score, Some(100.0));
+        assert_eq!(
+            perfect
+                .results
+                .iter()
+                .filter(|result| result.judgement == Judgement::Perfect)
+                .count(),
+            100
+        );
+
+        let mut mostly_perfect = perfect_observed;
+        mostly_perfect[99].timestamp_ms = expected[99].beat * 1000.0 + 30.0;
+        let summary = score_session(&expected, &mostly_perfect, 60.0, 0.0, 0.0);
+        assert_eq!(summary.score, Some(99.9));
+        assert_eq!(
+            summary
+                .results
+                .iter()
+                .filter(|result| result.judgement == Judgement::Good)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn acceptance_late_missed_and_extra_scenarios() {
+        let expected = expected_sequence(100, 0.5);
+        let late_observed = expected
+            .iter()
+            .map(|hit| obs(hit.beat * 1000.0 + 60.0, hit.instrument))
+            .collect::<Vec<_>>();
+        let late = score_session(&expected, &late_observed, 60.0, 0.0, 0.0);
+        assert_eq!(late.score, Some(53.7));
+        assert_eq!(late.signed_mean_error_ms, Some(60.0));
+        assert_eq!(late.timing_consistency_ms, Some(0.0));
+        assert!(late
+            .results
+            .iter()
+            .all(|result| result.judgement == Judgement::Late));
+
+        let first_ninety = expected
+            .iter()
+            .take(90)
+            .map(|hit| obs(hit.beat * 1000.0, hit.instrument))
+            .collect::<Vec<_>>();
+        let missed = score_session(&expected, &first_ninety, 60.0, 0.0, 0.0);
+        assert_eq!(missed.missed, 10);
+        assert_eq!(missed.score, Some(90.0));
+
+        let mut with_extras = expected
+            .iter()
+            .map(|hit| obs(hit.beat * 1000.0, hit.instrument))
+            .collect::<Vec<_>>();
+        with_extras.extend((0..5).map(|index| obs(100_000.0 + index as f64, Instrument::Snare)));
+        let extra = score_session(&expected, &with_extras, 60.0, 0.0, 0.0);
+        assert_eq!(extra.extras, 5);
+        assert_eq!(extra.score, Some(100.0));
+    }
+
+    #[test]
+    fn optimal_matching_handles_rapid_repeats_duplicates_and_simultaneous_drums() {
+        let rapid = expected_sequence(2, 0.09);
+        let rapid_observed = [obs(80.0, Instrument::Snare), obs(170.0, Instrument::Snare)];
+        let rapid_summary = score_session(&rapid, &rapid_observed, 60.0, 0.0, 0.0);
+        assert_eq!(rapid_summary.matched, 2);
+        assert_eq!(rapid_summary.missed, 0);
+
+        let duplicate = score_session(
+            &rapid[..1],
+            &[obs(0.0, Instrument::Snare), obs(1.0, Instrument::Snare)],
+            60.0,
+            0.0,
+            0.0,
+        );
+        assert_eq!(duplicate.matched, 1);
+        assert_eq!(duplicate.extras, 1);
+        assert_eq!(duplicate.score, Some(100.0));
+
+        let mut simultaneous = vec![rapid[0].clone(), rapid[0].clone()];
+        simultaneous[1].id = "kick".into();
+        simultaneous[1].instrument = Instrument::Kick;
+        simultaneous[1].note = 36;
+        let simultaneous_summary = score_session(
+            &simultaneous,
+            &[obs(5.0, Instrument::Kick), obs(-5.0, Instrument::Snare)],
+            60.0,
+            0.0,
+            0.0,
+        );
+        assert_eq!(simultaneous_summary.matched, 2);
+        assert_eq!(simultaneous_summary.score, Some(100.0));
+    }
+
+    #[test]
+    fn offsets_statistics_empty_sessions_and_rounding_are_accurate() {
+        let expected = expected_sequence(2, 1.0);
+        let calibrated = score_session(
+            &expected[..1],
+            &[obs(50.0, Instrument::Snare)],
+            60.0,
+            0.0,
+            50.0,
+        );
+        assert_eq!(calibrated.results[0].error_ms, Some(0.0));
+        assert_eq!(calibrated.score, Some(100.0));
+
+        let statistics = score_session(
+            &expected,
+            &[obs(-10.0, Instrument::Snare), obs(1020.0, Instrument::Snare)],
+            60.0,
+            0.0,
+            0.0,
+        );
+        assert_eq!(statistics.signed_mean_error_ms, Some(5.0));
+        assert_eq!(statistics.mean_abs_error_ms, Some(15.0));
+        assert_eq!(statistics.timing_consistency_ms, Some(15.0));
+
+        let empty = score_session(&[], &[obs(0.0, Instrument::Snare)], 60.0, 0.0, 0.0);
+        assert_eq!(empty.score, None);
+        assert_eq!(empty.extras, 1);
+        assert_eq!(empty.timing_consistency_ms, None);
+
+        let hundred = expected_sequence(100, 0.5);
+        let almost_perfect = hundred
+            .iter()
+            .enumerate()
+            .map(|(index, hit)| {
+                obs(
+                    hit.beat * 1000.0 + if index == 0 { 20.000_001 } else { 0.0 },
+                    hit.instrument,
+                )
+            })
+            .collect::<Vec<_>>();
+        let rounded = score_session(&hundred, &almost_perfect, 60.0, 0.0, 0.0);
+        assert_eq!(rounded.score, Some(99.9));
+        assert_ne!(rounded.results[0].judgement, Judgement::Perfect);
     }
     fn fixture(ambiguous: bool) -> Vec<u8> {
         use midly::{

@@ -268,7 +268,7 @@ function renderScore(exercise) {
         if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(1).setFont('Inter',11,'700'),0);
         if(group.hits.some(hit=>hit.accent))note.addModifier(new Articulation('a>').setPosition(3),0);
         slots.push(note);
-        for(const hit of group.hits)notesMeta.push({note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,row,bar});
+        for(const hit of group.hits){const key=pitchForHit(hit);notesMeta.push({note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,key,headIndex:Math.max(0,keys.indexOf(key)),row,bar});}
         cursor=group.position+value;
       }
       if(cursor<end-.001)for(const value of restValues(end-cursor))slots.push(noteWithDuration(['b/4'],value,true));
@@ -361,19 +361,23 @@ function positionAtBeat(beat) {
 function applyJudgements(judgements) {
   const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
   scoreData.lastJudgements=judgements;
-  for(const meta of scoreData.notes){const group=meta.note.getSVGElement?.();if(!group)continue;delete group.dataset.judgement;group.classList.remove('excellent-flash');group.querySelector('.judgement-halo')?.remove();}
+  const groups=new Set(scoreData.notes.map(meta=>meta.note.getSVGElement?.()).filter(Boolean));
+  for(const group of groups){delete group.dataset.judgement;group.classList.remove('excellent-flash');for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');head.querySelector('.judgement-halo')?.remove();}}
   for(const result of judgements){
     if(Number.isFinite(result.expected_beat)){
-      const meta=scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001),group=meta?.note.getSVGElement?.();if(!group)continue;
-      const judgement=result.excellent?'excellent':result.judgement;
-      group.dataset.judgement=judgement;
-      if(['on_time','excellent','early','late'].includes(judgement)){
-        const notehead=group.querySelector('.vf-notehead'),head=notehead?.querySelector(':scope > text');
+      const meta=scoreData.notes.find(note=>result.expected_id&&note.hit?.id===result.expected_id)
+        ??scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001&&(!result.instrument||instrumentForHit(note.hit)===result.instrument)),group=meta?.note.getSVGElement?.();if(!group)continue;
+      const judgement=result.judgement==='on_time'?(result.excellent?'perfect':'good'):(result.excellent?'perfect':result.judgement);
+      const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
+      if(noteheads.length<=1)group.dataset.judgement=judgement;
+      if(notehead){const hasOffset=judgement!=='missed'&&Number.isFinite(result.error_ms);notehead.dataset.judgement=judgement;notehead.setAttribute('role','img');notehead.setAttribute('aria-label',`${judgement.replace('_',' ')}${hasOffset?` ${Number(result.error_ms)>=0?'+':''}${Number(result.error_ms).toFixed(0)} milliseconds`:''}`);}
+      if(['perfect','good','early','late'].includes(judgement)){
+        const head=notehead?.querySelector(':scope > text');
         if(notehead&&head){
           const bounds=head.getBBox(),halo=document.createElementNS('http://www.w3.org/2000/svg','circle');
           halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(bounds.x+bounds.width/2));halo.setAttribute('cy',String(bounds.y+bounds.height/2));halo.setAttribute('r',String(Math.max(6,bounds.width*.84)));
           notehead.insertBefore(halo,head);
-          if(judgement==='excellent'){
+          if(judgement==='perfect'){
             group.classList.add('excellent-flash');
           }
         }
@@ -406,7 +410,7 @@ function clearScoreFeedback() {
   for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
     delete group.dataset.judgement;group.classList.remove('excellent-flash');
-    group.querySelector('.judgement-halo')?.remove();
+    for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');head.querySelector('.judgement-halo')?.remove();}
     group.getAnimations?.().forEach(animation=>animation.cancel());
   }
   scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;

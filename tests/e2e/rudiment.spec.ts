@@ -48,12 +48,12 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   });
   const resultDialog=page.getByRole('dialog',{name:'Good work.'});
   await expect(resultDialog).toBeVisible();
-  await expect(resultDialog.getByText('SESSION SAVED · LOCALLY')).toBeVisible();
+  await expect(resultDialog.getByText('SESSION SAVED · LOCALLY')).toHaveCount(0);
   await expect(resultDialog.getByRole('heading', { name: 'Good work.' })).toBeVisible();
+  await expect(resultDialog.locator('.results-score-summary .score-ring')).toHaveCSS('width','76px');
   await expect(resultDialog.locator('.result-metrics article').first()).toContainText(/(?:[1-9]|[12]\d|3[0-2]) \/ 32/);
   const sessionMetrics=resultDialog.locator('.result-metrics article');
-  for(const [index,label] of ['PERFECT','EARLY','LATE'].entries())await expect(sessionMetrics.nth(index+3).locator('span')).toHaveText(label);
-  const sessionTimingCounts=await Promise.all([3,4,5].map(index=>sessionMetrics.nth(index).locator('strong').innerText()));
+  for(const [index,label] of ['PERFECT','GOOD','EARLY','LATE','MISSED'].entries())await expect(sessionMetrics.nth(index+4).locator('span')).toHaveText(label);
   await expect(sessionMetrics.nth(0).locator('strong')).toHaveCSS('color','rgb(244, 240, 231)');
   const resultModalLayout=await resultDialog.evaluate(element=>({clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,overflow:getComputedStyle(element).overflow}));
   expect(resultModalLayout.scrollHeight).toBeLessThanOrEqual(resultModalLayout.clientHeight);
@@ -93,10 +93,8 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await expect(stats).toBeVisible();
   await expect(stats).toContainText('1');
   const statsMetrics=stats.locator('.stats-overview article');
-  for(const [index,label] of ['PERFECT HITS','EARLY HITS','LATE HITS'].entries())await expect(statsMetrics.nth(index+3).locator('span')).toHaveText(label);
-  const lifetimeTimingCounts=await Promise.all([3,4,5].map(index=>statsMetrics.nth(index).locator('strong').innerText()));
-  expect(lifetimeTimingCounts).toEqual(sessionTimingCounts);
-  await expect(stats.locator('.stats-recent')).toContainText(/\d+ perfect, \d+ early, \d+ late/);
+  for(const [index,label] of ['PERFECT HITS','GOOD HITS','EARLY HITS','LATE HITS','MISSED NOTES'].entries())await expect(statsMetrics.nth(index+3).locator('span')).toHaveText(label);
+  await expect(stats.locator('.stats-recent')).toContainText(/\d+ perfect, \d+ good, \d+ early, \d+ late, \d+ missed/);
   await expect(page.getByRole('button',{name:'Close statistics'})).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(stats).toHaveCount(0);
@@ -259,7 +257,7 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await expect(page.locator('.diagnostics')).toContainText('note_off');
   await expect(page.locator('.diagnostics')).toContainText('cc');
   await expect(page.locator('.diagnostics')).toContainText(/153,\s*38,\s*100/);
-  await expect(page.getByText('0 received')).toBeVisible();
+  await expect(page.locator('.live-assessment')).toContainText('SCORE —%');
   await page.getByRole('button', { name: 'Learn snare' }).click();
   await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99, 40, 112]));
   await expect(page.getByText('Current snare: note 40, channel 10')).toBeVisible();
@@ -492,15 +490,16 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   const originalFill=await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill);
   const originalOpacity=await hit.evaluate(element=>getComputedStyle(element).opacity);
   await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1,[
-    {expected_beat:1,actual_beat:1.01,judgement:'on_time',error_ms:4,excellent:true,event_id:'hit'},
+    {expected_beat:1,actual_beat:1.01,judgement:'perfect',error_ms:4,excellent:true,event_id:'hit'},
     {expected_beat:null,actual_beat:1.25,judgement:'extra',error_ms:0,excellent:false,event_id:'extra'}
   ]));
-  await expect(hit).toHaveAttribute('data-judgement','excellent');
+  await expect(hit).toHaveAttribute('data-judgement','perfect');
   await expect(hit).toHaveClass(/excellent-flash/);
-  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(13, 118, 83)');
+  await expect(hit.locator(':scope > .vf-notehead').first()).toHaveAttribute('aria-label','perfect +4 milliseconds');
   const halo=hit.locator(':scope > .vf-notehead > .judgement-halo');
   await expect(halo).toHaveCount(1);
-  expect(await halo.evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(56, 174, 142)');
+  expect(await halo.evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(22, 132, 95)');
   await expect.poll(async()=>Number(await halo.evaluate(element=>getComputedStyle(element).opacity))).toBeGreaterThan(.6);
   const haloSize=await halo.evaluate(element=>{
     const head=element.parentElement!.querySelector(':scope > text')!,bounds=head.getBBox();
@@ -523,7 +522,7 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   await expect(hit.locator('.judgement-halo')).toHaveCount(0);
   await expect(hit.locator('.missed-note-marker')).toHaveCount(0);
   await expect(hit.locator(':scope > .vf-notehead > circle')).toHaveCount(0);
-  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(194, 62, 53)');
   expect(await hit.evaluate(element=>getComputedStyle(element).opacity)).toBe(originalOpacity);
   await expect(marker).toHaveCount(0);
 });
@@ -533,15 +532,39 @@ test('restarting practice clears the previous session note colours',async({page}
   const hit=page.locator('.score-note[data-beat="1"]');
   const originalFill=await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill);
   await page.getByRole('button',{name:/Start practice/}).click();
-  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1,[{expected_beat:1,actual_beat:1,judgement:'on_time',error_ms:0,excellent:false,event_id:'previous-session-hit'}]));
-  await expect(hit).toHaveAttribute('data-judgement','on_time');
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1,[{expected_beat:1,actual_beat:1,judgement:'good',error_ms:30,excellent:false,event_id:'previous-session-hit'}]));
+  await expect(hit).toHaveAttribute('data-judgement','good');
   await expect(hit.locator('.judgement-halo')).toHaveCount(1);
-  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(36, 147, 87)');
 
   await page.getByRole('button',{name:/Restart/}).click();
-  await expect(hit).not.toHaveAttribute('data-judgement','on_time');
+  await expect(hit).not.toHaveAttribute('data-judgement','good');
   await expect(hit.locator('.judgement-halo')).toHaveCount(0);
   expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+});
+
+test('all five timing judgements colour the notehead and expose text alternatives',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(2,[
+    {expected_beat:0,actual_beat:0,judgement:'perfect',error_ms:0,excellent:true,note_score:100,event_id:'perfect'},
+    {expected_beat:.5,actual_beat:.53,judgement:'good',error_ms:30,excellent:false,note_score:90,event_id:'good'},
+    {expected_beat:1,actual_beat:.94,judgement:'early',error_ms:-60,excellent:false,note_score:53.7,event_id:'early'},
+    {expected_beat:1.5,actual_beat:1.56,judgement:'late',error_ms:60,excellent:false,note_score:53.7,event_id:'late'},
+    {expected_beat:2,actual_beat:null,judgement:'missed',error_ms:0,excellent:false,note_score:0,event_id:null}
+  ]));
+  const expected=[
+    {beat:'0',judgement:'perfect',fill:'rgb(13, 118, 83)',label:'perfect +0 milliseconds'},
+    {beat:'0.5',judgement:'good',fill:'rgb(36, 147, 87)',label:'good +30 milliseconds'},
+    {beat:'1',judgement:'early',fill:'rgb(197, 91, 20)',label:'early -60 milliseconds'},
+    {beat:'1.5',judgement:'late',fill:'rgb(112, 64, 167)',label:'late +60 milliseconds'},
+    {beat:'2',judgement:'missed',fill:'rgb(194, 62, 53)',label:'missed'}
+  ];
+  for(const item of expected){
+    const note=page.locator(`.score-note[data-beat="${item.beat}"]`).first(),head=note.locator(':scope > .vf-notehead').first();
+    await expect(note).toHaveAttribute('data-judgement',item.judgement);
+    await expect(head).toHaveAttribute('aria-label',item.label);
+    expect(await head.locator(':scope > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(item.fill);
+  }
 });
 
 test('rapid repeated monitored strikes allocate an audio voice for every hit', async ({ page }) => {

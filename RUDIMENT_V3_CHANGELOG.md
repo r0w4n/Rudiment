@@ -14,14 +14,22 @@ This is a *revised implementation spec*, not a claim that Rudiment has been impl
 ## Implementation addendum — R1–R6
 
 - **R1 automatic MIDI lifecycle:** previously authorised saved/sole inputs now connect on startup, port lifecycle listeners recover hot-plugged devices, disconnect pauses an active run, and MIDI Learn remains persisted and authoritative. First-use permission still requires the visible Connect gesture.
-- **R2 score feedback:** every expected note can receive stable Excellent/on-time/early/late/missed SVG state without score relayout. Excellent and on-time thresholds are independently configurable and persisted; matching remains deterministic for simultaneous events.
+- **R2 score feedback:** every expected note can receive stable Perfect/Good/Early/Late/Miss SVG state without score relayout. Perfect and Good thresholds are independently configurable and persisted; scoring v2 matching remains deterministic for simultaneous events.
 - **R3 continuous playhead:** the playhead interpolates between note anchors on every animation frame, autoscrolls from the same Tone/Web Audio clock, freezes while paused, and resumes from the stored beat without a scheduling-lead-in jump.
 - **R4 monitored MIDI audio:** each strike allocates an independent sample voice and cleanup path. Audio lock is explicit, Connect also performs the required user-gesture unlock, and automated coverage schedules forty overlapping hits without voice loss.
   A physical Alesis capture subsequently exposed a 27.6 dB peak mismatch between bundled velocity layers; decode-time peak normalisation now level-matches the layers before applying the velocity curve, preventing quieter layers from being perceived as dropped triggers.
 - **R5 rhythmic MIDI notation:** note-off matching preserves raw gate ticks, while a separate onset/meter inference selects written quarter/eighth/sixteenth duration. The new 80 BPM fixture proves 110-tick gates at 480-tick IOIs render as quarter notes; unsupported ambiguity continues to produce warnings rather than invented notation.
-- **R6 GitHub Pages:** the Pages workflow runs locked Rust/browser checks, builds once for browser acceptance and again with the repository subpath, verifies required WASM/JS/audio assets, and deploys through the official Pages actions. The repository's Pages source must be set to **GitHub Actions** once in repository settings; a restricted workflow token cannot modify that setting. A live deployment remains unverified until the repository is pushed and the workflow runs.
+- **R6 GitHub Pages:** the Pages workflow runs locked Rust/browser checks, builds one relocatable artifact for browser acceptance and deployment, verifies required WASM/JS/audio assets, and deploys through the official Pages actions. It uses the hosted runner's Chrome and an integrity-checked prebuilt Trunk binary. The repository's Pages source must be set to **GitHub Actions** once in repository settings; a restricted workflow token cannot modify that setting. A live deployment remains unverified until the repository is pushed and the workflow runs.
 
 Hardware assertions remain deliberately separate: Web MIDI reconnect, byte filtering and rapid audio allocation are browser-simulated; no physical USB drum kit or subjective loudspeaker/headphone test was available for this implementation pass.
+
+## Implementation addendum — Timing assessment and scoring v2
+
+- Replaced the forgiving hit-rate blend with a transparent per-note mean: Perfect ±20 ms = 100, Good through ±40 ms interpolates to 80, Early/Late through ±100 ms interpolates to 1, and misses contribute zero. Extras are recorded but neither earn nor remove points.
+- Added maximum-cardinality, minimum-error one-to-one matching per mapped instrument, with MIDI note identity as a deterministic preference. Rapid repeats, simultaneous drums and duplicate events cannot reuse an expected or observed hit.
+- A non-Perfect note prevents a displayed 100.0 score. Scores retain one decimal place and empty exercises remain unscored.
+- Session results now retain expected/actual timestamps, signed errors, individual note scores, average offset, mean absolute error and population standard deviation. Misses are excluded from timing-bias and consistency calculations.
+- Live and saved summaries expose Perfect, Good, Early, Late and Miss counts. Stave noteheads use green, light green, orange, purple and red with an accessible text label; unmatched physical strikes remain separate red timestamp markers.
 
 ## Implementation addendum — Multi-line score progression
 
@@ -33,6 +41,7 @@ Hardware assertions remain deliberately separate: Web MIDI reconnect, byte filte
 - Unmatched-strike dots now use the nearest rendered notehead's vertical position rather than a fixed stave-origin offset; hit halos are slightly larger and have a soft color-matched glow.
 - End-of-run score summaries now appear in a compact, dismissible modal centered over the score panel, leaving the rest of the practice page in place.
 - Result metrics now use readable high-contrast text and a compact layout that fits without scrolling; the first drum hit dismisses results and the second starts the next run. A hit can also start practice from idle.
+- Removed the local-save kicker from the result modal and enlarged the score wheel for a more spacious summary header.
 - Session results and saved practice statistics now count perfect, early, and late hits individually, including per-session counts in the recent-session list.
 - Fresh runs explicitly clear successful-hit halos so no hit circles carry over into a run with no drum input.
 - Playback no longer dims past notes or adds a glow to the current note, keeping note glyphs visually stable as the playhead passes.

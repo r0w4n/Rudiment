@@ -155,11 +155,14 @@ struct MidiEnvelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LiveJudgement {
+    expected_id: Option<String>,
     expected_beat: Option<f64>,
     actual_beat: Option<f64>,
+    instrument: Instrument,
     judgement: Judgement,
     error_ms: f64,
     excellent: bool,
+    note_score: f64,
     event_id: Option<String>,
 }
 
@@ -167,8 +170,20 @@ fn beats_per_bar(exercise: &Exercise) -> f64 {
     exercise.meter_numerator as f64 * 4.0 / exercise.meter_denominator.max(1) as f64
 }
 
-fn timing_hit_counts(summary: &SessionSummary) -> (usize, usize, usize) {
-    let perfect = summary.results.iter().filter(|hit| hit.excellent).count();
+fn timing_hit_counts(summary: &SessionSummary) -> (usize, usize, usize, usize) {
+    let perfect = summary
+        .results
+        .iter()
+        .filter(|hit| hit.excellent || hit.judgement == Judgement::Perfect)
+        .count();
+    let good = summary
+        .results
+        .iter()
+        .filter(|hit| {
+            hit.judgement == Judgement::Good
+                || (hit.judgement == Judgement::OnTime && !hit.excellent)
+        })
+        .count();
     let early = summary
         .results
         .iter()
@@ -179,7 +194,59 @@ fn timing_hit_counts(summary: &SessionSummary) -> (usize, usize, usize) {
         .iter()
         .filter(|hit| hit.judgement == Judgement::Late)
         .count();
-    (perfect, early, late)
+    (perfect, good, early, late)
+}
+
+fn count_with_percentage(count: usize, expected: usize) -> String {
+    if expected == 0 {
+        return format!("{count} · —");
+    }
+    format!("{count} · {:.0}%", 100.0 * count as f64 / expected as f64)
+}
+
+fn display_score(score: Option<f64>) -> String {
+    score
+        .map(|value| format!("{value:.1}"))
+        .unwrap_or_else(|| "—".into())
+}
+
+fn live_accuracy(items: &[LiveJudgement]) -> (Option<f64>, usize, usize, usize, usize, usize) {
+    let assessed = items
+        .iter()
+        .filter(|item| item.expected_beat.is_some())
+        .collect::<Vec<_>>();
+    if assessed.is_empty() {
+        return (None, 0, 0, 0, 0, 0);
+    }
+    let perfect = assessed
+        .iter()
+        .filter(|item| item.judgement == Judgement::Perfect)
+        .count();
+    let good = assessed
+        .iter()
+        .filter(|item| matches!(item.judgement, Judgement::Good | Judgement::OnTime))
+        .count();
+    let early = assessed
+        .iter()
+        .filter(|item| item.judgement == Judgement::Early)
+        .count();
+    let late = assessed
+        .iter()
+        .filter(|item| item.judgement == Judgement::Late)
+        .count();
+    let missed = assessed
+        .iter()
+        .filter(|item| item.judgement == Judgement::Missed)
+        .count();
+    let mut score = (assessed.iter().map(|item| item.note_score).sum::<f64>()
+        / assessed.len() as f64
+        * 10.0)
+        .round()
+        / 10.0;
+    if perfect < assessed.len() && score >= 100.0 {
+        score = 99.9;
+    }
+    (Some(score), perfect, good, early, late, missed)
 }
 
 fn exercise_beats(exercise: &Exercise) -> f64 {
@@ -248,6 +315,12 @@ fn visible_judgements(
             None => result.observed_ms.is_some(),
         })
         .map(|result| LiveJudgement {
+            expected_id: result.expected_id.map(|id| {
+                id.rsplit_once("-loop")
+                    .filter(|(_, repetition)| repetition.parse::<u8>().is_ok())
+                    .map(|(base, _)| base.to_string())
+                    .unwrap_or(id)
+            }),
             expected_beat: result.expected_beat.map(|beat| beat % exercise_length),
             actual_beat: result.observed_ms.map(|observed_ms| {
                 beat_at_elapsed_ms(
@@ -256,9 +329,11 @@ fn visible_judgements(
                     tempo_map,
                 ) % exercise_length
             }),
+            instrument: result.instrument,
             judgement: result.judgement,
             error_ms: result.error_ms.unwrap_or(0.0),
             excellent: result.excellent,
+            note_score: result.note_score,
             event_id: result.observed_ms.map(|value| format!("{value:.3}")),
         })
         .collect()
@@ -348,7 +423,7 @@ fn App() -> impl IntoView {
     let input_mode = RwSignal::new(InputSource::Demo);
     let result = RwSignal::new(None::<SessionRecord>);
     let history = RwSignal::new(Vec::<SessionRecord>::new());
-    let comparison = RwSignal::new(None::<i16>);
+    let comparison = RwSignal::new(None::<f64>);
     let settings_open = RwSignal::new(false);
     let stats_open = RwSignal::new(false);
     let result_modal_open = RwSignal::new(false);
@@ -364,8 +439,8 @@ fn App() -> impl IntoView {
     let latency_ms = RwSignal::new(0.0);
     let calibration_targets = RwSignal::new(Vec::<f64>::new());
     let calibration_errors = RwSignal::new(Vec::<f64>::new());
-    let on_time_ms = RwSignal::new(35.0);
-    let excellent_ms = RwSignal::new(15.0);
+    let on_time_ms = RwSignal::new(40.0);
+    let excellent_ms = RwSignal::new(20.0);
 
     let save_current_settings = Rc::new(move || {
         persist_settings(Settings {
@@ -400,8 +475,9 @@ fn App() -> impl IntoView {
             run_start_ms.get_untracked(),
             latency_ms.get_untracked(),
             ScoringConfig {
-                on_time_ms: on_time_ms.get_untracked(),
-                excellent_ms: excellent_ms.get_untracked(),
+                perfect_ms: excellent_ms.get_untracked(),
+                good_ms: on_time_ms.get_untracked(),
+                ..ScoringConfig::default()
             },
             &tempo_map,
         );
@@ -434,7 +510,7 @@ fn App() -> impl IntoView {
             .cloned();
         comparison.set(
             previous
-                .and_then(|item| Some(current.summary.score? as i16 - item.summary.score? as i16)),
+                .and_then(|item| Some(current.summary.score? - item.summary.score?)),
         );
         if let Ok(value) = serde_wasm_bindgen::to_value(&current) {
             spawn_local(async move {
@@ -493,8 +569,9 @@ fn App() -> impl IntoView {
                         session_start,
                         latency_ms.get_untracked(),
                         ScoringConfig {
-                            on_time_ms: on_time_ms.get_untracked(),
-                            excellent_ms: excellent_ms.get_untracked(),
+                            perfect_ms: excellent_ms.get_untracked(),
+                            good_ms: on_time_ms.get_untracked(),
+                            ..ScoringConfig::default()
                         },
                         &score_tempo_map,
                     );
@@ -635,8 +712,9 @@ fn App() -> impl IntoView {
                 session_start,
                 latency_ms.get_untracked(),
                 ScoringConfig {
-                    on_time_ms: on_time_ms.get_untracked(),
-                    excellent_ms: excellent_ms.get_untracked(),
+                    perfect_ms: excellent_ms.get_untracked(),
+                    good_ms: on_time_ms.get_untracked(),
+                    ..ScoringConfig::default()
                 },
                 &tempo_map,
             );
@@ -655,21 +733,22 @@ fn App() -> impl IntoView {
                 .iter()
                 .find(|item| item.event_id.as_deref() == Some(event_id.as_str()))
             {
-                let label = if result.excellent {
-                    "Excellent"
-                } else {
-                    match result.judgement {
-                        Judgement::OnTime => "Hit",
-                        Judgement::Early => "Early",
-                        Judgement::Late => "Late",
-                        Judgement::WrongInstrument => "Wrong drum",
-                        Judgement::Extra => "Extra hit",
-                        _ => "Hit",
-                    }
+                let label = match result.judgement {
+                    Judgement::Perfect => "Perfect",
+                    Judgement::Good | Judgement::OnTime => "Good",
+                    Judgement::Early => "Early",
+                    Judgement::Late => "Late",
+                    Judgement::WrongInstrument => "Wrong drum",
+                    Judgement::Extra => "Extra hit",
+                    _ => "Hit",
                 };
                 feedback.set(if matches!(
                     result.judgement,
-                    Judgement::OnTime | Judgement::Early | Judgement::Late
+                    Judgement::Perfect
+                        | Judgement::Good
+                        | Judgement::OnTime
+                        | Judgement::Early
+                        | Judgement::Late
                 ) {
                     format!("{label} · {:+.0} ms", result.error_ms)
                 } else {
@@ -817,7 +896,12 @@ fn App() -> impl IntoView {
                     Instrument::from_gm(note)
                 };
             midi_hit(
-                event.timestamp.unwrap_or_else(js_sys::Date::now),
+                event.timestamp.unwrap_or_else(|| {
+                    web_sys::window()
+                        .and_then(|window| window.performance())
+                        .map(|performance| performance.now())
+                        .unwrap_or(0.0)
+                }),
                 instrument,
                 velocity,
                 InputSource::Midi,
@@ -1202,18 +1286,30 @@ fn App() -> impl IntoView {
                     _=>{},
                   }
                 }>
-                <div class="stats-modal-header"><div><span class="results-kicker">"SESSION SAVED · LOCALLY"</span><h2 id="result-title">"Good work."</h2></div><button id="result-modal-close" aria-label="Close session results" on:click=move |_|{result_modal_open.set(false);restore_result_focus();}>"×"</button></div>
+                <div class="stats-modal-header"><div><h2 id="result-title">"Good work."</h2></div><button id="result-modal-close" aria-label="Close session results" on:click=move |_|{result_modal_open.set(false);restore_result_focus();}>"×"</button></div>
                 <div class="results-score-summary">
-                  <div class="score-ring" style=move || format!("--score:{}",result.get().and_then(|session|session.summary.score).unwrap_or(0))><div><strong>{move || result.get().and_then(|session|session.summary.score).unwrap_or(0)}</strong><span>"/ 100"</span></div></div>
+                  <div class="score-ring" style=move || format!("--score:{}",result.get().and_then(|session|session.summary.score).unwrap_or(0.0))><div><strong>{move || display_score(result.get().and_then(|session|session.summary.score))}</strong><span>"/ 100"</span></div></div>
                   <p>{move || result.get().map(|session|format!("{} at {:.0} BPM · {} input",session.exercise_title,session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"})).unwrap_or_default()}</p>
                 </div>
-                <div class="result-metrics"><article><span>"HITS"</span><strong>{move || result.get().map(|session|format!("{} / {}",session.summary.matched,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article><article><span>"MEAN ERROR"</span><strong>{move || result.get().and_then(|session|session.summary.mean_abs_error_ms).map(|value|format!("{value:.0} ms")).unwrap_or_else(||"—".into())}</strong></article><article><span>"TIMING BIAS"</span><strong>{move || result.get().and_then(|session|session.summary.signed_mean_error_ms).map(|value|if value<0.0{format!("{:.0} ms early",value.abs())}else{format!("{value:.0} ms late")}).unwrap_or_else(||"—".into())}</strong></article><article><span>"PERFECT"</span><strong>{move || result.get().map(|session|timing_hit_counts(&session.summary).0.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"EARLY"</span><strong>{move || result.get().map(|session|timing_hit_counts(&session.summary).1.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"LATE"</span><strong>{move || result.get().map(|session|timing_hit_counts(&session.summary).2.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"MISSED"</span><strong>{move || result.get().map(|session|session.summary.missed.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"EXTRAS"</span><strong>{move || result.get().map(|session|session.summary.extras.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"WRONG DRUM"</span><strong>{move || result.get().map(|session|session.summary.wrong_instrument.to_string()).unwrap_or_else(||"—".into())}</strong></article></div>
-                <div class="comparison-card"><div><span>"COMPARABLE PREVIOUS RUN"</span><strong>{move || comparison.get().map(|delta|if delta>0{format!("+{delta} points") }else if delta<0{format!("{delta} points")}else{"No change".into()}).unwrap_or_else(||"First comparable run".into())}</strong></div><div><span>"PERSONAL BEST"</span><strong>{move || result.get().map(|session|history.get().iter().filter(|item|item.exercise_hash==session.exercise_hash&&(item.bpm-session.bpm).abs()<0.01&&item.input_mode==session.input_mode&&item.scoring_version==session.scoring_version&&(item.tolerance_ms-session.tolerance_ms).abs()<0.01).filter_map(|item|item.summary.score).max().unwrap_or(session.summary.score.unwrap_or(0)).to_string()).unwrap_or_else(||"—".into())}</strong></div><small>"Same exercise version, tempo, input mode, tolerance and scoring v1 only."</small></div>
+                <div class="result-metrics">
+                  <article><span>"HITS"</span><strong>{move || result.get().map(|session|format!("{} / {}",session.summary.matched,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"MEAN ABS ERROR"</span><strong>{move || result.get().and_then(|session|session.summary.mean_abs_error_ms).map(|value|format!("{value:.0} ms")).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"AVERAGE OFFSET"</span><strong>{move || result.get().and_then(|session|session.summary.signed_mean_error_ms).map(|value|if value < -0.5{format!("{:.0} ms early",value.abs())}else if value > 0.5{format!("{value:.0} ms late")}else{"On time".into()}).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"CONSISTENCY"</span><strong>{move || result.get().and_then(|session|session.summary.timing_consistency_ms).map(|value|format!("{value:.0} ms σ")).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"PERFECT"</span><strong>{move || result.get().map(|session|count_with_percentage(timing_hit_counts(&session.summary).0,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"GOOD"</span><strong>{move || result.get().map(|session|count_with_percentage(timing_hit_counts(&session.summary).1,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"EARLY"</span><strong>{move || result.get().map(|session|count_with_percentage(timing_hit_counts(&session.summary).2,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"LATE"</span><strong>{move || result.get().map(|session|count_with_percentage(timing_hit_counts(&session.summary).3,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"MISSED"</span><strong>{move || result.get().map(|session|count_with_percentage(session.summary.missed,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"EXTRAS"</span><strong>{move || result.get().map(|session|session.summary.extras.to_string()).unwrap_or_else(||"—".into())}</strong></article>
+                  <article><span>"WRONG DRUM"</span><strong>{move || result.get().map(|session|session.summary.wrong_instrument.to_string()).unwrap_or_else(||"—".into())}</strong></article>
+                </div>
+                <div class="comparison-card"><div><span>"COMPARABLE PREVIOUS RUN"</span><strong>{move || comparison.get().map(|delta|if delta > 0.05{format!("+{delta:.1} points") }else if delta < -0.05{format!("{delta:.1} points")}else{"No change".into()}).unwrap_or_else(||"First comparable run".into())}</strong></div><div><span>"PERSONAL BEST"</span><strong>{move || result.get().map(|session|{let best=history.get().iter().filter(|item|item.exercise_hash==session.exercise_hash&&(item.bpm-session.bpm).abs()<0.01&&item.input_mode==session.input_mode&&item.scoring_version==session.scoring_version&&(item.tolerance_ms-session.tolerance_ms).abs()<0.01).filter_map(|item|item.summary.score).max_by(|left,right|left.total_cmp(right)).or(session.summary.score);display_score(best)}).unwrap_or_else(||"—".into())}</strong></div><small>"Same exercise version, tempo, input mode, thresholds and scoring v2 only."</small></div>
                 <div class="result-actions"><button class="primary" on:click={let start=start_new_run.clone();move |_|{observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Practise again"</button><button on:click=move |_|{result_modal_open.set(false);restore_result_focus();}>"Back to score"</button></div>
                 </section>
               </div>
             </section>
-            <section class="feedback-strip" aria-live="polite"><div class=move || format!("feedback-orb {}",feedback.get().split_whitespace().next().unwrap_or("ready").to_lowercase())></div><strong>{move || feedback.get()}</strong><span>{move || {let hits=observed.get().len();format!("{hits} received")}}</span><span>{move || audio_state.get()}</span></section>
+            <section class="feedback-strip" aria-live="polite"><div class=move || format!("feedback-orb {}",feedback.get().split_whitespace().next().unwrap_or("ready").to_lowercase())></div><strong>{move || feedback.get()}</strong><span class="live-assessment">{move || {let (score,perfect,good,early,late,missed)=live_accuracy(&live.get());format!("SCORE {}% · P {perfect} · G {good} · E {early} · L {late} · M {missed}",display_score(score))}}</span><span>{move || audio_state.get()}</span></section>
             <section class="practice-controls">
               <div class="transport">
                 <div class="transport-secondary"><button on:click=move |_|{stop_audio();result_modal_open.set(false);phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let start=start_new_run.clone();move |_|{stop_audio();observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"↻ Restart"</button></div>
@@ -1238,11 +1334,13 @@ fn App() -> impl IntoView {
                 </div>
                 <div class="stats-overview">
                   <article><span>"SESSIONS"</span><strong>{move || history.get().len()}</strong></article>
-                  <article><span>"PERSONAL BEST"</span><strong>{move || history.get().iter().filter_map(|session|session.summary.score).max().map(|score|score.to_string()).unwrap_or_else(||"—".into())}</strong></article>
-                  <article><span>"AVERAGE HIT RATE"</span><strong>{move || {let sessions=history.get();let expected=sessions.iter().map(|session|session.summary.expected).sum::<usize>();if expected==0{"—".into()}else{format!("{:.0}%",100.0*sessions.iter().map(|session|session.summary.matched).sum::<usize>() as f64/expected as f64)}}}</strong></article>
+                  <article><span>"PERSONAL BEST"</span><strong>{move || display_score(history.get().iter().filter_map(|session|session.summary.score).max_by(|left,right|left.total_cmp(right)))}</strong></article>
+                  <article><span>"AVERAGE SCORE"</span><strong>{move || {let scores=history.get().iter().filter_map(|session|session.summary.score).collect::<Vec<_>>();if scores.is_empty(){"—".into()}else{format!("{:.1}%",scores.iter().sum::<f64>()/scores.len() as f64)}}}</strong></article>
                   <article><span>"PERFECT HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).0).sum::<usize>()}</strong></article>
-                  <article><span>"EARLY HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).1).sum::<usize>()}</strong></article>
-                  <article><span>"LATE HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).2).sum::<usize>()}</strong></article>
+                  <article><span>"GOOD HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).1).sum::<usize>()}</strong></article>
+                  <article><span>"EARLY HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).2).sum::<usize>()}</strong></article>
+                  <article><span>"LATE HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).3).sum::<usize>()}</strong></article>
+                  <article><span>"MISSED NOTES"</span><strong>{move || history.get().iter().map(|session|session.summary.missed).sum::<usize>()}</strong></article>
                 </div>
                 <h3>"Recent sessions"</h3>
                 <ol class="stats-recent">
@@ -1251,8 +1349,8 @@ fn App() -> impl IntoView {
                   }else{
                     history.get().iter().rev().take(8).map(|session|view!{
                       <li>
-                        <span><strong>{session.exercise_title.clone()}</strong><small>{let (perfect,early,late)=timing_hit_counts(&session.summary);format!("{:.0} BPM · {} · {} · {} perfect, {} early, {} late",session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"},session.ended_at.get(..10).unwrap_or_default(),perfect,early,late)}</small></span>
-                        <b>{format!("{}/100",session.summary.score.unwrap_or(0))}</b>
+                        <span><strong>{session.exercise_title.clone()}</strong><small>{let (perfect,good,early,late)=timing_hit_counts(&session.summary);format!("{:.0} BPM · {} · {} · {} perfect, {} good, {} early, {} late, {} missed",session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"},session.ended_at.get(..10).unwrap_or_default(),perfect,good,early,late,session.summary.missed)}</small></span>
+                        <b>{format!("{}/100",display_score(session.summary.score))}</b>
                       </li>
                     }).collect_view().into_any()
                   }}
@@ -1279,8 +1377,8 @@ fn App() -> impl IntoView {
               <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);feedback.set("Calibration: tap with each click".into());let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
-            <section><h3>"Timing feedback"</h3><p class="help">"Excellent is the tight green flash. Hits inside the wider on-time window remain green; earlier hits are blue and later hits yellow."</p><label>{move || format!("Excellent window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="25" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(15.0).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("On-time window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(35.0);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.48);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);latency_ms.set(0.0);on_time_ms.set(35.0);excellent_ms.set(15.0);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Timing feedback"</h3><p class="help">"Perfect hits are green (±20 ms by default), Good hits light green, Early hits orange, Late hits purple and missed notes red. Matching closes outside ±100 ms."</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(20.0).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(40.0);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.48);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);latency_ms.set(0.0);on_time_ms.set(40.0);excellent_ms.set(20.0);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" on:click=move |_|settings_open.set(false)></button>
       </main>
