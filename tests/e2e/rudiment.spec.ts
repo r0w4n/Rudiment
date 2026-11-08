@@ -465,6 +465,26 @@ test('playhead interpolates between noteheads and aligns with each note beat',as
   expect(between).toBeLessThan(after);
 });
 
+test('playhead keeps a constant visual speed through the end of the final bar',async({page})=>{
+  await page.goto('/');
+  const measureDistances=()=>page.evaluate(()=>{
+    const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    const positions=[14.5,15,15.5,16].map(beat=>{
+      app.updateScore(beat,[]);
+      return Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    });
+    return positions.slice(1).map((x,index)=>x-positions[index]);
+  });
+  let distances=await measureDistances();
+  const reference=(distances[0]+distances[1])/2;
+  expect(distances[2]).toBeGreaterThan(reference*.9);
+  expect(distances[2]).toBeLessThan(reference*1.1);
+  await page.setViewportSize({width:390,height:844});
+  await expect.poll(()=>page.locator('#notation svg').getAttribute('data-bars-per-line')).toBe('1');
+  distances=await measureDistances();
+  expect(Math.max(...distances)-Math.min(...distances)).toBeLessThan(1);
+});
+
 test('note glyphs keep their color and opacity as the playhead passes',async({page})=>{
   await page.goto('/');
   const first=page.locator('.score-note[data-beat="0"]');
@@ -612,4 +632,23 @@ test('permission denial and narrow layout remain usable', async ({ page }) => {
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Play snare hit' })).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/narrow-practice.png', fullPage: true });
+});
+
+test('Pixel 8 Pro keeps MIDI connection visible and practice controls on-screen in both orientations',async({page})=>{
+  await page.setViewportSize({width:448,height:998});
+  await page.goto('/');
+  const midi=page.getByRole('button',{name:'MIDI connection'});
+  await expect(midi).toBeVisible();
+  expect(await midi.evaluate(element=>{const box=element.getBoundingClientRect();return box.left>=0&&box.right<=innerWidth&&box.top>=0&&box.bottom<=innerHeight;})).toBe(true);
+
+  await page.setViewportSize({width:998,height:448});
+  await expect.poll(()=>page.locator('#notation svg').getAttribute('data-bars-per-line')).toBe('4');
+  const layout=await page.evaluate(()=>({
+    pageFits:document.documentElement.scrollHeight<=innerHeight&&document.body.scrollHeight<=innerHeight,
+    controls:[...document.querySelectorAll('.topbar,.welcome,.score-card,.feedback-strip,.transport')].every(element=>{const box=element.getBoundingClientRect();return box.top>=0&&box.bottom<=innerHeight;}),
+    horizontalFits:document.documentElement.scrollWidth<=innerWidth&&document.body.scrollWidth<=innerWidth,
+  }));
+  expect(layout).toEqual({pageFits:true,controls:true,horizontalFits:true});
+  await expect(midi).toBeVisible();
+  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
 });

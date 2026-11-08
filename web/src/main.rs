@@ -1176,6 +1176,14 @@ fn App() -> impl IntoView {
                         } else {
                             "Audio ready · MIDI snare enabled".into()
                         });
+                        set_volumes(
+                            if snare_muted.get_untracked() {
+                                0.0
+                            } else {
+                                snare_volume.get_untracked()
+                            },
+                            click_volume.get_untracked(),
+                        );
                     }
                     Err(error) => {
                         let detail = error.as_string().unwrap_or_else(|| format!("{error:?}"));
