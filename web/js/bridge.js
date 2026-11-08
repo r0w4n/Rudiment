@@ -361,25 +361,17 @@ function positionAtBeat(beat) {
 function applyJudgements(judgements) {
   const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
   scoreData.lastJudgements=judgements;
-  for(const meta of scoreData.notes){const group=meta.note.getSVGElement?.();if(!group)continue;delete group.dataset.judgement;group.classList.remove('excellent-flash');group.querySelector('.judgement-halo,.missed-note-marker')?.remove();}
+  for(const meta of scoreData.notes){const group=meta.note.getSVGElement?.();if(!group)continue;delete group.dataset.judgement;group.classList.remove('excellent-flash');group.querySelector('.judgement-halo')?.remove();}
   for(const result of judgements){
     if(Number.isFinite(result.expected_beat)){
       const meta=scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001),group=meta?.note.getSVGElement?.();if(!group)continue;
       const judgement=result.excellent?'excellent':result.judgement;
       group.dataset.judgement=judgement;
-      if(judgement==='missed'){
-        const notehead=group.querySelector('.vf-notehead'),head=notehead?.querySelector(':scope > text');
-        if(notehead&&head){
-          const bounds=head.getBBox(),marker=document.createElementNS('http://www.w3.org/2000/svg','circle');
-          marker.setAttribute('class','missed-note-marker');marker.setAttribute('cx',String(bounds.x+bounds.width/2));marker.setAttribute('cy',String(bounds.y+bounds.height/2));marker.setAttribute('r',String(Math.max(3,bounds.width*.36)));
-          notehead.insertBefore(marker,head);
-        }
-      }
       if(['on_time','excellent','early','late'].includes(judgement)){
         const notehead=group.querySelector('.vf-notehead'),head=notehead?.querySelector(':scope > text');
         if(notehead&&head){
           const bounds=head.getBBox(),halo=document.createElementNS('http://www.w3.org/2000/svg','circle');
-          halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(bounds.x+bounds.width/2));halo.setAttribute('cy',String(bounds.y+bounds.height/2));halo.setAttribute('r',String(Math.max(6,bounds.width*.72)));
+          halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(bounds.x+bounds.width/2));halo.setAttribute('cy',String(bounds.y+bounds.height/2));halo.setAttribute('r',String(Math.max(6,bounds.width*.84)));
           notehead.insertBefore(halo,head);
           if(judgement==='excellent'){
             group.classList.add('excellent-flash');
@@ -390,7 +382,10 @@ function applyJudgements(judgements) {
   }
   const markers=scoreData.svg.querySelector('#unmatched-markers');markers?.replaceChildren();
   for(const result of judgements.filter(item=>!Number.isFinite(item.expected_beat)&&Number.isFinite(item.actual_beat)&&(item.judgement==='extra'||item.judgement==='wrong_instrument'))){
-    const position=positionAtBeat(result.actual_beat),circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',position.x);circle.setAttribute('cy',position.y+20);circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
+    const position=positionAtBeat(result.actual_beat),nearest=scoreData.notes.reduce((best,note)=>Math.abs(note.beat-result.actual_beat)<Math.abs(best.beat-result.actual_beat)?note:best,scoreData.notes[0]);
+    const head=nearest?.note.getSVGElement?.()?.querySelector('.vf-notehead > text'),bounds=head?.getBBox(),matrix=head?.getCTM();
+    const headY=bounds&&matrix?matrix.b*(bounds.x+bounds.width/2)+matrix.d*(bounds.y+bounds.height/2)+matrix.f:(position.y1+position.y2)/2;
+    const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',String(position.x));circle.setAttribute('cy',String(headY));circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
   }
 }
 function updateScore(beat, judgements) {
@@ -411,7 +406,7 @@ function clearScoreFeedback() {
   for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
     delete group.dataset.judgement;group.classList.remove('excellent-flash');
-    group.querySelector('.missed-note-marker')?.remove();
+    group.querySelector('.judgement-halo')?.remove();
     group.getAnimations?.().forEach(animation=>animation.cancel());
   }
   scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;

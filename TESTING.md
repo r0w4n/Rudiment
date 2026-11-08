@@ -10,16 +10,16 @@ npm run build
 npm run test:e2e
 ```
 
-Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguity, Note On velocity zero, instrument mapping, onset-derived quarter/eighth/sixteenth/triplet values, mixed subdivisions and rests, short-gate quarter-note imports, deterministic simultaneous-hit matching, configurable timing boundaries, timing sign, misses, extras and wrong instruments. Browser tests cover the first-run workspace, bundled and file import, saved MIDI library restoration/deletion, statistics dialog behavior, removed snare demo controls, score-integrated missed-note feedback, continuous playhead/pause/resume, rapid independent audio voices, keyboard lifecycle, local persistence, responsive layout, looping and simulated MIDI permission/device/message/reconnect states.
+Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguity, Note On velocity zero, instrument mapping, onset-derived quarter/eighth/sixteenth/triplet values, mixed subdivisions and rests, short-gate quarter-note imports, deterministic simultaneous-hit matching, configurable timing boundaries, timing sign, misses, extras and wrong instruments. Browser tests cover the first-run workspace, bundled and file import, saved MIDI library restoration/deletion, readable non-scrolling results, two-hit result dismissal/start behavior, hit-to-start and statistics dialog behavior and persisted perfect/early/late hit totals, removed snare demo controls, score-integrated missed-note feedback, continuous playhead/pause/resume, rapid independent audio voices, keyboard lifecycle, local persistence, responsive layout, looping and simulated MIDI permission/device/message/reconnect states.
 
 ## Demo checklist (no hardware)
 
 1. Open `http://127.0.0.1:5173` in Chrome. Confirm Single Paradiddle, 60 BPM, Demo input and “Try without drums” are visible.
 2. Start practice to unlock browser audio; confirm the count-in and exercise click sound.
 3. Start. Confirm four accented count-in clicks at 60 BPM, then the playhead begins at bar 1 and follows the notation.
-4. Press `J` for demo snare hits. Confirm signed Hit/Early/Late feedback and audible velocity-sensitive snare playback.
-   Confirm Excellent/on-time notes turn green, early notes blue, late notes yellow, and expired misses red without relaying out the score. Adjust both timing thresholds in Settings and repeat.
-5. Pause/resume with Space, then test Stop and Restart. A natural completion must show and save a real 0–100 result.
+4. Press `J` for demo snare hits. Confirm signed Hit/Early/Late feedback, perfect/early/late counts in the completion summary and Statistics dialog, and audible velocity-sensitive snare playback.
+   Confirm Excellent/on-time notes turn green, early notes blue, late notes yellow, and missed notes do not show a red circle around the notehead. Adjust both timing thresholds in Settings and repeat.
+5. Start with a drum hit or `J`; pause/resume with Space, then test Stop and Restart. A natural completion must save a real 0–100 result in a readable, non-scrolling modal without leaving the practice workspace. The first new hit should dismiss the results modal; a second hit should begin the next run.
 6. Practise the same tempo/input twice; confirm the second result compares against the previous run. Reload and check that the history count remains.
 7. Select “Load bundled .mid”. Confirm R/L sticking and accents render through the same import callback. Drag `single-stroke-roll.mid` onto the score and try the ambiguous fixture to inspect its warning.
 8. Open settings: preview all three click timbres, toggle the exercise click and app snare independently, change loops, run eight-tap calibration and Reset it.

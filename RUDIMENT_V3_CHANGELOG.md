@@ -29,8 +29,12 @@ Hardware assertions remain deliberately separate: Web MIDI reconnect, byte filte
 - The playhead interpolates within each bar and moves to its next bar/system using the same beat position supplied by the playback clock.
 - Vertical viewport tracking eases toward the active system on playback frames, keeping the active and following system visible without re-rendering during playback.
 - Resize-only reflow preserves the current beat and judgement feedback; fresh sessions return to the opening system.
-- Detected-hit timing feedback uses slightly larger, more vivid colored circles behind noteheads; missed-note indicators remain unchanged.
-- Missed-note red dots are positioned from the missed notehead's SVG bounds and remain centered beneath the glyph on every stave system.
+- Detected-hit timing feedback uses slightly larger, more vivid colored circles behind noteheads; missed notes do not draw red circles around noteheads.
+- Unmatched-strike dots now use the nearest rendered notehead's vertical position rather than a fixed stave-origin offset; hit halos are slightly larger and have a soft color-matched glow.
+- End-of-run score summaries now appear in a compact, dismissible modal centered over the score panel, leaving the rest of the practice page in place.
+- Result metrics now use readable high-contrast text and a compact layout that fits without scrolling; the first drum hit dismisses results and the second starts the next run. A hit can also start practice from idle.
+- Session results and saved practice statistics now count perfect, early, and late hits individually, including per-session counts in the recent-session list.
+- Fresh runs explicitly clear successful-hit halos so no hit circles carry over into a run with no drum input.
 - Playback no longer dims past notes or adds a glow to the current note, keeping note glyphs visually stable as the playhead passes.
 - The smoothly interpolated playhead now uses rendered notehead positions as beat anchors, aligning its position with each written note without snapping at note times.
 - Playhead height now follows each percussion staff's actual top and bottom line coordinates, so it crosses the full stave on every system, including single-line rudiments.

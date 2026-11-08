@@ -167,6 +167,21 @@ fn beats_per_bar(exercise: &Exercise) -> f64 {
     exercise.meter_numerator as f64 * 4.0 / exercise.meter_denominator.max(1) as f64
 }
 
+fn timing_hit_counts(summary: &SessionSummary) -> (usize, usize, usize) {
+    let perfect = summary.results.iter().filter(|hit| hit.excellent).count();
+    let early = summary
+        .results
+        .iter()
+        .filter(|hit| hit.judgement == Judgement::Early)
+        .count();
+    let late = summary
+        .results
+        .iter()
+        .filter(|hit| hit.judgement == Judgement::Late)
+        .count();
+    (perfect, early, late)
+}
+
 fn exercise_beats(exercise: &Exercise) -> f64 {
     let last = exercise.hits.iter().map(|hit| hit.beat).fold(0.0, f64::max);
     let bar_beats = beats_per_bar(exercise);
@@ -282,6 +297,31 @@ fn focus_stats_close() {
     }
 }
 
+fn restore_result_focus() {
+    if let Some(button) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.query_selector(".start-button").ok().flatten())
+        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = button.focus();
+    }
+}
+
+fn focus_result_close() {
+    let callback = Closure::once_into_js(|| {
+        if let Some(button) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("result-modal-close"))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = button.focus();
+        }
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = window.request_animation_frame(callback.unchecked_ref());
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let exercise = RwSignal::new(paradiddle());
@@ -311,6 +351,7 @@ fn App() -> impl IntoView {
     let comparison = RwSignal::new(None::<i16>);
     let settings_open = RwSignal::new(false);
     let stats_open = RwSignal::new(false);
+    let result_modal_open = RwSignal::new(false);
     let welcome = RwSignal::new(true);
     let import_error = RwSignal::new(None::<String>);
     let midi_status = RwSignal::new("Not connected".to_string());
@@ -403,6 +444,8 @@ fn App() -> impl IntoView {
         history.update(|items| items.push(current.clone()));
         result.set(Some(current));
         phase.set("complete".into());
+        result_modal_open.set(true);
+        focus_result_close();
         feedback.set("Run complete — saved on this device".into());
     });
 
@@ -520,12 +563,18 @@ fn App() -> impl IntoView {
     let start_new_run: Rc<dyn Fn(u8)> = {
         let launch = launch_run.clone();
         Rc::new(move |count_bars| {
+            result_modal_open.set(false);
+            observed.set(vec![]);
+            live.set(vec![]);
+            result.set(None);
+            progress.set(-1.0);
             clear_score_feedback();
             launch(0.0, count_bars);
         })
     };
 
     let save_for_hit = save_current_settings.clone();
+    let start_for_hit = start_new_run.clone();
     let hit_input: Rc<dyn Fn(f64, Instrument, u8, InputSource, Option<u8>, Option<u8>)> = Rc::new(
         move |timestamp, instrument, velocity, source, raw_note, raw_channel| {
             if !snare_muted.get_untracked() && !play_snare(velocity) {
@@ -550,6 +599,18 @@ fn App() -> impl IntoView {
                         save_for_hit();
                     }
                 }
+                return;
+            }
+            if phase.get_untracked() == "complete" && result_modal_open.get_untracked() {
+                result_modal_open.set(false);
+                restore_result_focus();
+                feedback.set("Results closed — hit again to start practice".into());
+                return;
+            }
+            if matches!(phase.get_untracked().as_str(), "idle" | "complete") {
+                input_mode.set(source);
+                feedback.set("Practice started by drum hit".into());
+                start_for_hit(count_in.get_untracked());
                 return;
             }
             if phase.get_untracked() != "running" {
@@ -674,6 +735,7 @@ fn App() -> impl IntoView {
                         }
                     });
                     exercise.set(parsed);
+                    result_modal_open.set(false);
                     phase.set("idle".into());
                     feedback.set("MIDI imported — review sticking and press Start".into());
                 }
@@ -922,6 +984,12 @@ fn App() -> impl IntoView {
             restore_stats_focus();
             return;
         }
+        if result_modal_open.get_untracked() && event.key() == "Escape" {
+            event.prevent_default();
+            result_modal_open.set(false);
+            restore_result_focus();
+            return;
+        }
         let target = event
             .target()
             .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok());
@@ -1052,7 +1120,7 @@ fn App() -> impl IntoView {
     let save_on_time = save_current_settings.clone();
     let save_excellent = save_current_settings.clone();
     view! {
-      <main class=move || if phase.get()=="complete"{"app results-active"}else{"app"}>
+      <main class="app">
         <header class="topbar">
           <a class="brand" href="#" aria-label="Rudiment home"><span class="brand-mark">"R"</span><span>"Rudiment"</span></a>
           <div class="exercise-heading"><span class="eyebrow">"CURRENT EXERCISE"</span><strong>{move || exercise.get().title}</strong><small>"4/4 · sticking and accents"</small></div>
@@ -1062,11 +1130,11 @@ fn App() -> impl IntoView {
           <button class="icon-button" aria-label="Open settings" on:click=move |_|settings_open.set(true)>"⚙"</button>
         </header>
 
-          <section class=move || if phase.get()=="complete"{"workspace hidden"}else{"workspace"}>
-              <aside class=move || if welcome.get(){"welcome"}else{"welcome hidden"}><div><strong>"A paradiddle is ready."</strong><span>"Press J for snare hits. Space pauses; R restarts."</span></div><button aria-label="Dismiss welcome hint" on:click=move |_|{welcome.set(false);save_welcome();}>"Got it"</button></aside>
+          <section class="workspace">
+              <aside class=move || if welcome.get(){"welcome"}else{"welcome hidden"}><div><strong>              "A paradiddle is ready."</strong><span>"Hit your drum or press J to start. Space pauses; R restarts."</span></div><button aria-label="Dismiss welcome hint" on:click=move |_|{welcome.set(false);save_welcome();}>"Got it"</button></aside>
             <section id="score-card" class="score-card">
               <div class="score-meta">
-                <div><span class="mode-badge">{move || if selected_midi.get().is_some(){"MIDI INPUT"}else{"DEMO INPUT"}}</span><span>{move || if selected_midi.get().is_some(){"Incoming kit events use your saved mapping."}else{"Try without drums — press J to play."}}</span></div>
+                <div><span class="mode-badge">{move || if selected_midi.get().is_some(){"MIDI INPUT"}else{"DEMO INPUT"}}</span><span>{move || if selected_midi.get().is_some(){"Hit your drum to start; incoming kit events use your saved mapping."}else{"Hit your drum or press J to start."}}</span></div>
                 <div class="score-actions">
                   <button on:click={let callback=choose_cb.clone();move |_|choose_midi(callback.as_ref().as_ref().unchecked_ref())}>"Import MIDI"</button>
                   <button on:click={let callback=choose_cb.clone();move |_|load_bundled("public/exercises/single-paradiddle.mid",callback.as_ref().as_ref().unchecked_ref())}>"Load bundled .mid"</button>
@@ -1126,22 +1194,33 @@ fn App() -> impl IntoView {
               <div class=move || if exercise.get().warnings.is_empty()&&exercise.get().track_names.len()<2{"warning-row hidden"}else{"warning-row"}><span>{move || exercise.get().warnings.join(" · ")}</span><label class={move || if exercise.get().track_names.len()>1&&!imported_bytes.get().is_empty(){"track-picker"}else{"track-picker hidden"}}>"MIDI track"<select prop:value=move || exercise.get().selected_track.to_string() on:change=move |event|{let index=event_target_value(&event).parse::<usize>().unwrap_or(0);if let Ok(parsed)=parse_midi(&imported_bytes.get_untracked(),&imported_name.get_untracked(),Some(index)){exercise.set(parsed);}}>{move || exercise.get().track_names.into_iter().enumerate().map(|(index,name)|view!{<option value=index.to_string()>{name}</option>}).collect_view()}</select></label></div>
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
               <div class="position-row"><span>{move || {let bar_beats=beats_per_bar(&exercise.get());let current=(progress.get().max(0.0)/bar_beats).floor() as usize+1;format!("BAR {current} / {}",(exercise_beats(&exercise.get())*loops.get() as f64/bar_beats) as usize)}}</span><div class="timeline"><i style=move || format!("width:{:.2}%",(progress.get().max(0.0)/(exercise_beats(&exercise.get())*loops.get() as f64)*100.0).clamp(0.0,100.0))></i></div><span>{move || format!("{} / {} LOOP",((progress.get().max(0.0)/exercise_beats(&exercise.get())).floor() as u8+1).min(loops.get()),loops.get())}</span></div>
+              <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|{result_modal_open.set(false);restore_result_focus();}>
+                <section class="stats-modal results-modal" role="dialog" aria-modal="true" aria-labelledby="result-title" on:click=|event|event.stop_propagation() on:keydown=move |event:web_sys::KeyboardEvent|{
+                  match event.key().as_str(){
+                    "Escape"=>{event.prevent_default();result_modal_open.set(false);restore_result_focus();},
+                    "Tab"=>event.prevent_default(),
+                    _=>{},
+                  }
+                }>
+                <div class="stats-modal-header"><div><span class="results-kicker">"SESSION SAVED · LOCALLY"</span><h2 id="result-title">"Good work."</h2></div><button id="result-modal-close" aria-label="Close session results" on:click=move |_|{result_modal_open.set(false);restore_result_focus();}>"×"</button></div>
+                <div class="results-score-summary">
+                  <div class="score-ring" style=move || format!("--score:{}",result.get().and_then(|session|session.summary.score).unwrap_or(0))><div><strong>{move || result.get().and_then(|session|session.summary.score).unwrap_or(0)}</strong><span>"/ 100"</span></div></div>
+                  <p>{move || result.get().map(|session|format!("{} at {:.0} BPM · {} input",session.exercise_title,session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"})).unwrap_or_default()}</p>
+                </div>
+                <div class="result-metrics"><article><span>"HITS"</span><strong>{move || result.get().map(|session|format!("{} / {}",session.summary.matched,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article><article><span>"MEAN ERROR"</span><strong>{move || result.get().and_then(|session|session.summary.mean_abs_error_ms).map(|value|format!("{value:.0} ms")).unwrap_or_else(||"—".into())}</strong></article><article><span>"TIMING BIAS"</span><strong>{move || result.get().and_then(|session|session.summary.signed_mean_error_ms).map(|value|if value<0.0{format!("{:.0} ms early",value.abs())}else{format!("{value:.0} ms late")}).unwrap_or_else(||"—".into())}</strong></article><article><span>"PERFECT"</span><strong>{move || result.get().map(|session|timing_hit_counts(&session.summary).0.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"EARLY"</span><strong>{move || result.get().map(|session|timing_hit_counts(&session.summary).1.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"LATE"</span><strong>{move || result.get().map(|session|timing_hit_counts(&session.summary).2.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"MISSED"</span><strong>{move || result.get().map(|session|session.summary.missed.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"EXTRAS"</span><strong>{move || result.get().map(|session|session.summary.extras.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"WRONG DRUM"</span><strong>{move || result.get().map(|session|session.summary.wrong_instrument.to_string()).unwrap_or_else(||"—".into())}</strong></article></div>
+                <div class="comparison-card"><div><span>"COMPARABLE PREVIOUS RUN"</span><strong>{move || comparison.get().map(|delta|if delta>0{format!("+{delta} points") }else if delta<0{format!("{delta} points")}else{"No change".into()}).unwrap_or_else(||"First comparable run".into())}</strong></div><div><span>"PERSONAL BEST"</span><strong>{move || result.get().map(|session|history.get().iter().filter(|item|item.exercise_hash==session.exercise_hash&&(item.bpm-session.bpm).abs()<0.01&&item.input_mode==session.input_mode&&item.scoring_version==session.scoring_version&&(item.tolerance_ms-session.tolerance_ms).abs()<0.01).filter_map(|item|item.summary.score).max().unwrap_or(session.summary.score.unwrap_or(0)).to_string()).unwrap_or_else(||"—".into())}</strong></div><small>"Same exercise version, tempo, input mode, tolerance and scoring v1 only."</small></div>
+                <div class="result-actions"><button class="primary" on:click={let start=start_new_run.clone();move |_|{observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Practise again"</button><button on:click=move |_|{result_modal_open.set(false);restore_result_focus();}>"Back to score"</button></div>
+                </section>
+              </div>
             </section>
             <section class="feedback-strip" aria-live="polite"><div class=move || format!("feedback-orb {}",feedback.get().split_whitespace().next().unwrap_or("ready").to_lowercase())></div><strong>{move || feedback.get()}</strong><span>{move || {let hits=observed.get().len();format!("{hits} received")}}</span><span>{move || audio_state.get()}</span></section>
             <section class="practice-controls">
               <div class="transport">
-                <div class="transport-secondary"><button on:click=move |_|{stop_audio();phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let start=start_new_run.clone();move |_|{stop_audio();observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"↻ Restart"</button></div>
+                <div class="transport-secondary"><button on:click=move |_|{stop_audio();result_modal_open.set(false);phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let start=start_new_run.clone();move |_|{stop_audio();observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"↻ Restart"</button></div>
                 <button class="primary start-button" on:click={let launch=start_click.clone();let start=start_new_run.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>{stop_audio();phase.set("paused".into());feedback.set("Paused".into());},"paused"=>launch(progress.get_untracked().max(0.0),0),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>"Start practice"}}<small>{move || if count_in.get()>0{format!("{} bar count-in",count_in.get())}else{"No count-in".into()}}</small></button>
               </div>
             </section>
           </section>
-
-            <section class=move || if phase.get()=="complete"{"results-view"}else{"results-view hidden"}><div class="results-kicker">"SESSION SAVED · LOCALLY"</div><h1>"Good work."</h1><p>{move || result.get().map(|session|format!("{} at {:.0} BPM · {} input",session.exercise_title,session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"})).unwrap_or_default()}</p>
-              <div class="score-ring" style=move || format!("--score:{}",result.get().and_then(|session|session.summary.score).unwrap_or(0))><div><strong>{move || result.get().and_then(|session|session.summary.score).unwrap_or(0)}</strong><span>"/ 100"</span></div></div>
-              <div class="result-metrics"><article><span>"HITS"</span><strong>{move || result.get().map(|session|format!("{} / {}",session.summary.matched,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article><article><span>"MEAN ERROR"</span><strong>{move || result.get().and_then(|session|session.summary.mean_abs_error_ms).map(|value|format!("{value:.0} ms")).unwrap_or_else(||"—".into())}</strong></article><article><span>"TIMING BIAS"</span><strong>{move || result.get().and_then(|session|session.summary.signed_mean_error_ms).map(|value|if value<0.0{format!("{:.0} ms early",value.abs())}else{format!("{value:.0} ms late")}).unwrap_or_else(||"—".into())}</strong></article><article><span>"MISSED"</span><strong>{move || result.get().map(|session|session.summary.missed.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"EXTRAS"</span><strong>{move || result.get().map(|session|session.summary.extras.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"WRONG DRUM"</span><strong>{move || result.get().map(|session|session.summary.wrong_instrument.to_string()).unwrap_or_else(||"—".into())}</strong></article></div>
-              <div class="comparison-card"><div><span>"COMPARABLE PREVIOUS RUN"</span><strong>{move || comparison.get().map(|delta|if delta>0{format!("+{delta} points") }else if delta<0{format!("{delta} points")}else{"No change".into()}).unwrap_or_else(||"First comparable run".into())}</strong></div><div><span>"PERSONAL BEST"</span><strong>{move || result.get().map(|session|history.get().iter().filter(|item|item.exercise_hash==session.exercise_hash&&(item.bpm-session.bpm).abs()<0.01&&item.input_mode==session.input_mode&&item.scoring_version==session.scoring_version&&(item.tolerance_ms-session.tolerance_ms).abs()<0.01).filter_map(|item|item.summary.score).max().unwrap_or(session.summary.score.unwrap_or(0)).to_string()).unwrap_or_else(||"—".into())}</strong></div><small>"Same exercise version, tempo, input mode, tolerance and scoring v1 only."</small></div>
-              <div class="result-actions"><button class="primary" on:click={let start=start_new_run.clone();move |_|{observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Practise again"</button><button on:click=move |_|{phase.set("idle".into());result.set(None);progress.set(-1.0);}>"Back to score"</button></div>
-            </section>
 
         {move || if stats_open.get(){
           view!{
@@ -1161,6 +1240,9 @@ fn App() -> impl IntoView {
                   <article><span>"SESSIONS"</span><strong>{move || history.get().len()}</strong></article>
                   <article><span>"PERSONAL BEST"</span><strong>{move || history.get().iter().filter_map(|session|session.summary.score).max().map(|score|score.to_string()).unwrap_or_else(||"—".into())}</strong></article>
                   <article><span>"AVERAGE HIT RATE"</span><strong>{move || {let sessions=history.get();let expected=sessions.iter().map(|session|session.summary.expected).sum::<usize>();if expected==0{"—".into()}else{format!("{:.0}%",100.0*sessions.iter().map(|session|session.summary.matched).sum::<usize>() as f64/expected as f64)}}}</strong></article>
+                  <article><span>"PERFECT HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).0).sum::<usize>()}</strong></article>
+                  <article><span>"EARLY HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).1).sum::<usize>()}</strong></article>
+                  <article><span>"LATE HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).2).sum::<usize>()}</strong></article>
                 </div>
                 <h3>"Recent sessions"</h3>
                 <ol class="stats-recent">
@@ -1169,7 +1251,7 @@ fn App() -> impl IntoView {
                   }else{
                     history.get().iter().rev().take(8).map(|session|view!{
                       <li>
-                        <span><strong>{session.exercise_title.clone()}</strong><small>{format!("{:.0} BPM · {} · {}",session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"},session.ended_at.get(..10).unwrap_or_default())}</small></span>
+                        <span><strong>{session.exercise_title.clone()}</strong><small>{let (perfect,early,late)=timing_hit_counts(&session.summary);format!("{:.0} BPM · {} · {} · {} perfect, {} early, {} late",session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"},session.ended_at.get(..10).unwrap_or_default(),perfect,early,late)}</small></span>
                         <b>{format!("{}/100",session.summary.score.unwrap_or(0))}</b>
                       </li>
                     }).collect_view().into_any()

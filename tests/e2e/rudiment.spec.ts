@@ -4,7 +4,7 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await page.goto('/');
   await expect(page.getByText('Single Paradiddle').first()).toBeVisible();
   await expect(page.getByLabel('Tempo in BPM')).toHaveValue('60');
-  await expect(page.getByText('Try without drums')).toBeVisible();
+  await expect(page.getByText('Hit your drum or press J to start.', { exact: true }).last()).toBeVisible();
   await expect(page.locator('#notation svg')).toHaveCount(1);
   await expect(page.locator('.score-note')).toHaveCount(32);
   await expect(page.locator('#notation')).toContainText('R');
@@ -46,10 +46,44 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
       await new Promise(resolve => setTimeout(resolve, 125));
     }
   });
-  await expect(page.getByText('SESSION SAVED · LOCALLY')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Good work.' })).toBeVisible();
-  await expect(page.locator('.result-metrics article').first()).toContainText(/(?:[1-9]|[12]\d|3[0-2]) \/ 32/);
-  await expect(page.getByText('Single Paradiddle at 240 BPM · Demo input')).toBeVisible();
+  const resultDialog=page.getByRole('dialog',{name:'Good work.'});
+  await expect(resultDialog).toBeVisible();
+  await expect(resultDialog.getByText('SESSION SAVED · LOCALLY')).toBeVisible();
+  await expect(resultDialog.getByRole('heading', { name: 'Good work.' })).toBeVisible();
+  await expect(resultDialog.locator('.result-metrics article').first()).toContainText(/(?:[1-9]|[12]\d|3[0-2]) \/ 32/);
+  const sessionMetrics=resultDialog.locator('.result-metrics article');
+  for(const [index,label] of ['PERFECT','EARLY','LATE'].entries())await expect(sessionMetrics.nth(index+3).locator('span')).toHaveText(label);
+  const sessionTimingCounts=await Promise.all([3,4,5].map(index=>sessionMetrics.nth(index).locator('strong').innerText()));
+  await expect(sessionMetrics.nth(0).locator('strong')).toHaveCSS('color','rgb(244, 240, 231)');
+  const resultModalLayout=await resultDialog.evaluate(element=>({clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,overflow:getComputedStyle(element).overflow}));
+  expect(resultModalLayout.scrollHeight).toBeLessThanOrEqual(resultModalLayout.clientHeight);
+  expect(resultModalLayout.overflow).toBe('hidden');
+  await expect(resultDialog.getByText('Single Paradiddle at 240 BPM · Demo input')).toBeVisible();
+  await expect(page.locator('.workspace')).toBeVisible();
+  const overlayBounds=await page.evaluate(()=>{
+    const score=document.querySelector('#score-card')!.getBoundingClientRect();
+    const overlay=document.querySelector('.result-backdrop')!.getBoundingClientRect();
+    const modal=document.querySelector('.results-modal')!.getBoundingClientRect();
+    return {score:{x:score.x,y:score.y,width:score.width,height:score.height},overlay:{x:overlay.x,y:overlay.y,width:overlay.width,height:overlay.height},modal:{x:modal.x,y:modal.y,width:modal.width,height:modal.height}};
+  });
+  expect(Math.abs(overlayBounds.overlay.x-overlayBounds.score.x)).toBeLessThanOrEqual(2);
+  expect(Math.abs(overlayBounds.overlay.y-overlayBounds.score.y)).toBeLessThanOrEqual(2);
+  expect(Math.abs(overlayBounds.overlay.width-overlayBounds.score.width)).toBeLessThanOrEqual(2);
+  expect(Math.abs(overlayBounds.overlay.height-overlayBounds.score.height)).toBeLessThanOrEqual(2);
+  expect(overlayBounds.score.width-overlayBounds.modal.width).toBeGreaterThan(100);
+  const pageUrl=page.url();
+  await page.keyboard.press('j');
+  await expect(page.locator('.result-backdrop')).toBeHidden();
+  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+  await expect(page.getByRole('button',{name:/Pause/})).toHaveCount(0);
+  expect(page.url()).toBe(pageUrl);
+  await page.keyboard.press('j');
+  await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
+  await expect(page.locator('.workspace')).toBeVisible();
+  expect(page.url()).toBe(pageUrl);
+  await page.getByRole('button',{name:/Stop/}).click();
+  await expect(page.getByText('Stopped — results were not saved')).toBeVisible();
+  await page.reload();
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({ path: 'artifacts/completed-result.png', fullPage: true });
 
@@ -58,12 +92,70 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   const stats=page.getByRole('dialog',{name:'Practice statistics'});
   await expect(stats).toBeVisible();
   await expect(stats).toContainText('1');
+  const statsMetrics=stats.locator('.stats-overview article');
+  for(const [index,label] of ['PERFECT HITS','EARLY HITS','LATE HITS'].entries())await expect(statsMetrics.nth(index+3).locator('span')).toHaveText(label);
+  const lifetimeTimingCounts=await Promise.all([3,4,5].map(index=>statsMetrics.nth(index).locator('strong').innerText()));
+  expect(lifetimeTimingCounts).toEqual(sessionTimingCounts);
+  await expect(stats.locator('.stats-recent')).toContainText(/\d+ perfect, \d+ early, \d+ late/);
   await expect(page.getByRole('button',{name:'Close statistics'})).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(stats).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Stats'})).toBeFocused();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await expect(page.getByText('1 completed session(s) stored only in this browser.')).toBeVisible();
+});
+
+test('one drum hit dismisses results and a second hit starts the next run',async({page})=>{
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await page.evaluate(async () => {
+    await new Promise(resolve => setTimeout(resolve, 165));
+    for (let i = 0; i < 32; i++) {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 125));
+    }
+  });
+  await expect(page.getByRole('dialog',{name:'Good work.'})).toBeVisible();
+  await page.keyboard.press('j');
+  await expect(page.locator('.result-backdrop')).toBeHidden();
+  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+  await expect(page.getByRole('button',{name:/Pause/})).toHaveCount(0);
+  await page.keyboard.press('j');
+  await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
+  await page.getByRole('button',{name:/Stop/}).click();
+});
+
+test('a drum hit starts practice from idle',async({page})=>{
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.keyboard.press('j');
+  await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
+  await expect(page.locator('.result-backdrop')).toBeHidden();
+  await page.getByRole('button',{name:/Stop/}).click();
+  await expect(page.getByText('Stopped — results were not saved')).toBeVisible();
+});
+
+test('a run with no drum input never shows hit circles',async({page})=>{
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
+  await expect(page.locator('.judgement-halo')).toHaveCount(0);
+  await expect(page.locator('.score-note[data-judgement="missed"]').first()).toBeVisible();
+  await expect(page.locator('.missed-note-marker')).toHaveCount(0);
+  await expect(page.locator('.judgement-halo')).toHaveCount(0);
+  await expect(page.getByRole('dialog',{name:'Good work.'})).toBeVisible({timeout:10000});
+  await expect(page.locator('.judgement-halo')).toHaveCount(0);
+  await expect(page.locator('.missed-note-marker')).toHaveCount(0);
 });
 
 test('bundled MIDI imports through the visible import callback and broken files explain failure', async ({ page }) => {
@@ -398,6 +490,7 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   await page.goto('/');
   const hit=page.locator('.score-note[data-beat="1"]');
   const originalFill=await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill);
+  const originalOpacity=await hit.evaluate(element=>getComputedStyle(element).opacity);
   await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1,[
     {expected_beat:1,actual_beat:1.01,judgement:'on_time',error_ms:4,excellent:true,event_id:'hit'},
     {expected_beat:null,actual_beat:1.25,judgement:'extra',error_ms:0,excellent:false,event_id:'extra'}
@@ -413,29 +506,25 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
     const head=element.parentElement!.querySelector(':scope > text')!,bounds=head.getBBox();
     return {radius:Number(element.getAttribute('r')),headWidth:bounds.width};
   });
-  expect(haloSize.radius).toBeCloseTo(haloSize.headWidth*.72,5);
+  expect(haloSize.radius).toBeCloseTo(haloSize.headWidth*.84,5);
+  expect(await halo.evaluate(element=>getComputedStyle(element).filter)).toContain('drop-shadow');
   expect(await halo.evaluate(element=>element.compareDocumentPosition(element.parentElement!.querySelector(':scope > text')!)&Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
   const marker=page.locator('.unmatched-hit-marker');await expect(marker).toHaveCount(1);await expect(marker).toHaveAttribute('data-beat','1.25');
   const markerX=Number(await marker.getAttribute('cx')),expectedX=await hit.evaluate(element=>{const box=(element as SVGGElement).getBBox();return box.x+box.width/2;});expect(markerX).not.toBeCloseTo(expectedX,1);
+  const unmatchedY=await marker.evaluate(element=>{
+    const notes=[...document.querySelectorAll<SVGGElement>('.score-note')];
+    const nearest=notes.reduce((best,note)=>Math.abs(Number(note.dataset.beat)-1.25)<Math.abs(Number(best.dataset.beat)-1.25)?note:best,notes[0]);
+    const head=nearest.querySelector('.vf-notehead > text')!,markerRect=element.getBoundingClientRect(),headRect=head.getBoundingClientRect();
+    return {marker:markerRect.y+markerRect.height/2,head:headRect.y+headRect.height/2};
+  });
+  expect(unmatchedY.marker).toBeCloseTo(unmatchedY.head,0);
   await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1.5,[{expected_beat:1,actual_beat:null,judgement:'missed',error_ms:0,excellent:false,event_id:null}]));
   await expect(hit).toHaveAttribute('data-judgement','missed');
   await expect(hit.locator('.judgement-halo')).toHaveCount(0);
-  const missedMarker=hit.locator('.missed-note-marker');
-  await expect(missedMarker).toHaveCount(1);
-  const markerPosition=await missedMarker.evaluate(element=>{
-    const head=element.parentElement!.querySelector(':scope > text')!,bounds=head.getBBox();
-    const markerRect=element.getBoundingClientRect(),headRect=head.getBoundingClientRect();
-    return {
-      cx:Number(element.getAttribute('cx')),cy:Number(element.getAttribute('cy')),centerX:bounds.x+bounds.width/2,centerY:bounds.y+bounds.height/2,
-      screenCenterX:markerRect.x+markerRect.width/2,headScreenCenterX:headRect.x+headRect.width/2,
-      screenCenterY:markerRect.y+markerRect.height/2,headScreenCenterY:headRect.y+headRect.height/2
-    };
-  });
-  expect(markerPosition.cx).toBeCloseTo(markerPosition.centerX,5);
-  expect(markerPosition.cy).toBeCloseTo(markerPosition.centerY,5);
-  expect(markerPosition.screenCenterX).toBeCloseTo(markerPosition.headScreenCenterX,0);
-  expect(markerPosition.screenCenterY).toBeCloseTo(markerPosition.headScreenCenterY,0);
+  await expect(hit.locator('.missed-note-marker')).toHaveCount(0);
+  await expect(hit.locator(':scope > .vf-notehead > circle')).toHaveCount(0);
   expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+  expect(await hit.evaluate(element=>getComputedStyle(element).opacity)).toBe(originalOpacity);
   await expect(marker).toHaveCount(0);
 });
 

@@ -31,7 +31,7 @@ The static release is written to `dist/`. `npm run fixtures` deterministically r
 
 ## GitHub Pages
 
-`.github/workflows/pages.yml` tests the application, rebuilds it with a repository-relative public URL, verifies the deployable app asset graph, and deploys through the official Pages actions after every push to `main` (or a manual workflow dispatch). Before the first deployment, set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**; repository settings cannot be changed by the workflow's restricted `GITHUB_TOKEN`. No custom secrets are required. The deployed URL is shown on the workflow's `github-pages` environment after a successful run.
+`.github/workflows/pages.yml` tests the application, builds one relocatable release for both Playwright and GitHub Pages, verifies the deployable app asset graph, and deploys through the official Pages actions after every push to `main` (or a manual workflow dispatch). The workflow uses the hosted runner's bundled Chrome and an integrity-checked prebuilt Trunk binary, avoiding a custom browser image and a source build of the deployment tool. Before the first deployment, set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**; repository settings cannot be changed by the workflow's restricted `GITHUB_TOKEN`. No custom secrets are required. The deployed URL is shown on the workflow's `github-pages` environment after a successful run.
 
 ## Architecture
 
