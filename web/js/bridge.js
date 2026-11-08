@@ -47,7 +47,7 @@ const audio = {
     if (!this.master) {
       this.master = this.raw.createGain(); this.master.gain.value = .84;
       this.snareGain = this.raw.createGain(); this.snareGain.gain.value = .72;
-      this.clickGain = this.raw.createGain(); this.clickGain.gain.value = .48;
+      this.clickGain = this.raw.createGain(); this.clickGain.gain.value = 1.08;
       const limiter = this.raw.createDynamicsCompressor(); limiter.threshold.value = -3; limiter.ratio.value = 12;
       this.snareGain.connect(this.master); this.clickGain.connect(this.master); this.master.connect(limiter); limiter.connect(this.raw.destination);
       const urls = ['audio/snare-soft.m4a','audio/snare-medium.m4a','audio/snare-hard.m4a','audio/snare-accent.m4a'].map(publicAsset);
@@ -184,24 +184,6 @@ function tupletsFor(slots) {
   flush();
   return groups.map(notes=>new Tuplet(notes,{numNotes:3,notesOccupied:2,bracketed:true}));
 }
-function extendFinalStaveEnding(svg,stave,x,singleLine) {
-  const oldEnding=[...svg.querySelectorAll('.vf-stavebarline')].at(-1);
-  if(oldEnding)oldEnding.style.display='none';
-  const group=document.createElementNS('http://www.w3.org/2000/svg','g');
-  group.setAttribute('class','score-final-barline');group.dataset.x=String(x);
-  const from=stave.getX()+stave.getWidth()-1;
-  const firstLine=singleLine?2:0,lastLine=singleLine?2:4;
-  for(let lineIndex=firstLine;lineIndex<=lastLine;lineIndex++){
-    const line=document.createElementNS('http://www.w3.org/2000/svg','line'),y=stave.getYForLine(lineIndex);
-    line.setAttribute('x1',String(from));line.setAttribute('x2',String(x));line.setAttribute('y1',String(y));line.setAttribute('y2',String(y));line.setAttribute('stroke','#343a36');line.setAttribute('stroke-width','1');group.appendChild(line);
-  }
-  const top=singleLine?stave.getYForLine(2)-9:stave.getYForLine(0),bottom=singleLine?stave.getYForLine(2)+9:stave.getYForLine(4);
-  for(const [offset,width] of [[-5,1],[-2,3]]){
-    const barline=document.createElementNS('http://www.w3.org/2000/svg','line');
-    barline.setAttribute('x1',String(x+offset));barline.setAttribute('x2',String(x+offset));barline.setAttribute('y1',String(top));barline.setAttribute('y2',String(bottom));barline.setAttribute('stroke','#343a36');barline.setAttribute('stroke-width',String(width));group.appendChild(barline);
-  }
-  svg.appendChild(group);
-}
 function pitchForHit(hit) {
   const note=Number(hit.note),byNote={
     35:'f/4',36:'f/4',37:'b/4/x',38:'b/4',39:'a/5/x',40:'b/4',
@@ -239,13 +221,13 @@ function renderScore(exercise) {
   const lastBeat=hits.reduce((last,hit)=>Math.max(last,hit.notation_beat??hit.beat),0);
   const barCount=Math.max(1,Math.floor(lastBeat/metersPerBar)+1);
   const shortest=hits.length?Math.min(...hits.map(hit=>hit.notation_duration_beats||.25)):1;
-  const minimumBarWidth=shortest<.4?270:shortest<.75?210:180;
+  const minimumBarWidth=shortest<.4?145:shortest<.75?120:100;
   const singleLine=exercise.staff_mode==='single_line'&&hits.length>0&&hits.every(hit=>instrumentForHit(hit)==='snare');
   const width=Math.max(280,element.clientWidth),availableWidth=Math.max(240,width-28);
   const compactLandscape=window.innerHeight<=600&&window.innerWidth>window.innerHeight;
   const scoreTopMargin=compactLandscape?38:SCORE_TOP_MARGIN,scoreRowHeight=compactLandscape?138:SCORE_ROW_HEIGHT,scoreBottomMargin=compactLandscape?10:SCORE_BOTTOM_MARGIN;
   const renderer=new Renderer(element,Renderer.Backends.SVG);
-  const notesMeta=[],barLayouts=[],staves=[],barSlots=new Map(),beams=[],tuplets=[],eventHitsByNote=new Map();
+  const notesMeta=[],barLayouts=[],staves=[],barSlots=new Map(),barSlotBeats=new Map(),beams=[],tuplets=[],eventHitsByNote=new Map();
   const firstStave=new Stave(14,scoreTopMargin,availableWidth);
   firstStave.setConfigForLines(Array.from({length:5},(_,index)=>({visible:!singleLine||index===2})));
   firstStave.setBegBarType(BarlineType.NONE).addClef('percussion').addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
@@ -273,7 +255,8 @@ function renderScore(exercise) {
   for(let bar=0;bar<barCount;bar++){
     const row=Math.floor(bar/barsPerLine),stave=staves[row];
     const firstLine=singleLine?2:0,lastLine=singleLine?2:4;
-    barLayouts.push({index:bar,startBeat:bar*metersPerBar,endBeat:(bar+1)*metersPerBar,row,xStart:stave.getNoteStartX(),xEnd:stave.getNoteEndX(),y:stave.getY(),y1:stave.getYForLine(firstLine)-12,y2:stave.getYForLine(lastLine)+12,anchors:[]});
+    const xStart=stave.getNoteStartX()+(bar%barsPerLine)*barWidth;
+    barLayouts.push({index:bar,startBeat:bar*metersPerBar,endBeat:(bar+1)*metersPerBar,row,xStart,xEnd:xStart+barWidth,y:stave.getY(),y1:stave.getYForLine(firstLine)-12,y2:stave.getYForLine(lastLine)+12});
   }
   for(let row=0;row<lineCount;row++){
     const firstBar=row*barsPerLine,lastBar=Math.min(barCount,firstBar+barsPerLine),rowTickables=[];
@@ -291,7 +274,9 @@ function renderScore(exercise) {
       for(let index=0;index<ordered.length;index++){
         const group=ordered[index],next=ordered[index+1]?.position??end;
         if(group.position>cursor+.001){
-          for(const value of restValues(group.position-cursor)){slots.push(noteWithDuration(['b/4'],value,true));cursor+=value;}
+          for(const value of restValues(group.position-cursor)){
+            const rest=noteWithDuration(['b/4'],value,true);barSlotBeats.set(rest,cursor);slots.push(rest);cursor+=value;
+          }
         }
         const keys=[...new Set(group.hits.map(pitchForHit))];
         const requestedDuration=Math.min(...group.hits.map(hit=>hit.notation_duration_beats||.25));
@@ -301,11 +286,13 @@ function renderScore(exercise) {
         const hands=[...new Set(group.hits.map(hit=>hit.hand).filter(hand=>hand==='R'||hand==='L'))];
         if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(1).setFont('Inter',11,'700'),0);
         if(group.hits.some(hit=>hit.accent))note.addModifier(new Articulation('a>').setPosition(3),0);
-        slots.push(note);
+        barSlotBeats.set(note,group.position);slots.push(note);
         for(const hit of group.hits){const key=pitchForHit(hit);notesMeta.push({note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,key,headIndex:Math.max(0,keys.indexOf(key)),row,bar});}
         cursor=group.position+value;
       }
-      if(cursor<end-.001)for(const value of restValues(end-cursor))slots.push(noteWithDuration(['b/4'],value,true));
+      if(cursor<end-.001)for(const value of restValues(end-cursor)){
+        const rest=noteWithDuration(['b/4'],value,true);barSlotBeats.set(rest,cursor);slots.push(rest);cursor+=value;
+      }
       barSlots.set(bar,slots);rowTickables.push(...slots);
       tuplets.push(...tupletsFor(slots));
       beams.push(...Beam.generateBeams(slots,{groups:beamGroups,stemDirection:1}));
@@ -313,18 +300,38 @@ function renderScore(exercise) {
     const voice=new Voice({numBeats:(lastBar-firstBar)*metersPerBar,beatValue:4}).setStrict(false);
     voice.addTickables(rowTickables);
     new Formatter().joinVoices([voice]).format([voice],staves[row].getNoteEndX()-staves[row].getNoteStartX());
+    const firstSlot=barSlots.get(firstBar)?.[0],firstContext=firstSlot?.getTickContext();
+    const rowStartRelativeX=firstSlot&&firstContext?firstSlot.getX()+firstSlot.getGlyphWidth()/2:0;
+    const rowStartX=staves[row].getNoteStartX()+rowStartRelativeX;
+    const pixelsPerBeat=barWidth/metersPerBar;
+    for(let bar=firstBar;bar<lastBar;bar++){
+      const layout=barLayouts[bar],xStart=rowStartX+(bar-firstBar)*barWidth;
+      layout.xStart=xStart;layout.xEnd=xStart+barWidth;
+      for(const slot of barSlots.get(bar)??[]){
+        const tickContext=slot.getTickContext(),xShift=slot.getX()-tickContext.getX();
+        const targetCenter=rowStartRelativeX+(bar-firstBar)*barWidth+(barSlotBeats.get(slot)-layout.startBeat)*pixelsPerBeat;
+        tickContext.setX(targetCenter-xShift-slot.getGlyphWidth()/2);
+      }
+    }
     voice.draw(context,staves[row]);
     for(const tickable of rowTickables)if(tickable.isRest?.())tickable.getSVGElement?.()?.setAttribute('data-score-rest','true');
   }
   for(const beam of beams)beam.setContext(context).draw();
   for(const tuplet of tuplets)tuplet.setContext(context).draw();
   const svg=element.querySelector('svg');
-  for(const [bar,slots] of barSlots)barLayouts[bar].xStart=slots[0]?.getAbsoluteX()??barLayouts[bar].xStart;
+  for(let row=0;row<lineCount;row++){
+    const firstNote=notesMeta.find(meta=>meta.row===row),head=firstNote?.note.getSVGElement?.()?.querySelector('.vf-notehead > text');
+    const bounds=head?.getBBox();
+    if(!firstNote||!bounds)continue;
+    const layout=barLayouts[firstNote.bar],target=layout.xStart+(firstNote.notationBeat-layout.startBeat)*barWidth/metersPerBar;
+    const correction=bounds.x+bounds.width/2-target;
+    for(let bar=row*barsPerLine;bar<Math.min(barCount,(row+1)*barsPerLine);bar++){
+      barLayouts[bar].xStart+=correction;barLayouts[bar].xEnd+=correction;
+    }
+  }
   for(let bar=0;bar<barCount-1;bar++){
     if(barLayouts[bar].row!==barLayouts[bar+1].row)continue;
-    const previous=barSlots.get(bar)?.at(-1),next=barSlots.get(bar+1)?.[0];
-    if(!previous||!next)continue;
-    const stave=staves[barLayouts[bar].row],x=(previous.getAbsoluteX()+next.getAbsoluteX())/2;
+    const stave=staves[barLayouts[bar].row],x=barLayouts[bar].xEnd-Math.min(12,barWidth*.06);
     const barline=document.createElementNS('http://www.w3.org/2000/svg','line');
     barline.setAttribute('class','score-barline');barline.setAttribute('x1',String(x));barline.setAttribute('x2',String(x));
     barline.setAttribute('y1',String(singleLine?stave.getYForLine(2)-9:stave.getYForLine(0)));
@@ -355,36 +362,7 @@ function renderScore(exercise) {
       group.dataset.midiNotes=eventHits.map(candidate=>candidate.note??38).join(',');
       group.dataset.instruments=[...new Set(eventHits.map(instrumentForHit))].join(',');
       group.classList.add('score-note');
-      const head=group.querySelector('.vf-notehead > text'),bounds=head?.getBBox();
-      if(bounds)barLayouts[meta.bar].anchors.push({beat:meta.beat,x:bounds.x+bounds.width/2});
     }
-  }
-  for(let index=0;index<barLayouts.length-1;index++){
-    const bar=barLayouts[index],nextBar=barLayouts[index+1];
-    if(bar.row!==nextBar.row)continue;
-    const nextStart=nextBar.anchors.find(anchor=>Math.abs(anchor.beat-nextBar.startBeat)<.001);
-    if(nextStart)bar.xEnd=nextStart.x;
-  }
-  // VexFlow centres a note glyph inside its rhythmic slot. On the final bar
-  // this leaves the end barline much closer to the last notehead than the
-  // preceding noteheads are to one another, so beat-linear interpolation
-  // visibly slows during the last note. Continue the measured pixels-per-beat
-  // spacing to a real, extended ending whenever the row has room for it.
-  const finalBar=barLayouts.at(-1),finalStave=staves.at(-1);
-  if(svg&&finalBar&&finalStave){
-    const timedAnchors=[...finalBar.anchors].sort((a,b)=>a.beat-b.beat),last=timedAnchors.at(-1),previous=timedAnchors.at(-2);
-    if(last&&previous&&last.beat>previous.beat&&last.beat<finalBar.endBeat){
-      const pixelsPerBeat=(last.x-previous.x)/(last.beat-previous.beat);
-      const terminalX=last.x+(finalBar.endBeat-last.beat)*pixelsPerBeat;
-      if(Number.isFinite(terminalX)&&terminalX>finalBar.xEnd&&terminalX<=width-14){
-        finalBar.xEnd=terminalX;extendFinalStaveEnding(svg,finalStave,terminalX,singleLine);
-      }else if(Number.isFinite(terminalX)&&terminalX>finalBar.xEnd)finalBar.linearEnding=true;
-    }
-  }
-  for(const bar of barLayouts){
-    const anchors=new Map([[bar.startBeat.toFixed(4),{beat:bar.startBeat,x:bar.xStart}],[bar.endBeat.toFixed(4),{beat:bar.endBeat,x:bar.xEnd}]]);
-    for(const anchor of bar.anchors)anchors.set(anchor.beat.toFixed(4),anchor);
-    bar.anchors=[...anchors.values()].sort((a,b)=>a.beat-b.beat);
   }
   const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
   const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
@@ -402,15 +380,9 @@ function positionAtBeat(beat) {
   const bars=scoreData.bars;if(!bars.length)return {x:0,y:0,row:0,bar:0};
   const value=Math.max(0,Math.min(scoreData.totalBeats,beat));
   const index=Math.min(bars.length-1,Math.floor(value/scoreData.meter));
-  const bar=bars[index],anchors=bar.anchors;
-  if(bar.linearEnding){
-    const start=anchors[0],ratio=Math.max(0,Math.min(1,(value-bar.startBeat)/Math.max(.001,bar.endBeat-bar.startBeat)));
-    return {x:start.x+(bar.xEnd-start.x)*ratio,y:bar.y,y1:bar.y1,y2:bar.y2,row:bar.row,bar:index};
-  }
-  let before=anchors[0],after=anchors.at(-1);
-  for(const anchor of anchors){if(anchor.beat<=value)before=anchor;if(anchor.beat>=value){after=anchor;break;}}
-  const ratio=Math.max(0,Math.min(1,(value-before.beat)/Math.max(.001,after.beat-before.beat)));
-  return {x:before.x+(after.x-before.x)*ratio,y:bar.y,y1:bar.y1,y2:bar.y2,row:bar.row,bar:index};
+  const bar=bars[index];
+  const ratio=Math.max(0,Math.min(1,(value-bar.startBeat)/Math.max(.001,bar.endBeat-bar.startBeat)));
+  return {x:bar.xStart+(bar.xEnd-bar.xStart)*ratio,y:bar.y,y1:bar.y1,y2:bar.y2,row:bar.row,bar:index};
 }
 function applyJudgements(judgements) {
   const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
@@ -500,7 +472,8 @@ function selectMidi(id){selectedInput=WebMidi.inputs.find(input=>input.id===id)|
 
 async function readFile(file,callback){if(!file)return;if(file.size>8*1024*1024){callback(new Uint8Array(),file.name,'Files larger than 8 MB are not supported.');return;}try{callback(new Uint8Array(await file.arrayBuffer()),file.name,'');}catch(error){callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
 function chooseMidi(callback){midiFileCallback=callback;const input=document.createElement('input');input.type='file';input.accept='.mid,.midi,audio/midi';input.onchange=()=>readFile(input.files?.[0],callback);input.click();}
-async function loadBundled(url,callback){try{const response=await fetch(url);if(!response.ok)throw new Error(`HTTP ${response.status}`);callback(new Uint8Array(await response.arrayBuffer()),url.split('/').pop(),'');}catch(error){callback(new Uint8Array(),url,error?.message||'Could not load bundled exercise.');}}
+async function loadBundled(url,callback,saveToLibrary=false){try{const response=await fetch(url);if(!response.ok)throw new Error(`HTTP ${response.status}`);callback(new Uint8Array(await response.arrayBuffer()),url.split('/').pop(),'',saveToLibrary);}catch(error){callback(new Uint8Array(),url,error?.message||'Could not load bundled exercise.');}}
+function closeMidiLibrary(){const library=document.querySelector('.midi-library');if(library)library.open=false;}
 let dropController;
 let midiFileCallback;
 function bindDrop(callback){
@@ -517,9 +490,13 @@ function bindDrop(callback){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeVoices:audio.voices.size,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
-  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click;},startAudio:(options,frame,done)=>audio.start(options,frame,done),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,bindDrop,
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeVoices:audio.voices.size,clickGain:audio.clickGain?.gain.value??0,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
+  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
+  renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,closeMidiLibrary,bindDrop,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };
+document.addEventListener('click',event=>{
+  const library=document.querySelector('.midi-library[open]');
+  if(library&&event.target instanceof Node&&!library.contains(event.target))library.open=false;
+});

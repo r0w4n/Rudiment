@@ -3,6 +3,7 @@
 /dist-pages/
 /node_modules/
 /web/dist/
+/web/public/bridge.js
 /.DS_Store
 *.log
 /test-results/

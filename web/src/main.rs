@@ -41,7 +41,9 @@ extern "C" {
     #[wasm_bindgen(js_namespace = rudiment, js_name = chooseMidi)]
     fn choose_midi(callback: &Function);
     #[wasm_bindgen(js_namespace = rudiment, js_name = loadBundled)]
-    fn load_bundled(url: &str, callback: &Function);
+    fn load_bundled(url: &str, callback: &Function, save_to_library: bool);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = closeMidiLibrary)]
+    fn close_midi_library();
     #[wasm_bindgen(js_namespace = rudiment, js_name = bindDrop)]
     fn bind_drop(callback: &Function);
     #[wasm_bindgen(js_namespace = rudiment, js_name = saveSession)]
@@ -410,7 +412,7 @@ fn App() -> impl IntoView {
     let subdivision = RwSignal::new(1u8);
     let timbre = RwSignal::new("woodblock".to_string());
     let metronome = RwSignal::new(true);
-    let click_volume = RwSignal::new(0.48);
+    let click_volume = RwSignal::new(0.72);
     let snare_volume = RwSignal::new(0.72);
     let snare_muted = RwSignal::new(false);
     let loops = RwSignal::new(1u8);
@@ -637,6 +639,18 @@ fn App() -> impl IntoView {
         })
     };
 
+    let reset_run: Rc<dyn Fn()> = Rc::new(move || {
+        stop_audio();
+        result_modal_open.set(false);
+        observed.set(vec![]);
+        live.set(vec![]);
+        result.set(None);
+        progress.set(-1.0);
+        clear_score_feedback();
+        phase.set("idle".into());
+        feedback.set("Ready — press Start to practise".into());
+    });
+
     let start_new_run: Rc<dyn Fn(u8)> = {
         let launch = launch_run.clone();
         Rc::new(move |count_bars| {
@@ -759,12 +773,13 @@ fn App() -> impl IntoView {
         },
     );
 
-    let file_callback: Rc<Closure<dyn FnMut(Uint8Array, String, String)>> = Rc::new(Closure::wrap(
-        Box::new(move |bytes: Uint8Array, name: String, error: String| {
+    let file_callback: Rc<Closure<dyn FnMut(Uint8Array, String, String, JsValue)>> = Rc::new(Closure::wrap(
+        Box::new(move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
             if !error.is_empty() {
                 import_error.set(Some(error));
                 return;
             }
+            let save_to_library = save_to_library.as_bool().unwrap_or(true);
             let data = bytes.to_vec();
             match parse_midi(&data, &name, None) {
                 Ok(parsed) => {
@@ -775,44 +790,53 @@ fn App() -> impl IntoView {
                     let metadata = serde_wasm_bindgen::to_value(&parsed).unwrap_or(JsValue::NULL);
                     let bytes_copy = Uint8Array::from(data.as_slice());
                     let hash = parsed.content_hash.clone();
-                    selected_import.set(Some(hash.clone()));
-                    let last_hash = hash.clone();
-                    spawn_local(async move {
-                        if let Err(error) =
-                            JsFuture::from(save_last_import(JsValue::from_str(&last_hash))).await
-                        {
-                            import_error.set(Some(format!(
-                                "MIDI loaded, but the last-selected setting could not be saved: {}",
-                                error.as_string().unwrap_or_else(|| format!("{error:?}"))
-                            )));
-                        }
-                        match JsFuture::from(save_import(&hash, &name, &bytes_copy, metadata)).await
-                        {
-                            Ok(_) => match JsFuture::from(load_imports()).await {
-                                Ok(value) => match serde_wasm_bindgen::from_value::<
-                                    Vec<SavedMidiImport>,
-                                >(value)
-                                {
-                                    Ok(mut items) => {
-                                        items.sort_by(|a, b| {
-                                            a.name.to_lowercase().cmp(&b.name.to_lowercase())
-                                        });
-                                        saved_imports.set(items);
-                                    }
+                    if save_to_library {
+                        selected_import.set(Some(hash.clone()));
+                        let last_hash = hash.clone();
+                        spawn_local(async move {
+                            if let Err(error) =
+                                JsFuture::from(save_last_import(JsValue::from_str(&last_hash))).await
+                            {
+                                import_error.set(Some(format!(
+                                    "MIDI loaded, but the last-selected setting could not be saved: {}",
+                                    error.as_string().unwrap_or_else(|| format!("{error:?}"))
+                                )));
+                            }
+                            match JsFuture::from(save_import(&hash, &name, &bytes_copy, metadata)).await
+                            {
+                                Ok(_) => match JsFuture::from(load_imports()).await {
+                                    Ok(value) => match serde_wasm_bindgen::from_value::<Vec<SavedMidiImport>>(value) {
+                                        Ok(mut items) => {
+                                            items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                            saved_imports.set(items);
+                                        }
+                                        Err(error) => import_error.set(Some(format!(
+                                            "MIDI loaded, but the library could not be refreshed: {error}"
+                                        ))),
+                                    },
                                     Err(error) => import_error.set(Some(format!(
-                                        "MIDI loaded, but the library could not be refreshed: {error}"
+                                        "MIDI loaded, but the library could not be refreshed: {error:?}"
                                     ))),
                                 },
                                 Err(error) => import_error.set(Some(format!(
-                                    "MIDI loaded, but the library could not be refreshed: {error:?}"
+                                    "MIDI loaded for this session, but could not be saved to the local library: {}",
+                                    error.as_string().unwrap_or_else(|| format!("{error:?}"))
                                 ))),
-                            },
-                            Err(error) => import_error.set(Some(format!(
-                                "MIDI loaded for this session, but could not be saved to the local library: {}",
-                                error.as_string().unwrap_or_else(|| format!("{error:?}"))
-                            ))),
-                        }
-                    });
+                            }
+                        });
+                    } else {
+                        selected_import.set(None);
+                        spawn_local(async move {
+                            if let Err(error) =
+                                JsFuture::from(save_last_import(JsValue::NULL)).await
+                            {
+                                import_error.set(Some(format!(
+                                    "Bundled MIDI loaded, but the last-selected setting could not be cleared: {}",
+                                    error.as_string().unwrap_or_else(|| format!("{error:?}"))
+                                )));
+                            }
+                        });
+                    }
                     exercise.set(parsed);
                     result_modal_open.set(false);
                     phase.set("idle".into());
@@ -820,7 +844,7 @@ fn App() -> impl IntoView {
                 }
                 Err(err) => import_error.set(Some(err.to_string())),
             }
-        }) as Box<dyn FnMut(Uint8Array, String, String)>,
+        }) as Box<dyn FnMut(Uint8Array, String, String, JsValue)>,
     ));
 
     let save_for_midi = save_current_settings.clone();
@@ -1059,6 +1083,7 @@ fn App() -> impl IntoView {
     });
 
     let key_launch = launch_run.clone();
+    let key_reset_run = reset_run.clone();
     let key_start_new_run = start_new_run.clone();
     let key_hit = hit_input.clone();
     let keyboard = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
@@ -1116,12 +1141,7 @@ fn App() -> impl IntoView {
             }
             "r" => {
                 event.prevent_default();
-                stop_audio();
-                observed.set(vec![]);
-                live.set(vec![]);
-                result.set(None);
-                progress.set(-1.0);
-                key_start_new_run(count_in.get_untracked());
+                key_reset_run();
             }
             _ => {}
         }
@@ -1229,10 +1249,16 @@ fn App() -> impl IntoView {
                 <div><span class="mode-badge">{move || if selected_midi.get().is_some(){"MIDI INPUT"}else{"DEMO INPUT"}}</span><span>{move || if selected_midi.get().is_some(){"Hit your drum to start; incoming kit events use your saved mapping."}else{"Hit your drum or press J to start."}}</span></div>
                 <div class="score-actions">
                   <button on:click={let callback=choose_cb.clone();move |_|choose_midi(callback.as_ref().as_ref().unchecked_ref())}>"Import MIDI"</button>
-                  <button on:click={let callback=choose_cb.clone();move |_|load_bundled("public/exercises/single-paradiddle.mid",callback.as_ref().as_ref().unchecked_ref())}>"Load bundled .mid"</button>
                   <details class="midi-library">
-                    <summary>{move || format!("MIDI library · {}",saved_imports.get().len())}</summary>
+                    <summary>{move || format!("MIDI library · {}",saved_imports.get().len()+1)}</summary>
                     <div class="midi-library-menu">
+                      <div class="midi-library-entry bundled-entry">
+                        <button class="library-load" on:click={let callback=choose_cb.clone();move |_|{
+                          close_midi_library();
+                          load_bundled("public/exercises/single-paradiddle.mid",callback.as_ref().as_ref().unchecked_ref(),false);
+                        }}>"single-paradiddle.mid"</button>
+                        <span class="bundled-label">"Bundled"</span>
+                      </div>
                       {move || if saved_imports.get().is_empty(){view!{<p class="library-empty">"No imported MIDI files saved yet."</p>}.into_any()}else{
                         saved_imports.get().into_iter().map(|item|{
                           let hash=item.hash.clone();
@@ -1247,6 +1273,7 @@ fn App() -> impl IntoView {
                           view!{
                             <div class="midi-library-entry">
                               <button class=move || if selected_import.get().as_deref()==Some(class_hash.as_str()){"library-load selected"}else{"library-load"} aria-current=move || if selected_import.get().as_deref()==Some(aria_hash.as_str()){"true"}else{"false"} on:click=move |_|{
+                                close_midi_library();
                                 let hash=load_hash.clone();
                                 spawn_local(async move{
                                   if let Err(error)=JsFuture::from(load_saved_import(&hash)).await{
@@ -1320,7 +1347,7 @@ fn App() -> impl IntoView {
             <section class="feedback-strip" aria-live="polite"><div class=move || format!("feedback-orb {}",feedback.get().split_whitespace().next().unwrap_or("ready").to_lowercase())></div><strong>{move || feedback.get()}</strong><span class="live-assessment">{move || {let (score,perfect,good,early,late,missed)=live_accuracy(&live.get());format!("SCORE {}% · P {perfect} · G {good} · E {early} · L {late} · M {missed}",display_score(score))}}</span><span>{move || audio_state.get()}</span></section>
             <section class="practice-controls">
               <div class="transport">
-                <div class="transport-secondary"><button on:click=move |_|{stop_audio();result_modal_open.set(false);phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let start=start_new_run.clone();move |_|{stop_audio();observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"↻ Restart"</button></div>
+                <div class="transport-secondary"><button on:click=move |_|{stop_audio();result_modal_open.set(false);phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let reset=reset_run.clone();move |_|reset()}>"↻ Restart"</button></div>
                 <button class="primary start-button" on:click={let launch=start_click.clone();let start=start_new_run.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>{stop_audio();phase.set("paused".into());feedback.set("Paused".into());},"paused"=>launch(progress.get_untracked().max(0.0),0),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>"Start practice"}}<small>{move || if count_in.get()>0{format!("{} bar count-in",count_in.get())}else{"No count-in".into()}}</small></button>
               </div>
             </section>
@@ -1375,7 +1402,7 @@ fn App() -> impl IntoView {
               <label>"Count-in"<select prop:value=move || count_in.get().to_string() on:change=move |event|{count_in.set(event_target_value(&event).parse().unwrap_or(1));save_countin();}><option value="0">"Off"</option><option value="1">"1 bar"</option><option value="2">"2 bars"</option></select></label>
               <label>"Subdivision"<select prop:value=move || subdivision.get().to_string() on:change=move |event|{subdivision.set(event_target_value(&event).parse().unwrap_or(1));save_subdivision();}><option value="1">"Quarter notes"</option><option value="2">"Eighth notes"</option><option value="4">"Sixteenth notes"</option></select></label>
               <label>"Click timbre"<div class="inline-select"><select prop:value=move || timbre.get() on:change=move |event|{timbre.set(event_target_value(&event));save_timbre();}><option value="woodblock">"Warm woodblock"</option><option value="crisp">"Crisp click"</option><option value="cowbell">"Cowbell"</option></select><button on:click=move |_|{let promise=preview_click(&timbre.get_untracked());spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Preview"</button></div></label>
-              <label>"Metronome volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || click_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.48);click_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},value);save_click_volume();}/></label>
+              <label>"Metronome volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || click_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);click_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},value);save_click_volume();}/></label>
             </section>
             <section><h3>"Reference snare"</h3><label class="toggle-row"><span>"Play app snare"<small>"Mute this if your drum module is audible."</small></span><input type="checkbox" prop:checked=move || !snare_muted.get() on:change=move |event|{snare_muted.set(!event_target_checked(&event));set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},click_volume.get_untracked());save_snare_mute();}/></label><label>"Snare volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || snare_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);snare_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{value},click_volume.get_untracked());save_snare_volume();}/></label></section>
             <section><h3>"Exercise"</h3><label>"Loops"<select prop:value=move || loops.get().to_string() on:change=move |event|{loops.set(event_target_value(&event).parse().unwrap_or(1));save_loops();}><option value="1">"1 run"</option><option value="2">"2 loops"</option><option value="4">"4 loops"</option></select></label><p class="help">"The score follows playback vertically, keeping the current and next bar in view."</p></section>
@@ -1386,7 +1413,7 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);feedback.set("Calibration: tap with each click".into());let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">"Perfect hits are green (±20 ms by default), Good hits light green, Early hits orange, Late hits purple and missed notes red. Matching closes outside ±100 ms."</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(20.0).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(40.0);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.48);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);latency_ms.set(0.0);on_time_ms.set(40.0);excellent_ms.set(20.0);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);latency_ms.set(0.0);on_time_ms.set(40.0);excellent_ms.set(20.0);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" on:click=move |_|settings_open.set(false)></button>
       </main>

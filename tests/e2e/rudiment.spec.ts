@@ -18,6 +18,7 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await page.screenshot({ path: 'artifacts/first-run-practice.png', fullPage: true });
 
   await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as {rudiment:{audioDiagnostics():{clickGain:number}}}).rudiment.audioDiagnostics().clickGain)).toBeGreaterThan(1);
   await expect(page.getByText(/Count-in ·/)).toBeVisible();
   await page.getByRole('button',{name:'Stats'}).click();
   await expect(page.getByRole('dialog',{name:'Practice statistics'})).toBeVisible();
@@ -158,7 +159,10 @@ test('a run with no drum input never shows hit circles',async({page})=>{
 
 test('bundled MIDI imports through the visible import callback and broken files explain failure', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Load bundled .mid' }).click();
+  await page.locator('.midi-library summary').click();
+  await expect(page.getByRole('button',{name:'Delete single-paradiddle.mid'})).toHaveCount(0);
+  await page.getByRole('button', { name: 'single-paradiddle.mid', exact: true }).click();
+  await expect(page.locator('.midi-library')).not.toHaveAttribute('open', '');
   await expect(page.getByText('single-paradiddle', { exact: true }).first()).toBeVisible();
   await expect(page.locator('.score-note')).toHaveCount(32);
   await expect(page.locator('#notation')).toContainText('R');
@@ -177,15 +181,21 @@ test('bundled MIDI imports through the visible import callback and broken files 
       count.onerror = () => reject(count.error);
       count.onsuccess = () => resolve(count.result);
     };
-  }))).toBeGreaterThanOrEqual(2);
+  }))).toBeGreaterThanOrEqual(1);
   await page.locator('.midi-library summary').click();
   await expect(page.getByRole('button',{name:'quarter-note-reference.mid',exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:'single-paradiddle.mid',exact:true})).toBeVisible();
+  await page.locator('.score-meta').click({position:{x:10,y:15}});
+  await expect(page.locator('.midi-library')).not.toHaveAttribute('open', '');
+  await page.locator('.midi-library summary').click();
   await page.getByRole('button',{name:'single-paradiddle.mid',exact:true}).click();
   await expect(page.locator('.score-note')).toHaveCount(32);
+  await expect(page.locator('.midi-library')).not.toHaveAttribute('open', '');
   const quarterLibrary=page.locator('.midi-library').getByRole('button',{name:'quarter-note-reference.mid',exact:true});
+  await page.locator('.midi-library summary').click();
   await quarterLibrary.click();
   await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
+  await expect(page.locator('.midi-library')).not.toHaveAttribute('open', '');
   await page.reload();
   await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve, reject) => {
@@ -196,7 +206,7 @@ test('bundled MIDI imports through the visible import callback and broken files 
       count.onerror = () => reject(count.error);
       count.onsuccess = () => resolve(count.result);
     };
-  }))).toBeGreaterThanOrEqual(2);
+  }))).toBeGreaterThanOrEqual(1);
   await page.locator('.midi-library summary').click();
   page.once('dialog',dialog=>dialog.accept());
   await page.locator('.midi-library').getByRole('button',{name:'Delete quarter-note-reference.mid'}).click();
@@ -337,10 +347,12 @@ test('score wraps responsively and follows playback vertically without horizonta
     const center=(note:Element)=>{const bounds=(note.querySelector('.vf-notehead > text') as SVGGraphicsElement).getBBox();return bounds.x+bounds.width/2;};
     const firstBar=[...document.querySelectorAll('.score-note[data-score-bar="0"]')],secondBar=[...document.querySelectorAll('.score-note[data-score-bar="1"]')];
     const innerGaps=[...firstBar.slice(1).map((note,index)=>center(note)-center(firstBar[index])),...secondBar.slice(1).map((note,index)=>center(note)-center(secondBar[index]))];
-    return {boundary:center(secondBar[0])-center(firstBar.at(-1)!),inner:innerGaps.sort((a,b)=>a-b)[Math.floor(innerGaps.length/2)]};
+    const barline=Number(document.querySelector('.score-barline')?.getAttribute('x1'));
+    return {boundary:center(secondBar[0])-center(firstBar.at(-1)!),inner:innerGaps.sort((a,b)=>a-b)[Math.floor(innerGaps.length/2)],barlineGap:center(secondBar[0])-barline};
   });
   expect(barSpacing.boundary).toBeGreaterThan(barSpacing.inner*.7);
   expect(barSpacing.boundary).toBeLessThan(barSpacing.inner*1.4);
+  expect(barSpacing.barlineGap).toBeGreaterThan(8);
 
   const sameLineTransition=await page.evaluate(()=>{
     const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
@@ -353,7 +365,8 @@ test('score wraps responsively and follows playback vertically without horizonta
   expect(sameLineTransition.after-sameLineTransition.before).toBeLessThan(5);
 
   await page.setViewportSize({width:390,height:844});
-  await expect.poll(()=>svg.getAttribute('data-bars-per-line')).toBe('1');
+  await expect.poll(()=>svg.getAttribute('data-bars-per-line')).toBe('2');
+  await expect.poll(()=>score.evaluate(element=>element.querySelector('svg')?.getBoundingClientRect().width)).toBeLessThanOrEqual(390);
   expect(await score.evaluate(element=>element.scrollWidth<=element.clientWidth&&element.scrollLeft===0)).toBe(true);
 
   await page.evaluate(()=>{
@@ -361,10 +374,10 @@ test('score wraps responsively and follows playback vertically without horizonta
     app.updateScore(0,[]);const first=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
     app.updateScore(.5,[]);const next=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
     (window as unknown as {__scoreXProgresses:boolean}).__scoreXProgresses=next>first;
-    app.updateScore(3.99,[]);const endOfBar=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
-    app.updateScore(4,[]);const nextBar=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    app.updateScore(7.99,[]);const endOfBar=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    app.updateScore(8,[]);const nextBar=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
     (window as unknown as {__scoreBarWraps:boolean}).__scoreBarWraps=nextBar<endOfBar;
-    for(let frame=0;frame<30;frame++)app.updateScore(4,[]);
+    for(let frame=0;frame<30;frame++)app.updateScore(8,[]);
   });
   expect(await page.evaluate(()=>(window as unknown as {__scoreXProgresses:boolean}).__scoreXProgresses)).toBe(true);
   expect(await page.evaluate(()=>(window as unknown as {__scoreBarWraps:boolean}).__scoreBarWraps)).toBe(true);
@@ -373,7 +386,7 @@ test('score wraps responsively and follows playback vertically without horizonta
   expect(await score.evaluate(element=>element.scrollLeft)).toBe(0);
   expect(await score.evaluate(element=>{
     const viewport=element.getBoundingClientRect();
-    return [1,2].every(bar=>{
+    return [2,3].every(bar=>{
       const note=element.querySelector(`.score-note[data-score-bar="${bar}"]`);
       if(!note)return false;
       const bounds=note.getBoundingClientRect();
@@ -465,6 +478,30 @@ test('playhead interpolates between noteheads and aligns with each note beat',as
   expect(between).toBeLessThan(after);
 });
 
+test('playhead keeps an even beat spacing across measures with different rhythms',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>{
+    const hits=[
+      ...Array.from({length:4},(_,index)=>({beat:index,notation_beat:index,notation_duration_beats:1,instrument:'snare',note:38,hand:index%2?'L':'R'})),
+      {beat:4,notation_beat:4,notation_duration_beats:2,instrument:'snare',note:38,hand:'R'},
+      {beat:6,notation_beat:6,notation_duration_beats:2,instrument:'snare',note:38,hand:'L'},
+      ...Array.from({length:8},(_,index)=>({beat:8+index*.5,notation_beat:8+index*.5,notation_duration_beats:.5,instrument:'snare',note:38,hand:index%2?'L':'R'}))
+    ];
+    (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Different rhythms',meter_numerator:4,meter_denominator:4,hits});
+  });
+  await expect(page.locator('#notation svg')).toHaveAttribute('data-bars-per-line','3');
+  const beatSpacing=await page.evaluate(()=>{
+    const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    return Array.from({length:3},(_,bar)=>Array.from({length:7},(_,step)=>{
+      const start=bar*4+.25+step*.5;
+      app.updateScore(start,[]);const before=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+      app.updateScore(start+.5,[]);const after=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+      return after-before;
+    })).flat();
+  });
+  expect(Math.max(...beatSpacing)-Math.min(...beatSpacing)).toBeLessThan(beatSpacing.reduce((sum,value)=>sum+value,0)/beatSpacing.length*.2);
+});
+
 test('playhead keeps a constant visual speed through the end of the final bar',async({page})=>{
   await page.goto('/');
   const measureDistances=()=>page.evaluate(()=>{
@@ -480,7 +517,7 @@ test('playhead keeps a constant visual speed through the end of the final bar',a
   expect(distances[2]).toBeGreaterThan(reference*.9);
   expect(distances[2]).toBeLessThan(reference*1.1);
   await page.setViewportSize({width:390,height:844});
-  await expect.poll(()=>page.locator('#notation svg').getAttribute('data-bars-per-line')).toBe('1');
+  await expect.poll(()=>page.locator('#notation svg').getAttribute('data-bars-per-line')).toBe('2');
   distances=await measureDistances();
   expect(Math.max(...distances)-Math.min(...distances)).toBeLessThan(1);
 });
@@ -543,6 +580,11 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   await expect(hit.locator('.missed-note-marker')).toHaveCount(0);
   await expect(hit.locator(':scope > .vf-notehead > circle')).toHaveCount(0);
   expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await page.keyboard.press('r');
+  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+  await expect(page.getByText('Ready — press Start to practise')).toBeVisible();
   expect(await hit.evaluate(element=>getComputedStyle(element).opacity)).toBe(originalOpacity);
   await expect(marker).toHaveCount(0);
 });
@@ -558,6 +600,9 @@ test('restarting practice clears the previous session note colours',async({page}
   expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(36, 147, 87)');
 
   await page.getByRole('button',{name:/Restart/}).click();
+  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+  await expect(page.getByText(/Count-in ·/)).toHaveCount(0);
+  await expect(page.getByText('Ready — press Start to practise')).toBeVisible();
   await expect(hit).not.toHaveAttribute('data-judgement','good');
   await expect(hit.locator('.judgement-halo')).toHaveCount(0);
   expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
@@ -624,7 +669,7 @@ test('rapid repeated monitored strikes allocate an audio voice for every hit', a
   await expect.poll(()=>page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBeGreaterThanOrEqual(41);
 });
 
-test('loop and restart keep one authoritative transport', async ({ page }) => {
+test('loop and restart leave practice stopped until started again', async ({ page }) => {
   await page.goto('/');
   await page.getByLabel('Tempo in BPM').fill('240');
   await page.getByRole('button', { name: 'Open settings' }).click();
@@ -634,9 +679,8 @@ test('loop and restart keep one authoritative transport', async ({ page }) => {
   await page.getByRole('button', { name: /Start practice/ }).click();
   await expect(page.getByText('2 / 2 LOOP')).toBeVisible({ timeout: 6_000 });
   await page.getByRole('button', { name: /Restart/ }).click();
-  await expect(page.getByText('1 / 2 LOOP')).toBeVisible();
-  await page.getByRole('button', { name: /Stop/ }).click();
-  await expect(page.getByText('Stopped — results were not saved')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
+  await expect(page.getByText('Ready — press Start to practise')).toBeVisible();
 });
 
 test('permission denial and narrow layout remain usable', async ({ page }) => {
@@ -660,6 +704,12 @@ test('Pixel 8 Pro keeps MIDI connection visible and practice controls on-screen 
   const midi=page.getByRole('button',{name:'MIDI connection'});
   await expect(midi).toBeVisible();
   expect(await midi.evaluate(element=>{const box=element.getBoundingClientRect();return box.left>=0&&box.right<=innerWidth&&box.top>=0&&box.bottom<=innerHeight;})).toBe(true);
+  const portraitFits=await page.evaluate(()=>({
+    pageFits:document.documentElement.scrollHeight<=innerHeight&&document.body.scrollHeight<=innerHeight,
+    controls:[...document.querySelectorAll('.topbar,.welcome,.score-card,.feedback-strip,.transport')].every(element=>{const box=element.getBoundingClientRect();return box.top>=0&&box.bottom<=innerHeight;}),
+    horizontalFits:document.documentElement.scrollWidth<=innerWidth&&document.body.scrollWidth<=innerWidth,
+  }));
+  expect(portraitFits).toEqual({pageFits:true,controls:true,horizontalFits:true});
 
   await page.setViewportSize({width:998,height:448});
   await expect.poll(()=>page.locator('#notation svg').getAttribute('data-bars-per-line')).toBe('4');
@@ -671,4 +721,20 @@ test('Pixel 8 Pro keeps MIDI connection visible and practice controls on-screen 
   expect(layout).toEqual({pageFits:true,controls:true,horizontalFits:true});
   await expect(midi).toBeVisible();
   await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+});
+
+test('long scores scroll inside their panel while all practice controls remain on-screen',async({page})=>{
+  await page.setViewportSize({width:1536,height:768});
+  await page.goto('/');
+  await page.getByRole('button',{name:'Dismiss welcome hint'}).click();
+  await page.evaluate(()=>{
+    const hits=Array.from({length:320},(_,index)=>({beat:index,notation_beat:index,notation_duration_beats:1,hand:index%2===0?'R':'L',accent:false}));
+    (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Long MIDI',meter_numerator:4,meter_denominator:4,hits});
+  });
+  const layout=await page.evaluate(()=>({
+    pageFits:document.documentElement.scrollHeight<=innerHeight&&document.body.scrollHeight<=innerHeight,
+    controls:[...document.querySelectorAll('.topbar,.score-card,.feedback-strip,.transport')].every(element=>{const box=element.getBoundingClientRect();return box.top>=0&&box.bottom<=innerHeight;}),
+    scoreScrollsInternally:(document.querySelector('#notation') as HTMLElement).scrollHeight>(document.querySelector('#notation') as HTMLElement).clientHeight,
+  }));
+  expect(layout).toEqual({pageFits:true,controls:true,scoreScrollsInternally:true});
 });

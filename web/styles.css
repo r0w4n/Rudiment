@@ -29,6 +29,7 @@
 .midi-library-entry button{border:0!important;background:transparent!important}
 .midi-library-entry .library-load{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;text-align:left;white-space:nowrap;color:#38433d}
 .midi-library-entry .library-load.selected{color:#14725c;font-weight:800}
+.bundled-label{padding:0 8px;color:#77827c;font-size:10px;font-weight:700}
 .midi-library-entry .library-delete{color:#a44940;padding-inline:8px}
 .library-empty{margin:8px;color:#65706a;font-size:11px}
 .stats-backdrop{position:fixed;z-index:40;inset:0;display:grid;place-items:center;padding:20px;background:#060807b8;backdrop-filter:blur(4px)}
@@ -74,6 +75,18 @@
 @media(max-width:700px){.results-modal{width:calc(100% - 12px);padding:8px}.results-modal .result-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:3px}.results-modal .result-metrics article{padding:4px}.results-modal .result-metrics span{font-size:7px;letter-spacing:.06em}.results-modal .result-metrics strong{font-size:12px}.results-score-summary{grid-template-columns:64px minmax(0,1fr);gap:8px}.results-score-summary .score-ring{width:60px;height:60px}.results-score-summary .score-ring strong{font-size:23px}.results-modal .results-score-summary>p{font-size:10px}.results-modal .result-actions button{height:30px}}
 @media(max-height:560px){.results-modal{padding:6px}.results-modal .stats-modal-header{margin-bottom:3px}.results-score-summary{grid-template-columns:58px minmax(0,1fr);margin-bottom:3px}.results-score-summary .score-ring{width:54px;height:54px}.results-score-summary .score-ring strong{font-size:20px}.results-modal .result-metrics{gap:2px}.results-modal .result-metrics article{padding:2px 5px}.results-modal .comparison-card{margin-top:3px;padding:3px 6px}.results-modal .result-actions{margin-top:3px}.results-modal .result-actions button{height:28px}}
 @media(orientation:portrait) and (max-width:700px){.topbar .status-pill{display:flex!important;visibility:visible;grid-column:1/-1;grid-row:2;width:100%;max-width:none;justify-self:stretch;justify-content:center}}
+html,body{height:100%;min-height:0;overflow:hidden}
+body{min-height:0}
+.app{height:100dvh;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.topbar{flex:none}
+.workspace{width:100%;flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr);grid-template-areas:"welcome" "score" "feedback" "controls";grid-template-rows:auto minmax(0,1fr) auto auto;gap:8px;padding:clamp(8px,1.5vh,18px) clamp(12px,2vw,28px)}
+.welcome{grid-area:welcome;margin:0;min-height:0}
+.score-card{grid-area:score;min-width:0;min-height:0;display:grid;grid-template-rows:50px minmax(0,1fr) auto auto 42px}
+.notation{height:auto;min-height:0;overflow-x:hidden;overflow-y:auto}
+.feedback-strip{grid-area:feedback;min-height:0;margin:0}
+.practice-controls{grid-area:controls;min-height:0;margin-top:0}
+@media(max-width:700px){.workspace{grid-template-rows:auto minmax(0,1fr) 40px auto;gap:8px;padding:8px 12px}.score-card{grid-template-rows:auto minmax(0,1fr) auto auto 42px}.score-meta{min-height:50px}.notation{height:auto;min-height:0}.practice-controls{margin:0}.transport{margin:0}}
+@media(max-height:600px){.workspace{gap:5px;padding-block:5px}.topbar{min-height:0}.score-card{grid-template-rows:42px minmax(0,1fr) auto auto 32px}.score-meta{height:42px;min-height:0;padding:4px 10px}.position-row{height:32px}.feedback-strip{height:32px}.transport{height:72px}.start-button{height:52px}}
 @media(orientation:landscape) and (max-height:600px){
 html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:hidden}.topbar{height:50px;padding:0 12px;gap:8px}.brand{font-size:15px}.brand-mark{width:30px;height:30px}.tempo-control button{width:30px;height:34px}.tempo-control label{height:34px;min-width:66px}.status-pill{height:32px;max-width:190px;padding:0 9px;font-size:10px}.stats-trigger{height:32px;padding-inline:9px}.icon-button{width:32px;height:32px}.workspace{height:calc(100dvh - 50px);padding:6px 12px;display:grid;grid-template-rows:30px minmax(0,1fr) 30px 58px;gap:5px}.welcome{height:30px;min-height:30px;margin:0;padding:3px 8px 3px 12px;border-radius:8px}.welcome strong{font-size:11px}.welcome span{display:none}.welcome button{padding:3px 8px;font-size:11px}.score-card{min-height:0;display:grid;grid-template-rows:32px minmax(0,1fr) auto auto auto 28px;border-radius:12px}.score-meta{height:32px;min-height:0;padding:3px 10px}.mode-badge{padding:3px 6px;font-size:9px}.score-actions button,.midi-library summary{padding:4px 6px;font-size:9px}.notation{height:auto;min-height:0;overflow:hidden}.position-row{height:28px;padding:0 12px;grid-template-columns:72px 1fr 72px;gap:8px;font-size:8px}.feedback-strip{height:30px;margin:0 3px;gap:8px;font-size:9px}.feedback-strip strong{font-size:11px}.practice-controls{min-height:0;margin:0}.transport{height:58px;max-width:none;margin:0;padding:6px 10px;grid-template-columns:1fr minmax(220px,1.4fr);gap:8px;border-radius:12px}.transport button{padding:5px 8px;font-size:10px}.start-button{height:44px;font-size:12px!important}.start-button small{font-size:8px}.transport-secondary{justify-content:flex-start}.warning-row,.error-row{padding:3px 10px;font-size:9px}
 }
