@@ -9,6 +9,8 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(page.locator('.score-note')).toHaveCount(32);
   await expect(page.locator('#notation')).toContainText('R');
   await expect(page.locator('#notation')).toContainText('L');
+  await expect(page.getByRole('button',{name:'MIDI connection'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Connect MIDI drums'})).toHaveCount(0);
   await page.waitForTimeout(450);
   await page.screenshot({ path: 'artifacts/first-run-practice.png', fullPage: true });
 
@@ -116,16 +118,26 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
     Object.assign(window, { __rudimentFakeInput: input, __rudimentFakeAccess: access });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Connect MIDI drums' }).click();
+  await page.evaluate(() => { const prototype=AudioBufferSourceNode.prototype,original=prototype.start;(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts=0;prototype.start=function(...args){(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts++;return original.apply(this,args as [number]);}; });
+  await page.getByRole('button', { name: 'MIDI connection' }).click();
   await expect(page.locator('.status-pill')).toContainText('Acceptance Kit · connected');
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByText('MIDI diagnostics').click();
   await page.evaluate(() => {
     const input = (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput;
-    input.dispatch([0x99, 38, 100]);
+    input.dispatch([0x99, 38, 1]);
+  });
+  await expect(page.locator('.diagnostics')).toContainText('velocity 1');
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts)).toBeGreaterThanOrEqual(1);
+  const startsAfterLow=await page.evaluate(()=>(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts);
+  await page.evaluate(() => {
+    const input = (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput;
     input.dispatch([0x99, 38, 0]);
     input.dispatch([0xb9, 4, 90]);
   });
+  await page.waitForTimeout(60);
+  expect(await page.evaluate(()=>(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts)).toBe(startsAfterLow);
+  await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99,38,100]));
   await expect(page.locator('.diagnostics')).toContainText('note_on');
   await expect(page.locator('.diagnostics')).toContainText('note_off');
   await expect(page.locator('.diagnostics')).toContainText('cc');
@@ -167,13 +179,34 @@ test('score feedback expires misses and playhead interpolates continuously', asy
   // SVG lines have a zero-width bounding box, so Playwright correctly reports
   // no box even while the stroked playhead is visibly rendered.
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
-  const first=Number(await page.locator('#playhead').getAttribute('x1'));await page.waitForTimeout(70);const second=Number(await page.locator('#playhead').getAttribute('x1'));
+  const first=Number(await page.locator('#playhead').getAttribute('data-x'));await page.waitForTimeout(70);const second=Number(await page.locator('#playhead').getAttribute('data-x'));
   expect(second).toBeGreaterThan(first);
+  expect(await page.locator('#playhead').evaluate(element=>(element as SVGElement).style.transform)).toContain('translate3d');
+  expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element).scrollBehavior)).toBe('auto');
   await expect(page.locator('.score-note[data-judgement="missed"]').first()).toBeVisible();
-  await page.getByRole('button',{name:/Pause/}).click();const paused=await page.locator('#playhead').getAttribute('x1');await page.waitForTimeout(120);expect(await page.locator('#playhead').getAttribute('x1')).toBe(paused);
+  await expect.poll(()=>page.locator('#notation').evaluate(element=>element.scrollLeft),{timeout:2500}).toBeGreaterThan(0);
+  const frameStats=await page.evaluate(()=>new Promise<{median:number,p95:number}>(resolve=>{const deltas:number[]=[];let previous=performance.now();const sample=(now:number)=>{deltas.push(now-previous);previous=now;if(deltas.length<40)requestAnimationFrame(sample);else{const sorted=[...deltas.slice(1)].sort((a,b)=>a-b);resolve({median:sorted[Math.floor(sorted.length*.5)],p95:sorted[Math.floor(sorted.length*.95)]});}};requestAnimationFrame(sample);}));
+  expect(frameStats.median).toBeLessThan(25);expect(frameStats.p95).toBeLessThan(55);
+  await page.getByRole('button',{name:/Pause/}).click();const paused=await page.locator('#playhead').getAttribute('data-x');await page.waitForTimeout(120);expect(await page.locator('#playhead').getAttribute('data-x')).toBe(paused);
   await page.getByRole('button',{name:/Resume/}).click();
-  await expect.poll(()=>page.locator('#playhead').getAttribute('x1')).not.toBe(paused);
+  await expect.poll(()=>page.locator('#playhead').getAttribute('data-x')).not.toBe(paused);
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
+});
+
+test('notehead feedback and unmatched strike markers stay at their own timestamps',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1,[
+    {expected_beat:1,actual_beat:1.01,judgement:'on_time',error_ms:4,excellent:true,event_id:'hit'},
+    {expected_beat:null,actual_beat:1.25,judgement:'extra',error_ms:0,excellent:false,event_id:'extra'}
+  ]));
+  const hit=page.locator('.score-note[data-beat="1"]');
+  await expect(hit).toHaveAttribute('data-judgement','excellent');
+  await expect(hit).toHaveClass(/excellent-flash/);
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(8, 122, 89)');
+  const marker=page.locator('.unmatched-hit-marker');await expect(marker).toHaveCount(1);await expect(marker).toHaveAttribute('data-beat','1.25');
+  const markerX=Number(await marker.getAttribute('cx')),expectedX=await hit.evaluate(element=>{const box=(element as SVGGElement).getBBox();return box.x+box.width/2;});expect(markerX).not.toBeCloseTo(expectedX,1);
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1.5,[{expected_beat:1.5,actual_beat:null,judgement:'missed',error_ms:0,excellent:false,event_id:null}]));
+  await expect(marker).toHaveCount(0);
 });
 
 test('rapid repeated monitored strikes allocate an audio voice for every hit', async ({ page }) => {
@@ -181,10 +214,15 @@ test('rapid repeated monitored strikes allocate an audio voice for every hit', a
   await page.evaluate(() => { const prototype=AudioBufferSourceNode.prototype,original=prototype.start;(window as unknown as {__voiceStarts:number}).__voiceStarts=0;prototype.start=function(...args){(window as unknown as {__voiceStarts:number}).__voiceStarts++;return original.apply(this,args as [number]);}; });
   await page.getByRole('button',{name:/Preview Acoustic snare/}).click();
   await expect(page.getByText('Acoustic snare ready')).toBeVisible();
-  const levels=await page.evaluate(()=>(window as unknown as {rudiment:{audioDiagnostics():{layerPeaks:number[],layerGains:number[]}}}).rudiment.audioDiagnostics());
+  const levels=await page.evaluate(()=>(window as unknown as {rudiment:{audioDiagnostics():{layerPeaks:number[],layerGains:number[],velocityGains:number[],velocityLayers:Array<Array<{index:number,weight:number}>>},playSnare(velocity:number):boolean}}).rudiment.audioDiagnostics());
   expect(levels.layerPeaks).toHaveLength(4);
   expect(levels.layerGains).toHaveLength(4);
   for(let index=0;index<4;index++)expect(levels.layerPeaks[index]*levels.layerGains[index]).toBeCloseTo(.32,2);
+  expect(levels.velocityGains).toHaveLength(127);expect(levels.velocityGains[0]).toBeGreaterThan(0);expect(levels.velocityGains[126]).toBeCloseTo(1,5);expect(levels.velocityGains[126]/levels.velocityGains[0]).toBeGreaterThan(30);
+  for(let index=1;index<127;index++){expect(levels.velocityGains[index]).toBeGreaterThan(levels.velocityGains[index-1]);expect(levels.velocityGains[index]-levels.velocityGains[index-1]).toBeLessThan(.03);}
+  for(const blend of levels.velocityLayers)expect(blend.reduce((sum,layer)=>sum+layer.weight*layer.weight,0)).toBeCloseTo(1,5);
+  const beforeLow=await page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts);expect(await page.evaluate(()=>(window as unknown as {rudiment:{playSnare(velocity:number):boolean}}).rudiment.playSnare(1))).toBe(true);await expect.poll(()=>page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBeGreaterThan(beforeLow);
+  const beforeZero=await page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts);expect(await page.evaluate(()=>(window as unknown as {rudiment:{playSnare(velocity:number):boolean}}).rudiment.playSnare(0))).toBe(false);expect(await page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBe(beforeZero);
   await page.evaluate(() => {const pad=document.querySelector('[aria-label="Play snare hit"]');for(let i=0;i<40;i++)pad?.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'mouse'}));});
   await expect.poll(()=>page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBeGreaterThanOrEqual(41);
 });
@@ -210,9 +248,10 @@ test('permission denial and narrow layout remain usable', async ({ page }) => {
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
+  await page.getByRole('button',{name:'MIDI connection'}).click();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByRole('button', { name: 'Connect / rescan MIDI' }).click();
   await expect(page.locator('.midi-state')).toContainText('MIDI error · Permission denied by user');
+  await expect(page.getByRole('button',{name:'Connect / rescan MIDI'})).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Play snare hit' })).toBeVisible();
   await page.screenshot({ path: 'artifacts/narrow-practice.png', fullPage: true });

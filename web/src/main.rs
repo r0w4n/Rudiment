@@ -5,7 +5,7 @@ use rudiment_core::{
     ScoringConfig, SessionSummary, paradiddle, parse_midi, score_session_with_config,
 };
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::{Cell, RefCell}, rc::Rc};
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
@@ -136,10 +136,12 @@ struct MidiEnvelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LiveJudgement {
-    expected_beat: f64,
+    expected_beat: Option<f64>,
+    actual_beat: Option<f64>,
     judgement: Judgement,
     error_ms: f64,
     excellent: bool,
+    event_id: Option<String>,
 }
 
 fn exercise_beats(exercise: &Exercise) -> f64 {
@@ -166,6 +168,38 @@ fn expanded_hits(exercise: &Exercise, loops: u8) -> Vec<ExpectedHit> {
         }
     }
     result
+}
+
+fn visible_judgements(
+    summary: SessionSummary,
+    now_ms: f64,
+    session_start_ms: f64,
+    beat_ms: f64,
+    exercise_length: f64,
+    latency_ms: f64,
+) -> Vec<LiveJudgement> {
+    summary
+        .results
+        .into_iter()
+        .filter(|result| match result.expected_beat {
+            Some(expected_beat) if result.judgement == Judgement::Missed => {
+                now_ms >= session_start_ms + expected_beat * beat_ms + result.window_ms
+            }
+            Some(_) => true,
+            None => result.observed_ms.is_some(),
+        })
+        .map(|result| LiveJudgement {
+            expected_beat: result.expected_beat.map(|beat| beat % exercise_length),
+            actual_beat: result.observed_ms.map(|observed_ms| {
+                ((observed_ms - latency_ms - session_start_ms) / beat_ms).max(0.0)
+                    % exercise_length
+            }),
+            judgement: result.judgement,
+            error_ms: result.error_ms.unwrap_or(0.0),
+            excellent: result.excellent,
+            event_id: result.observed_ms.map(|value| format!("{value:.3}")),
+        })
+        .collect()
 }
 
 fn persist_settings(settings: Settings) {
@@ -303,6 +337,7 @@ fn App() -> impl IntoView {
         let frame_holder = frame_holder.clone();
         let done_holder = done_holder.clone();
         Rc::new(move |offset, count_bars| {
+            let last_judgement_ms = Rc::new(Cell::new(f64::NEG_INFINITY));
             phase.set(if count_bars > 0 {
                 "count_in".into()
             } else {
@@ -322,7 +357,9 @@ fn App() -> impl IntoView {
                 }
                 let base = exercise_beats(&exercise.get_untracked());
                 let local = if beat >= 0.0 { beat % base } else { beat };
-                if beat >= 0.0 {
+                let mut judgement_values = JsValue::UNDEFINED;
+                if beat >= 0.0 && now - last_judgement_ms.get() >= 30.0 {
+                    last_judgement_ms.set(now);
                     let expected = expanded_hits(&exercise.get_untracked(), loops.get_untracked());
                     let summary = score_session_with_config(
                         &expected,
@@ -341,28 +378,14 @@ fn App() -> impl IntoView {
                         .iter()
                         .filter(|item| item.judgement == Judgement::Missed)
                         .count();
-                    let visible: Vec<_> = summary
-                        .results
-                        .into_iter()
-                        .filter(|result| {
-                            result
-                                .expected_beat
-                                .map(|expected_beat| {
-                                    result.judgement != Judgement::Missed
-                                        || now
-                                            >= session_start
-                                                + expected_beat * beat_ms
-                                                + result.window_ms
-                                })
-                                .unwrap_or(false)
-                        })
-                        .map(|result| LiveJudgement {
-                            expected_beat: result.expected_beat.unwrap_or(0.0) % base,
-                            judgement: result.judgement,
-                            error_ms: result.error_ms.unwrap_or(0.0),
-                            excellent: result.excellent,
-                        })
-                        .collect();
+                    let visible = visible_judgements(
+                        summary,
+                        now,
+                        session_start,
+                        beat_ms,
+                        base,
+                        latency_ms.get_untracked(),
+                    );
                     let misses = visible
                         .iter()
                         .filter(|item| item.judgement == Judgement::Missed)
@@ -370,11 +393,11 @@ fn App() -> impl IntoView {
                     if misses > previous_misses {
                         feedback.set("Missed · keep the pulse".into());
                     }
-                    live.set(visible);
+                    live.set(visible.clone());
+                    judgement_values =
+                        serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
                 }
-                let values =
-                    serde_wasm_bindgen::to_value(&live.get_untracked()).unwrap_or(JsValue::NULL);
-                update_score(local, values);
+                update_score(local, judgement_values);
             }) as Box<dyn FnMut(f64, f64, f64)>);
             let done_finish = finish_run.clone();
             let done = Closure::wrap(Box::new(move || done_finish()) as Box<dyn FnMut()>);
@@ -452,54 +475,54 @@ fn App() -> impl IntoView {
             observed.update(|items| items.push(event));
             let expected = expanded_hits(&exercise.get_untracked(), loops.get_untracked());
             let beat_ms = 60_000.0 / bpm.get_untracked();
-            if let Some(target) = expected
+            let session_start = run_start_ms.get_untracked();
+            let summary = score_session_with_config(
+                &expected,
+                &observed.get_untracked(),
+                bpm.get_untracked(),
+                session_start,
+                latency_ms.get_untracked(),
+                ScoringConfig {
+                    on_time_ms: on_time_ms.get_untracked(),
+                    excellent_ms: excellent_ms.get_untracked(),
+                },
+            );
+            let base = exercise_beats(&exercise.get_untracked());
+            let visible = visible_judgements(
+                summary,
+                timestamp,
+                session_start,
+                beat_ms,
+                base,
+                latency_ms.get_untracked(),
+            );
+            let event_id = format!("{timestamp:.3}");
+            if let Some(result) = visible
                 .iter()
-                .filter(|hit| hit.instrument == instrument)
-                .min_by(|a, b| {
-                    ((timestamp - latency_ms.get_untracked())
-                        - (run_start_ms.get_untracked() + a.beat * beat_ms))
-                        .abs()
-                        .total_cmp(
-                            &((timestamp - latency_ms.get_untracked())
-                                - (run_start_ms.get_untracked() + b.beat * beat_ms))
-                                .abs(),
-                        )
-                })
+                .find(|item| item.event_id.as_deref() == Some(event_id.as_str()))
             {
-                let error = (timestamp - latency_ms.get_untracked())
-                    - (run_start_ms.get_untracked() + target.beat * beat_ms);
-                let judgement = if error.abs() <= on_time_ms.get_untracked() {
-                    Judgement::OnTime
-                } else if error < 0.0 {
-                    Judgement::Early
-                } else {
-                    Judgement::Late
-                };
-                let excellent = error.abs() <= excellent_ms.get_untracked();
-                let label = if excellent {
+                let label = if result.excellent {
                     "Excellent"
                 } else {
-                    match judgement {
+                    match result.judgement {
                         Judgement::OnTime => "Hit",
                         Judgement::Early => "Early",
                         Judgement::Late => "Late",
+                        Judgement::WrongInstrument => "Wrong drum",
+                        Judgement::Extra => "Extra hit",
                         _ => "Hit",
                     }
                 };
-                feedback.set(format!("{label} · {error:+.0} ms"));
-                let base = exercise_beats(&exercise.get_untracked());
-                live.update(|items| {
-                    items.retain(|item| (item.expected_beat - target.beat % base).abs() > 0.001);
-                    items.push(LiveJudgement {
-                        expected_beat: target.beat % base,
-                        judgement,
-                        error_ms: error,
-                        excellent,
-                    });
+                feedback.set(if matches!(
+                    result.judgement,
+                    Judgement::OnTime | Judgement::Early | Judgement::Late
+                ) {
+                    format!("{label} · {:+.0} ms", result.error_ms)
+                } else {
+                    label.into()
                 });
-            } else {
-                feedback.set("Extra hit".into());
             }
+            live.set(visible);
         },
     );
 
@@ -566,11 +589,12 @@ fn App() -> impl IntoView {
                 return;
             }
             let line = format!(
-                "{:.1} ms · {} ch{} · data {} · raw {:?}",
+                "{:.1} ms · {} ch{} · note {} · velocity {} · raw {:?}",
                 event.timestamp.unwrap_or(0.0),
                 event.message_type.clone().unwrap_or_default(),
                 event.channel.unwrap_or(0),
                 event.note.unwrap_or(0),
+                event.velocity.unwrap_or(0),
                 event.raw_bytes
             );
             diagnostics.update(|items| {
@@ -789,6 +813,39 @@ fn App() -> impl IntoView {
     let start_click = launch_run.clone();
     let pad_hit = hit_input.clone();
     let connect_cb = midi_callback.clone();
+    let connect_action: Rc<dyn Fn()> = {
+        let callback = connect_cb.clone();
+        Rc::new(move || {
+            midi_status.set("Requesting permission…".into());
+            let audio_promise = ensure_audio();
+            let midi_promise = connect_midi(callback.as_ref().as_ref().unchecked_ref());
+            spawn_local(async move {
+                match JsFuture::from(audio_promise).await {
+                    Ok(value) => {
+                        let state = serde_wasm_bindgen::from_value::<serde_json::Value>(value)
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .get("state")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .unwrap_or_else(|| "ready".into());
+                        audio_state.set(if state == "fallback" {
+                            "Recorded sample failed; temporary fallback active".into()
+                        } else {
+                            "Audio ready · MIDI snare enabled".into()
+                        });
+                    }
+                    Err(error) => {
+                        let detail = error.as_string().unwrap_or_else(|| format!("{error:?}"));
+                        audio_state.set(format!("Audio failed: {detail}"));
+                    }
+                }
+                let _ = JsFuture::from(midi_promise).await;
+            });
+        })
+    };
     let choose_cb = file_callback.clone();
     let save_tempo_down = save_current_settings.clone();
     let save_tempo_input = save_current_settings.clone();
@@ -813,7 +870,7 @@ fn App() -> impl IntoView {
           <a class="brand" href="#" aria-label="Rudiment home"><span class="brand-mark">"R"</span><span>"Rudiment"</span></a>
           <div class="exercise-heading"><span class="eyebrow">"CURRENT EXERCISE"</span><strong>{move || exercise.get().title}</strong><small>"4/4 · sticking and accents"</small></div>
           <div class="tempo-control"><button aria-label="Decrease tempo" on:click=move |_|{bpm.update(|v|*v=(*v-1.0).max(30.0));save_tempo_down();}>"−"</button><label><input aria-label="Tempo in BPM" type="number" min="30" max="240" prop:value=move || bpm.get().round().to_string() on:input=move |event|{if let Ok(value)=event_target_value(&event).parse::<f64>(){bpm.set(value.clamp(30.0,240.0));save_tempo_input();}}/><span>"BPM"</span></label><button aria-label="Increase tempo" on:click=move |_|{bpm.update(|v|*v=(*v+1.0).min(240.0));save_tempo_up();}>"+"</button></div>
-          <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} on:click=move |_|settings_open.set(true)><span class="status-dot"></span>{move || midi_status.get()}</button>
+          <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label="MIDI connection" on:click={let connect=connect_action.clone();move |_|connect()}><span class="status-dot"></span>{move || midi_status.get()}</button>
           <button class="icon-button" aria-label="Open settings" on:click=move |_|settings_open.set(true)>"⚙"</button>
         </header>
 
@@ -832,7 +889,6 @@ fn App() -> impl IntoView {
               <div class="transport">
                 <div class="transport-secondary"><button on:click=move |_|{stop_audio();phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let launch=start_click.clone();move |_|{stop_audio();observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);launch(0.0,count_in.get_untracked());}}>"↻ Restart"</button></div>
                 <button class="primary start-button" on:click={let launch=start_click.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>{stop_audio();phase.set("paused".into());feedback.set("Paused".into());},"paused"=>launch(progress.get_untracked().max(0.0),0),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});launch(0.0,count_in.get_untracked());}}}>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>"Start practice"}}<small>{move || if count_in.get()>0{format!("{} bar count-in",count_in.get())}else{"No count-in".into()}}</small></button>
-                <button class="connect-button" on:click={let callback=connect_cb.clone();move |_|{midi_status.set("Requesting permission…".into());let audio_promise=ensure_audio();let midi_promise=connect_midi(callback.as_ref().as_ref().unchecked_ref());spawn_local(async move{match JsFuture::from(audio_promise).await{Ok(value)=>{let state=serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok().and_then(|value|value.get("state").and_then(serde_json::Value::as_str).map(str::to_owned)).unwrap_or_else(||"ready".into());audio_state.set(if state=="fallback"{"Recorded sample failed; temporary fallback active".into()}else{"Audio ready · MIDI snare enabled".into()});},Err(error)=>{let detail=error.as_string().unwrap_or_else(||format!("{error:?}"));audio_state.set(format!("Audio failed: {detail}"));}}let _=JsFuture::from(midi_promise).await;});}}>"Connect MIDI drums"</button>
               </div>
               <button class="preview-card" on:click=move |_|{audio_state.set("Loading acoustic snare…".into());let promise=preview_snare();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){audio_state.set("Acoustic snare ready".into());}});}><span>"Preview"</span><strong>"Acoustic snare"</strong><em>"▶"</em></button>
             </section>
@@ -856,7 +912,7 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"Reference snare"</h3><label class="toggle-row"><span>"Play app snare"<small>"Mute this if your drum module is audible."</small></span><input type="checkbox" prop:checked=move || !snare_muted.get() on:change=move |event|{snare_muted.set(!event_target_checked(&event));set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},click_volume.get_untracked());save_snare_mute();}/></label><label>"Snare volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || snare_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);snare_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{value},click_volume.get_untracked());save_snare_volume();}/></label></section>
             <section><h3>"Exercise"</h3><label>"Loops"<select prop:value=move || loops.get().to_string() on:change=move |event|{loops.set(event_target_value(&event).parse().unwrap_or(1));save_loops();}><option value="1">"1 run"</option><option value="2">"2 loops"</option><option value="4">"4 loops"</option></select></label><label>"Score following"<select prop:value=move || follow.get() on:change=move |event|{follow.set(event_target_value(&event));save_follow();}><option value="continuous">"Continuous horizontal"</option><option value="page">"Bar/page follow"</option></select></label></section>
-            <section><h3>"MIDI drums"</h3><p class="help">"Chrome will ask for MIDI access. Rudiment never uploads your events."</p><p class="midi-state">{move || midi_status.get()}</p><button class="wide-button" on:click={let callback=connect_cb.clone();move |_|{midi_status.set("Requesting permission…".into());let audio_promise=ensure_audio();let midi_promise=connect_midi(callback.as_ref().as_ref().unchecked_ref());spawn_local(async move{if JsFuture::from(audio_promise).await.is_ok(){audio_state.set("Audio ready · MIDI snare enabled".into());}let _=JsFuture::from(midi_promise).await;});}}>"Connect / rescan MIDI"</button>
+            <section><h3>"MIDI drums"</h3><p class="help">"Use the MIDI status control in the top bar to connect or rescan. Rudiment never uploads your events."</p><p class="midi-state">{move || midi_status.get()}</p>
               <label class=move || if midi_ports.get().is_empty(){"hidden"}else{""}>"Input device"<select prop:value=move || selected_midi.get().unwrap_or_default() on:change=move |event|select_midi(&event_target_value(&event))>{move || midi_ports.get().into_iter().map(|port|view!{<option value=port.id.clone()>{format!("{} · {}",port.manufacturer,port.name)}</option>}).collect_view()}</select></label>
               <div class="learn-card"><strong>{move || if midi_learn.get(){"Hit your snare now…"}else{"Quick MIDI Learn"}}</strong><span>{move || format!("Current snare: note {}, channel {}",snare_note.get(),snare_channel.get())}</span><button on:click=move |_|midi_learn.set(true)>{move || if midi_learn.get(){"Listening…"}else{"Learn snare"}}</button></div>
               <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
