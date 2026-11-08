@@ -22,3 +22,22 @@ This is a *revised implementation spec*, not a claim that Rudiment has been impl
 - **R6 GitHub Pages:** the Pages workflow runs locked Rust/browser checks, builds once for browser acceptance and again with the repository subpath, verifies required WASM/JS/audio assets, and deploys through the official Pages actions. A live deployment remains unverified until the repository is pushed and the workflow runs.
 
 Hardware assertions remain deliberately separate: Web MIDI reconnect, byte filtering and rapid audio allocation are browser-simulated; no physical USB drum kit or subjective loudspeaker/headphone test was available for this implementation pass.
+
+## Implementation addendum — Multi-line score progression
+
+- Score bars now wrap into responsive stave systems sized to the notation viewport, with no horizontal scrolling of the full exercise.
+- The playhead interpolates within each bar and moves to its next bar/system using the same beat position supplied by the playback clock.
+- Vertical viewport tracking eases toward the active system on playback frames, keeping the active and following system visible without re-rendering during playback.
+- Resize-only reflow preserves the current beat and judgement feedback; fresh sessions return to the opening system.
+- Detected-hit timing feedback uses translucent colored circles behind noteheads; missed-note indicators remain unchanged.
+- Playback no longer dims past notes or adds a glow to the current note, keeping note glyphs visually stable as the playhead passes.
+- The smoothly interpolated playhead now uses rendered notehead positions as beat anchors, aligning its position with each written note without snapping at note times.
+- Adjacent measures share continuous stave lines and a single barline; playhead interpolation reaches the next measure's opening position without a boundary snap.
+- Measures on each system are formatted as one continuous rhythmic voice, keeping note spacing consistent across barlines.
+
+## Implementation addendum — Drum-score engraving
+
+- Scores use a conventional five-line percussion stave by default, including snare-only rudiments. Exercises can explicitly select a single-line stave when appropriate; mixed drum-kit MIDI uses GM drum voices placed by MIDI note, including cross/diamond noteheads for cymbals and other percussion.
+- Simultaneous MIDI hits are engraved as chords, with durations, dotted values, rests, accents, sticking, and beams formatted by VexFlow.
+- System spacing now uses a shared measure width; short final systems keep their proportional width. Measure numbers and increased system spacing improve score navigation.
+- Bar lengths and playback/count-in measure boundaries use the numerator and denominator, including compound meters such as 6/8. Playback timing remains based on the MIDI event beats.

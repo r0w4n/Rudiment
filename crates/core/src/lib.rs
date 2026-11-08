@@ -19,6 +19,7 @@ pub enum Instrument {
     Ride,
     Crash,
     Tom,
+    OtherPercussion,
     Unknown,
 }
 
@@ -26,13 +27,14 @@ impl Instrument {
     pub fn from_gm(note: u8) -> Self {
         match note {
             35 | 36 => Self::Kick,
-            38 | 40 => Self::Snare,
+            37 | 38 | 40 => Self::Snare,
             42 => Self::ClosedHat,
             44 => Self::PedalHat,
             46 => Self::OpenHat,
             51 | 53 | 59 => Self::Ride,
-            49 | 52 | 55 | 57 => Self::Crash,
             41 | 43 | 45 | 47 | 48 | 50 => Self::Tom,
+            49 | 52 | 55 | 57 => Self::Crash,
+            39 | 54 | 56 | 58 | 60..=81 => Self::OtherPercussion,
             _ => Self::Unknown,
         }
     }
@@ -71,14 +73,19 @@ struct RawMidiNote {
 }
 
 fn nearest_written_value(beats: f64) -> f64 {
-    [4.0, 2.0, 1.0, 0.5, 0.25]
+    [4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.375, 0.25]
         .into_iter()
         .find(|value| *value <= beats + 0.001)
         .unwrap_or(0.25)
 }
 
+fn measure_beats(numerator: u8, denominator: u8) -> f64 {
+    numerator as f64 * 4.0 / denominator.max(1) as f64
+}
+
 /// Infers written percussion values from quantised inter-onset spacing, never from short MIDI gate time.
-fn infer_notation(hits: &mut [ExpectedHit], meter: u8) {
+fn infer_notation(hits: &mut [ExpectedHit], meter: (u8, u8)) {
+    let bar_beats = measure_beats(meter.0, meter.1);
     for hit in hits.iter_mut() {
         hit.notation_beat = (hit.beat * 4.0).round() / 4.0;
     }
@@ -88,18 +95,18 @@ fn infer_notation(hits: &mut [ExpectedHit], meter: u8) {
     let mut counts: BTreeMap<i32, usize> = BTreeMap::new();
     for pair in positions.windows(2) {
         let delta = pair[1] - pair[0];
-        if delta > 0.001 && delta <= meter as f64 {
+        if delta > 0.001 && delta <= bar_beats {
             let value = nearest_written_value(delta);
-            *counts.entry((value * 4.0) as i32).or_default() += 1;
+            *counts.entry((value * 8.0) as i32).or_default() += 1;
         }
     }
     let pulse = counts
         .into_iter()
         .max_by(|(a, ac), (b, bc)| ac.cmp(bc).then_with(|| b.cmp(a)))
-        .map(|(quarters, _)| quarters as f64 / 4.0)
+        .map(|(eighths, _)| eighths as f64 / 8.0)
         .unwrap_or(1.0);
     for hit in hits.iter_mut() {
-        let bar_end = ((hit.notation_beat / meter as f64).floor() + 1.0) * meter as f64;
+        let bar_end = ((hit.notation_beat / bar_beats).floor() + 1.0) * bar_beats;
         let next = positions
             .iter()
             .copied()
@@ -311,7 +318,7 @@ pub fn parse_midi(
     }
     warnings.sort();
     warnings.dedup();
-    infer_notation(&mut hits, meter.0);
+    infer_notation(&mut hits, meter);
     let shifted = hits
         .iter()
         .filter(|hit| (hit.notation_beat - hit.beat).abs() > 0.04)
@@ -725,7 +732,7 @@ mod tests {
     }
     #[test]
     fn smf1_multitrack_uses_absolute_deltas_and_metadata() {
-        let bytes = parallel_fixture();
+        let bytes = parallel_fixture((3, 2));
         let e = parse_midi(&bytes, "parallel.mid", None).unwrap();
         assert_eq!(e.track_names, vec!["Conductor", "Drums", "Other"]);
         assert_eq!(e.selected_track, 1);
@@ -746,6 +753,15 @@ mod tests {
         );
         let other = parse_midi(&bytes, "parallel.mid", Some(2)).unwrap();
         assert_eq!(other.selected_track, 2);
+    }
+    #[test]
+    fn six_eight_midi_uses_three_quarter_note_beats_per_measure() {
+        let exercise = parse_midi(&parallel_fixture((6, 3)), "six-eight.mid", None).unwrap();
+        assert_eq!(
+            (exercise.meter_numerator, exercise.meter_denominator),
+            (6, 8)
+        );
+        assert!(exercise.hits.iter().all(|hit| hit.notation_beat < 3.0));
     }
     #[test]
     fn final_hit_inside_window_is_not_missed() {
@@ -789,6 +805,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0.0, 1.0, 2.0, 3.0]
         );
+    }
+    #[test]
+    fn drum_map_covers_extended_gm_percussion_and_compound_meter() {
+        assert_eq!(Instrument::from_gm(37), Instrument::Snare);
+        assert_eq!(Instrument::from_gm(39), Instrument::OtherPercussion);
+        assert_eq!(Instrument::from_gm(54), Instrument::OtherPercussion);
+        assert_eq!(Instrument::from_gm(80), Instrument::OtherPercussion);
+        assert_eq!(Instrument::from_gm(82), Instrument::Unknown);
+        assert_eq!(measure_beats(6, 8), 3.0);
+        assert_eq!(nearest_written_value(0.75), 0.75);
+        assert_eq!(nearest_written_value(1.5), 1.5);
     }
     #[test]
     fn configurable_timing_boundaries_and_simultaneous_hits_are_deterministic() {
@@ -887,7 +914,7 @@ mod tests {
         smf.write_std(&mut out).unwrap();
         out
     }
-    fn parallel_fixture() -> Vec<u8> {
+    fn parallel_fixture(meter: (u8, u8)) -> Vec<u8> {
         use midly::{
             Format, Header, Smf, TrackEvent, TrackEventKind,
             num::{u4, u7, u15, u24, u28},
@@ -903,7 +930,7 @@ mod tests {
             },
             TrackEvent {
                 delta: u28::new(0),
-                kind: TrackEventKind::Meta(MetaMessage::TimeSignature(3, 2, 24, 8)),
+                kind: TrackEventKind::Meta(MetaMessage::TimeSignature(meter.0, meter.1, 24, 8)),
             },
             TrackEvent {
                 delta: u28::new(0),

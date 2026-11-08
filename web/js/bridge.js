@@ -1,7 +1,7 @@
 import * as Tone from 'tone';
 import { WebMidi } from 'webmidi';
 import { openDB } from 'idb';
-import { Renderer, Stave, StaveNote, Voice, Formatter, Beam, Annotation, Articulation } from 'vexflow';
+import { Renderer, Stave, StaveNote, Voice, Formatter, Beam, Annotation, Articulation, BarlineType, Dot, Fraction } from 'vexflow';
 
 const DB_NAME = 'rudiment';
 const DB_VERSION = 2;
@@ -144,82 +144,254 @@ const audio = {
   }
 };
 
-let scoreData = { notes:[], svg:null, totalBeats:16, container:null, follow:'continuous', anchors:[], viewportWidth:0, current:null, lastBeat:-Infinity, lastPage:-1, judgementSignature:'' };
+const SCORE_TOP_MARGIN=42,SCORE_ROW_HEIGHT=196,SCORE_BOTTOM_MARGIN=24;
+let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, rowHeight:SCORE_ROW_HEIGHT, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+let scoreResizeObserver=null;
 const handText = hand => hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·';
-const writtenDuration = beats => beats >= 3.999 ? 'w' : beats >= 1.999 ? 'h' : beats >= .999 ? 'q' : beats >= .499 ? '8' : '16';
-const writtenValue = beats => beats >= 3.999 ? 4 : beats >= 1.999 ? 2 : beats >= .999 ? 1 : beats >= .499 ? .5 : .25;
-function restValues(gap) { const values=[];let left=gap;for(const value of [4,2,1,.5,.25])while(left>=value-.001){values.push(value);left-=value;}return values; }
-function renderScore(exercise, follow = 'continuous') {
-  const element = document.getElementById('notation'); if (!element) return; element.innerHTML = '';
-  const meter = exercise.meter_numerator, lastBeat = Math.max(...exercise.hits.map(hit=>hit.beat),0);
-  const bars = Math.max(1, Math.ceil((lastBeat + .25) / meter));
-  const shortest=Math.min(...exercise.hits.map(hit=>hit.notation_duration_beats||.25));
-  const barWidth = shortest < .4 ? 620 : shortest < .75 ? 470 : 390, width = Math.max(element.clientWidth - 24, bars * barWidth + 28), height = 250;
-  const renderer = new Renderer(element, Renderer.Backends.SVG); renderer.resize(width,height); const context = renderer.getContext(), notesMeta = [], barAnchors=[];
-  for (let bar = 0; bar < bars; bar++) {
-    const x = 14 + bar * barWidth, stave = new Stave(x,78,barWidth);
-    stave.setConfigForLines([{visible:false},{visible:false},{visible:true},{visible:false},{visible:false}]);
-    if (bar === 0) stave.addClef('percussion').addTimeSignature(`${meter}/${exercise.meter_denominator}`); stave.setContext(context).draw();
-    const slots = [], slotMeta = [], start=bar*meter, end=start+meter;
-    const groups=new Map();for(const hit of exercise.hits.filter(hit=>(hit.notation_beat??hit.beat)>=start-.001&&(hit.notation_beat??hit.beat)<end-.001)){const position=hit.notation_beat??hit.beat;const key=position.toFixed(4);if(!groups.has(key))groups.set(key,{position,hits:[]});groups.get(key).hits.push(hit);}
-    const ordered=[...groups.values()].sort((a,b)=>a.position-b.position);let cursor=start;
-    for(const group of ordered){
-      if(group.position>cursor+.001){for(const value of restValues(group.position-cursor)){slots.push(new StaveNote({keys:['b/4'],duration:`${writtenDuration(value)}r`,clef:'percussion'}));cursor+=value;}}
-      const hit=group.hits[0], value=writtenValue(Math.min(hit.notation_duration_beats||.25,end-group.position));
-      const note=new StaveNote({keys:['b/4'],duration:writtenDuration(value),clef:'percussion'});
-      note.addModifier(new Annotation(handText(hit.hand)).setVerticalJustification(1).setFont('Inter',15,'700'),0);if(hit.accent)note.addModifier(new Articulation('a>').setPosition(3),0);
-      slots.push(note);for(const item of group.hits)slotMeta.push({note,beat:item.beat,notationBeat:group.position,durationBeats:value,hit:item});cursor=group.position+value;
-    }
-    if(cursor<end-.001)for(const value of restValues(end-cursor))slots.push(new StaveNote({keys:['b/4'],duration:`${writtenDuration(value)}r`,clef:'percussion'}));
-    const voice = new Voice({numBeats:meter,beatValue:4}).setStrict(false); voice.addTickables(slots);
-    new Formatter().joinVoices([voice]).format([voice],barWidth-(bar===0?92:34)); voice.draw(context,stave);
-    barAnchors.push({beat:start,x:stave.getNoteStartX?.()??x+(bar===0?82:20)},{beat:end,x:stave.getNoteEndX?.()??x+barWidth-18});
-    Beam.generateBeams(slots).forEach(beam=>beam.setContext(context).draw()); notesMeta.push(...slotMeta.filter(meta=>meta.hit));
-  }
-  const svg = element.querySelector('svg'); if (svg) { svg.setAttribute('role','img'); svg.setAttribute('aria-label',`${exercise.title} percussion notation with sticking`); }
-  for (const meta of notesMeta) { const group = meta.note.getSVGElement?.(); if (group) { group.dataset.beat=String(meta.beat);group.dataset.writtenDuration=writtenDuration(meta.durationBeats); group.classList.add('score-note');const box=group.getBBox();meta.x=box.x+box.width/2; } }
-  const anchorMap=new Map();for(const anchor of barAnchors)anchorMap.set(anchor.beat.toFixed(4),anchor);for(const meta of notesMeta)anchorMap.set(meta.beat.toFixed(4),{beat:meta.beat,x:meta.x});
-  const anchors=[...anchorMap.values()].sort((a,b)=>a.beat-b.beat);
-  const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
-  const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('y1','49'); line.setAttribute('y2','205'); line.setAttribute('class','playhead-line'); svg?.appendChild(line);
-  scoreData={notes:notesMeta,svg,totalBeats:bars*meter,container:element,follow,anchors,viewportWidth:element.clientWidth,current:null,lastBeat:-Infinity,lastPage:-1,judgementSignature:''}; updateScore(-99,[]);
+const durationTable=[[4,'w',false],[3,'h',true],[2,'h',false],[1.5,'q',true],[1,'q',false],[.75,'8',true],[.5,'8',false],[.375,'16',true],[.25,'16',false]];
+const durationSpec = beats => durationTable.find(([value])=>Math.abs(value-beats)<.001)??durationTable.at(-1);
+const writtenDuration = beats => durationSpec(beats)[1];
+function noteWithDuration(keys,beats,rest=false) {
+  const [value,duration,dotted]=durationSpec(beats),note=new StaveNote({keys,duration:`${duration}${rest?'r':''}`,clef:'percussion',stemDirection:1});
+  if(dotted){Dot.buildAndAttach([note],{all:!rest});note.applyTickMultiplier(3,2);}
+  return note;
 }
-function xAtBeat(beat) {
-  const anchors=scoreData.anchors;if(!anchors.length)return 0;
+function restValues(gap) { const values=[];let left=gap;for(const [value] of durationTable)while(left>=value-.001){values.push(value);left-=value;}if(left>.001)values.push(.25);return values; }
+function pitchForHit(hit) {
+  const note=Number(hit.note),byNote={
+    35:'f/4',36:'f/4',37:'b/4/x',38:'b/4',39:'a/5/x',40:'b/4',
+    41:'g/4',42:'g/5/x',43:'a/4',44:'g/5/x',45:'b/4',46:'g/5/x',
+    47:'d/5',48:'e/5',49:'a/5/x',50:'f/5',51:'d/5/x',52:'a/5/x',
+    53:'f/5/D2',54:'g/5/x',55:'a/5/x',56:'c/5',57:'a/5/x',
+    58:'c/5/x',59:'d/5/x',60:'d/5',61:'b/4',62:'c/5/x',63:'c/5',
+    64:'g/4',65:'d/5',66:'a/4',67:'f/5',68:'c/5',69:'g/5/x',
+    70:'g/5/x',71:'a/5/x',72:'f/5/x',73:'c/5/x',74:'e/5/x',
+    75:'d/5',76:'f/5',77:'b/4',78:'g/4/x',79:'c/5/x',
+    80:'a/5/x',81:'a/5/x'
+  };
+  if(Number.isInteger(note)&&byNote[note])return byNote[note];
+  return ({kick:'f/4',snare:'b/4',closed_hat:'g/5/x',open_hat:'g/5/x',pedal_hat:'g/5/x',ride:'d/5/x',crash:'a/5/x',tom:'c/5',other_percussion:'c/5/x'})[hit.instrument]??'b/4';
+}
+function instrumentForHit(hit) {
+  if(hit.instrument)return hit.instrument;
+  const note=Number(hit.note);
+  if([35,36].includes(note))return 'kick';
+  if([37,38,40].includes(note))return 'snare';
+  if([42,44,46].includes(note))return note===46?'open_hat':note===44?'pedal_hat':'closed_hat';
+  if([41,43,45,47,48,50].includes(note))return 'tom';
+  if([51,53,59].includes(note))return 'ride';
+  if([49,52,55,57].includes(note))return 'crash';
+  if(note>=39&&note<=81)return 'other_percussion';
+  return 'snare';
+}
+function renderScore(exercise) {
+  const element = document.getElementById('notation'); if (!element) return; element.innerHTML = '';
+  const isResize=scoreData.exercise===exercise;
+  const previousBeat=isResize&&Number.isFinite(scoreData.lastBeat)?scoreData.lastBeat:-99;
+  const previousJudgements=isResize?scoreData.lastJudgements:[];
+  if(!isResize){element.scrollTop=0;element.scrollLeft=0;}
+  const hits=exercise.hits,metersPerBar=exercise.meter_numerator*4/Math.max(1,exercise.meter_denominator);
+  const lastBeat=hits.reduce((last,hit)=>Math.max(last,hit.notation_beat??hit.beat),0);
+  const barCount=Math.max(1,Math.floor(lastBeat/metersPerBar)+1);
+  const shortest=hits.length?Math.min(...hits.map(hit=>hit.notation_duration_beats||.25)):1;
+  const minimumBarWidth=shortest<.4?270:shortest<.75?210:180;
+  const singleLine=exercise.staff_mode==='single_line'&&hits.length>0&&hits.every(hit=>instrumentForHit(hit)==='snare');
+  const width=Math.max(280,element.clientWidth),availableWidth=Math.max(240,width-28);
+  const renderer=new Renderer(element,Renderer.Backends.SVG);
+  const notesMeta=[],barLayouts=[],staves=[],barSlots=new Map(),beams=[],eventHitsByNote=new Map();
+  const firstStave=new Stave(14,SCORE_TOP_MARGIN,availableWidth);
+  firstStave.setConfigForLines(Array.from({length:5},(_,index)=>({visible:!singleLine||index===2})));
+  firstStave.setBegBarType(BarlineType.NONE).addClef('percussion').addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
+  const headerWidth=firstStave.getNoteStartX()-14;
+  const musicWidth=Math.max(120,availableWidth-headerWidth);
+  const barsPerLine=Math.max(1,Math.min(3,barCount,Math.floor(musicWidth/minimumBarWidth)));
+  const barWidth=musicWidth/barsPerLine,lineCount=Math.ceil(barCount/barsPerLine);
+  const height=SCORE_TOP_MARGIN+lineCount*SCORE_ROW_HEIGHT+SCORE_BOTTOM_MARGIN;
+  renderer.resize(width,height);
+  const context=renderer.getContext(),systemBarCounts=[],systemWidths=[];
+  const beamGroups=exercise.meter_numerator>=6&&exercise.meter_numerator%3===0
+    ?[new Fraction(3,Math.max(1,exercise.meter_denominator))]
+    :[new Fraction(1,Math.max(1,exercise.meter_denominator))];
+  for(let row=0;row<lineCount;row++){
+    const rowBarCount=Math.min(barsPerLine,barCount-row*barsPerLine),staveWidth=headerWidth+rowBarCount*barWidth;
+    const stave=row===0?firstStave:new Stave(14,SCORE_TOP_MARGIN+row*SCORE_ROW_HEIGHT,staveWidth);
+    if(row>0){
+      stave.setConfigForLines(Array.from({length:5},(_,index)=>({visible:!singleLine||index===2})));
+      stave.setBegBarType(BarlineType.NONE).addClef('percussion').addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
+    }
+    if(row===lineCount-1)stave.setEndBarType(BarlineType.END);
+    stave.setWidth(staveWidth).setContext(context).draw();staves.push(stave);
+    systemBarCounts.push(rowBarCount);systemWidths.push(staveWidth);
+  }
+  for(let bar=0;bar<barCount;bar++){
+    const row=Math.floor(bar/barsPerLine),stave=staves[row];
+    barLayouts.push({index:bar,startBeat:bar*metersPerBar,endBeat:(bar+1)*metersPerBar,row,xStart:stave.getNoteStartX(),xEnd:stave.getNoteEndX(),y:stave.getY(),anchors:[]});
+  }
+  for(let row=0;row<lineCount;row++){
+    const firstBar=row*barsPerLine,lastBar=Math.min(barCount,firstBar+barsPerLine),rowTickables=[];
+    for(let bar=firstBar;bar<lastBar;bar++){
+      const start=bar*metersPerBar,end=start+metersPerBar,slots=[];
+      const groups=new Map();
+      for(const hit of hits){
+        const position=hit.notation_beat??hit.beat;
+        if(position<start-.001||position>=end-.001)continue;
+        const key=position.toFixed(4);
+        if(!groups.has(key))groups.set(key,{position,hits:[]});
+        groups.get(key).hits.push(hit);
+      }
+      const ordered=[...groups.values()].sort((a,b)=>a.position-b.position);let cursor=start;
+      for(let index=0;index<ordered.length;index++){
+        const group=ordered[index],next=ordered[index+1]?.position??end;
+        if(group.position>cursor+.001){
+          for(const value of restValues(group.position-cursor)){slots.push(noteWithDuration(['b/4'],value,true));cursor+=value;}
+        }
+        const keys=[...new Set(group.hits.map(pitchForHit))];
+        const requestedDuration=Math.min(...group.hits.map(hit=>hit.notation_duration_beats||.25));
+        const value=Math.min(requestedDuration,next-group.position,end-group.position);
+        const note=noteWithDuration(keys,value);
+        eventHitsByNote.set(note,group.hits);
+        const hands=[...new Set(group.hits.map(hit=>hit.hand).filter(hand=>hand==='R'||hand==='L'))];
+        if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(1).setFont('Inter',11,'700'),0);
+        if(group.hits.some(hit=>hit.accent))note.addModifier(new Articulation('a>').setPosition(3),0);
+        slots.push(note);
+        for(const hit of group.hits)notesMeta.push({note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,row,bar});
+        cursor=group.position+value;
+      }
+      if(cursor<end-.001)for(const value of restValues(end-cursor))slots.push(noteWithDuration(['b/4'],value,true));
+      barSlots.set(bar,slots);rowTickables.push(...slots);
+      beams.push(...Beam.generateBeams(slots,{groups:beamGroups,stemDirection:1}));
+    }
+    const voice=new Voice({numBeats:(lastBar-firstBar)*metersPerBar,beatValue:4}).setStrict(false);
+    voice.addTickables(rowTickables);
+    new Formatter().joinVoices([voice]).format([voice],staves[row].getNoteEndX()-staves[row].getNoteStartX());
+    voice.draw(context,staves[row]);
+    for(const tickable of rowTickables)if(tickable.isRest?.())tickable.getSVGElement?.()?.setAttribute('data-score-rest','true');
+  }
+  for(const beam of beams)beam.setContext(context).draw();
+  const svg=element.querySelector('svg');
+  for(const [bar,slots] of barSlots)barLayouts[bar].xStart=slots[0]?.getAbsoluteX()??barLayouts[bar].xStart;
+  for(let bar=0;bar<barCount-1;bar++){
+    if(barLayouts[bar].row!==barLayouts[bar+1].row)continue;
+    const previous=barSlots.get(bar)?.at(-1),next=barSlots.get(bar+1)?.[0];
+    if(!previous||!next)continue;
+    const stave=staves[barLayouts[bar].row],x=(previous.getAbsoluteX()+next.getAbsoluteX())/2;
+    const barline=document.createElementNS('http://www.w3.org/2000/svg','line');
+    barline.setAttribute('class','score-barline');barline.setAttribute('x1',String(x));barline.setAttribute('x2',String(x));
+    barline.setAttribute('y1',String(singleLine?stave.getYForLine(2)-9:stave.getYForLine(0)));
+    barline.setAttribute('y2',String(singleLine?stave.getYForLine(2)+9:stave.getYForLine(4)));
+    barline.setAttribute('stroke','#343a36');barline.setAttribute('stroke-width','1.2');svg?.appendChild(barline);
+  }
+  for(let bar=0;bar<barCount;bar++){
+    const stave=staves[barLayouts[bar].row],label=document.createElementNS('http://www.w3.org/2000/svg','text');
+    const x=bar===0||bar%barsPerLine===0?stave.getX()+6:barLayouts[bar].xStart-8;
+    label.setAttribute('class','score-measure-number');label.setAttribute('x',String(x));
+    label.setAttribute('y',String(stave.getYForLine(0)-12));label.setAttribute('text-anchor',bar===0||bar%barsPerLine===0?'start':'end');
+    label.setAttribute('font-family','Inter, sans-serif');label.setAttribute('font-size','10');label.setAttribute('font-weight','600');
+    label.setAttribute('fill','#666d68');label.textContent=String(bar+1);svg?.appendChild(label);
+  }
+  if (svg) { svg.setAttribute('role','img'); svg.setAttribute('aria-label',`${exercise.title} percussion notation with sticking`); }
+  if(svg){
+    svg.dataset.barsPerLine=String(barsPerLine);svg.dataset.staffLines=singleLine?'1':'5';
+    svg.dataset.systemBarCounts=JSON.stringify(systemBarCounts);svg.dataset.systemWidths=JSON.stringify(systemWidths);
+  }
+  for (const meta of notesMeta) {
+    const group=meta.note.getSVGElement?.();
+    if(group){
+      const eventHits=eventHitsByNote.get(meta.note)??[meta.hit];
+      group.dataset.beat=String(meta.beat);group.dataset.writtenDuration=writtenDuration(meta.durationBeats);group.dataset.systemRow=String(meta.row);group.dataset.scoreBar=String(meta.bar);
+      group.dataset.dotted=String(durationSpec(meta.durationBeats)[2]);
+      group.dataset.midiNotes=eventHits.map(candidate=>candidate.note??38).join(',');
+      group.dataset.instruments=[...new Set(eventHits.map(instrumentForHit))].join(',');
+      group.classList.add('score-note');
+      const head=group.querySelector('.vf-notehead > text'),bounds=head?.getBBox();
+      if(bounds)barLayouts[meta.bar].anchors.push({beat:meta.beat,x:bounds.x+bounds.width/2});
+    }
+  }
+  for(let index=0;index<barLayouts.length-1;index++){
+    const bar=barLayouts[index],nextBar=barLayouts[index+1];
+    if(bar.row!==nextBar.row)continue;
+    const nextStart=nextBar.anchors.find(anchor=>Math.abs(anchor.beat-nextBar.startBeat)<.001);
+    if(nextStart)bar.xEnd=nextStart.x;
+  }
+  for(const bar of barLayouts){
+    const anchors=new Map([[bar.startBeat.toFixed(4),{beat:bar.startBeat,x:bar.xStart}],[bar.endBeat.toFixed(4),{beat:bar.endBeat,x:bar.xEnd}]]);
+    for(const anchor of bar.anchors)anchors.set(anchor.beat.toFixed(4),anchor);
+    bar.anchors=[...anchors.values()].sort((a,b)=>a.beat-b.beat);
+  }
+  const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
+  const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('y1',singleLine?'-28':'-38'); line.setAttribute('y2',singleLine?'34':'62'); line.setAttribute('class','playhead-line'); svg?.appendChild(line);
+  scoreData={notes:notesMeta,svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,rowHeight:SCORE_ROW_HEIGHT,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  applyJudgements(previousJudgements);updateScore(previousBeat,null);
+  if(typeof ResizeObserver!=='undefined'){
+    scoreResizeObserver??=new ResizeObserver(entries=>{
+      const observedWidth=entries[0]?.contentRect.width??scoreData.container?.clientWidth??0;
+      if(scoreData.exercise&&Math.abs(observedWidth-scoreData.viewportWidth)>1)renderScore(scoreData.exercise);
+    });
+    scoreResizeObserver.observe(element);
+  }
+}
+function positionAtBeat(beat) {
+  const bars=scoreData.bars;if(!bars.length)return {x:0,y:0,row:0,bar:0};
   const value=Math.max(0,Math.min(scoreData.totalBeats,beat));
+  const index=Math.min(bars.length-1,Math.floor(value/scoreData.meter));
+  const bar=bars[index],anchors=bar.anchors;
   let before=anchors[0],after=anchors.at(-1);
   for(const anchor of anchors){if(anchor.beat<=value)before=anchor;if(anchor.beat>=value){after=anchor;break;}}
-  const span=Math.max(.001,after.beat-before.beat),ratio=Math.max(0,Math.min(1,(value-before.beat)/span));
-  return before.x+(after.x-before.x)*ratio;
+  const ratio=Math.max(0,Math.min(1,(value-before.beat)/Math.max(.001,after.beat-before.beat)));
+  return {x:before.x+(after.x-before.x)*ratio,y:bar.y,row:bar.row,bar:index};
 }
 function applyJudgements(judgements) {
   const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
-  for(const meta of scoreData.notes){const group=meta.note.getSVGElement?.();if(!group)continue;delete group.dataset.judgement;group.classList.remove('excellent-flash');}
+  scoreData.lastJudgements=judgements;
+  for(const meta of scoreData.notes){const group=meta.note.getSVGElement?.();if(!group)continue;delete group.dataset.judgement;group.classList.remove('excellent-flash');group.querySelector('.judgement-halo')?.remove();}
   for(const result of judgements){
     if(Number.isFinite(result.expected_beat)){
       const meta=scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001),group=meta?.note.getSVGElement?.();if(!group)continue;
-      group.dataset.judgement=result.excellent?'excellent':result.judgement;
-      if(result.excellent){group.classList.add('excellent-flash');group.getAnimations?.().forEach(animation=>animation.cancel());group.animate?.([{filter:'drop-shadow(0 0 13px #38e0ad)',opacity:.45},{filter:'drop-shadow(0 0 3px #38ae8e)',opacity:1}],{duration:340,easing:'ease-out'});}
+      const judgement=result.excellent?'excellent':result.judgement;
+      group.dataset.judgement=judgement;
+      if(['on_time','excellent','early','late'].includes(judgement)){
+        const notehead=group.querySelector('.vf-notehead'),head=notehead?.querySelector(':scope > text');
+        if(notehead&&head){
+          const bounds=head.getBBox(),halo=document.createElementNS('http://www.w3.org/2000/svg','circle');
+          halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(bounds.x+bounds.width/2));halo.setAttribute('cy',String(bounds.y+bounds.height/2));halo.setAttribute('r',String(Math.max(6,bounds.width*.62)));
+          notehead.insertBefore(halo,head);
+          if(judgement==='excellent'){
+            group.classList.add('excellent-flash');
+          }
+        }
+      }
     }
   }
   const markers=scoreData.svg.querySelector('#unmatched-markers');markers?.replaceChildren();
   for(const result of judgements.filter(item=>!Number.isFinite(item.expected_beat)&&Number.isFinite(item.actual_beat)&&(item.judgement==='extra'||item.judgement==='wrong_instrument'))){
-    const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',xAtBeat(result.actual_beat));circle.setAttribute('cy','195');circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
+    const position=positionAtBeat(result.actual_beat),circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',position.x);circle.setAttribute('cy',position.y+20);circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
   }
 }
 function updateScore(beat, judgements) {
   const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
   if(Array.isArray(judgements))applyJudgements(judgements);
-  let nearest=notes[0]; for(const meta of notes) if(Math.abs(meta.beat-beat)<Math.abs(nearest.beat-beat)) nearest=meta;
-  if(scoreData.current!==nearest){scoreData.current?.note.getSVGElement?.()?.classList.remove('is-current');if(beat>=-.1)nearest.note.getSVGElement?.()?.classList.add('is-current');scoreData.current=nearest;}
-  if(beat<scoreData.lastBeat-.05||beat<0){for(const meta of notes)meta.note.getSVGElement?.()?.classList.toggle('is-past',meta.beat<beat-.05);}else{for(const meta of notes)if(meta.beat>=scoreData.lastBeat-.05&&meta.beat<beat-.05)meta.note.getSVGElement?.()?.classList.add('is-past');}
   scoreData.lastBeat=beat;
-  const x=xAtBeat(beat);
-  if(Number.isFinite(x)){const playhead=svg.querySelector('#playhead');if(playhead){playhead.style.transform=`translate3d(${x}px,0,0)`;playhead.dataset.x=String(x);playhead.classList.toggle('visible',beat>=0&&beat<=scoreData.totalBeats);}
-    if(scoreData.follow==='continuous'&&beat>=0){const desired=Math.max(0,x-scoreData.viewportWidth*.36);if(Math.abs(container.scrollLeft-desired)>.25)container.scrollLeft=desired;}
-    else if(scoreData.follow==='page'&&beat>=0){const page=Math.floor(x/Math.max(1,scoreData.viewportWidth));if(page!==scoreData.lastPage){scoreData.lastPage=page;container.scrollLeft=page*scoreData.viewportWidth;}}
-    else if(beat<0&&container.scrollLeft!==0)container.scrollLeft=0;
+  const position=positionAtBeat(beat),playhead=svg.querySelector('#playhead');
+  if(playhead){playhead.style.transform=`translate3d(${position.x}px,${position.y}px,0)`;playhead.dataset.x=String(position.x);playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);playhead.classList.toggle('visible',beat>=0&&beat<=scoreData.totalBeats);}
+  if(beat>=0){
+    const target=Math.min(position.row*scoreData.rowHeight,Math.max(0,container.scrollHeight-container.clientHeight));
+    const distance=target-container.scrollTop;
+    if(container.scrollLeft!==0)container.scrollLeft=0;
+    container.scrollTop=Math.abs(distance)<.5?target:container.scrollTop+distance*.14;
   }
+}
+function clearScoreFeedback() {
+  const empty=[];
+  for(const meta of scoreData.notes){
+    const group=meta.note.getSVGElement?.();if(!group)continue;
+    delete group.dataset.judgement;group.classList.remove('excellent-flash');
+    group.getAnimations?.().forEach(animation=>animation.cancel());
+  }
+  scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;
+  scoreData.lastBeat=-Infinity;
+  scoreData.svg?.querySelector('#unmatched-markers')?.replaceChildren();
+  scoreData.container.scrollTop=0;scoreData.container.scrollLeft=0;
+  updateScore(-99,empty);
 }
 
 let selectedInput = null, midiCallback = null, midiBound = false;
@@ -265,7 +437,7 @@ function downloadJson(value,name){const anchor=document.createElement('a');ancho
 window.rudiment={
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,activeVoices:audio.voices.size,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),previewSnare:async()=>{await audio.ensure();audio.playSnare(112);},playSnare:velocity=>audio.playSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click;},startAudio:(options,frame,done)=>audio.start(options,frame,done),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,updateScore,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,bindDrop,
+  renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,bindDrop,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };

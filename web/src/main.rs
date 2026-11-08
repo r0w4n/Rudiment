@@ -28,9 +28,11 @@ extern "C" {
     #[wasm_bindgen(js_namespace = rudiment, js_name = startCalibration)]
     fn start_calibration() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = renderScore)]
-    fn render_score(exercise: JsValue, follow: &str);
+    fn render_score(exercise: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = updateScore)]
     fn update_score(beat: f64, judgements: JsValue);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedback)]
+    fn clear_score_feedback();
     #[wasm_bindgen(js_namespace = rudiment, js_name = connectMidi)]
     fn connect_midi(callback: &Function) -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = autoConnectMidi)]
@@ -75,7 +77,6 @@ struct Settings {
     snare_volume: Option<f64>,
     snare_muted: Option<bool>,
     loops: Option<u8>,
-    follow: Option<String>,
     latency_ms: Option<f64>,
     on_time_ms: Option<f64>,
     excellent_ms: Option<f64>,
@@ -144,12 +145,14 @@ struct LiveJudgement {
     event_id: Option<String>,
 }
 
+fn beats_per_bar(exercise: &Exercise) -> f64 {
+    exercise.meter_numerator as f64 * 4.0 / exercise.meter_denominator.max(1) as f64
+}
+
 fn exercise_beats(exercise: &Exercise) -> f64 {
     let last = exercise.hits.iter().map(|hit| hit.beat).fold(0.0, f64::max);
-    ((last + 0.25) / exercise.meter_numerator as f64)
-        .ceil()
-        .max(1.0)
-        * exercise.meter_numerator as f64
+    let bar_beats = beats_per_bar(exercise);
+    ((last + 0.001) / bar_beats).ceil().max(1.0) * bar_beats
 }
 
 fn json_compatible<T: Serialize>(value: &T) -> Result<JsValue, serde_wasm_bindgen::Error> {
@@ -225,7 +228,6 @@ fn App() -> impl IntoView {
     let snare_volume = RwSignal::new(0.72);
     let snare_muted = RwSignal::new(false);
     let loops = RwSignal::new(1u8);
-    let follow = RwSignal::new("continuous".to_string());
     let progress = RwSignal::new(-1.0);
     let run_start_ms = RwSignal::new(0.0);
     let observed = RwSignal::new(Vec::<ObservedHit>::new());
@@ -263,7 +265,6 @@ fn App() -> impl IntoView {
             snare_volume: Some(snare_volume.get_untracked()),
             snare_muted: Some(snare_muted.get_untracked()),
             loops: Some(loops.get_untracked()),
-            follow: Some(follow.get_untracked()),
             latency_ms: Some(latency_ms.get_untracked()),
             on_time_ms: Some(on_time_ms.get_untracked()),
             excellent_ms: Some(excellent_ms.get_untracked()),
@@ -344,7 +345,7 @@ fn App() -> impl IntoView {
                 "running".into()
             });
             let total = exercise_beats(&exercise.get_untracked()) * loops.get_untracked() as f64;
-            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"countInBars":count_bars,"meter":exercise.get_untracked().meter_numerator,"totalBeats":total,"offsetBeat":offset,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked()})).unwrap_or(JsValue::NULL);
+            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"countInBars":count_bars,"meter":beats_per_bar(&exercise.get_untracked()),"totalBeats":total,"offsetBeat":offset,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked()})).unwrap_or(JsValue::NULL);
             let frame = Closure::wrap(Box::new(move |beat: f64, now: f64, start: f64| {
                 progress.set(beat);
                 let session_start = start - offset * 60_000.0 / bpm.get_untracked();
@@ -431,6 +432,14 @@ fn App() -> impl IntoView {
                     }
                 }
             });
+        })
+    };
+
+    let start_new_run: Rc<dyn Fn(u8)> = {
+        let launch = launch_run.clone();
+        Rc::new(move |count_bars| {
+            clear_score_feedback();
+            launch(0.0, count_bars);
         })
     };
 
@@ -643,7 +652,7 @@ fn App() -> impl IntoView {
         let file_callback = file_callback.clone();
         Effect::new(move |_| {
             if let Ok(value) = serde_wasm_bindgen::to_value(&exercise.get()) {
-                render_score(value, &follow.get());
+                render_score(value);
             }
             let callback = file_callback.as_ref().as_ref().unchecked_ref::<Function>();
             bind_drop(callback);
@@ -696,9 +705,6 @@ fn App() -> impl IntoView {
                     if let Some(v) = saved.loops {
                         loops.set(v);
                     }
-                    if let Some(v) = saved.follow {
-                        follow.set(v);
-                    }
                     if let Some(v) = saved.latency_ms {
                         latency_ms.set(v);
                     }
@@ -731,6 +737,7 @@ fn App() -> impl IntoView {
     });
 
     let key_launch = launch_run.clone();
+    let key_start_new_run = start_new_run.clone();
     let key_hit = hit_input.clone();
     let keyboard = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
         let target = event
@@ -768,7 +775,7 @@ fn App() -> impl IntoView {
                         observed.set(vec![]);
                         live.set(vec![]);
                         result.set(None);
-                        key_launch(0.0, count_in.get_untracked());
+                        key_start_new_run(count_in.get_untracked());
                     }
                     _ => {}
                 }
@@ -780,7 +787,7 @@ fn App() -> impl IntoView {
                 live.set(vec![]);
                 result.set(None);
                 progress.set(-1.0);
-                key_launch(0.0, count_in.get_untracked());
+                key_start_new_run(count_in.get_untracked());
             }
             _ => {}
         }
@@ -859,7 +866,6 @@ fn App() -> impl IntoView {
     let save_snare_mute = save_current_settings.clone();
     let save_snare_volume = save_current_settings.clone();
     let save_loops = save_current_settings.clone();
-    let save_follow = save_current_settings.clone();
     let save_cal_reset = save_current_settings.clone();
     let save_cal_manual = save_current_settings.clone();
     let save_on_time = save_current_settings.clone();
@@ -881,14 +887,14 @@ fn App() -> impl IntoView {
               <div id="notation" class="notation" aria-live="off"></div>
               <div class=move || if exercise.get().warnings.is_empty()&&exercise.get().track_names.len()<2{"warning-row hidden"}else{"warning-row"}><span>{move || exercise.get().warnings.join(" · ")}</span><label class={move || if exercise.get().track_names.len()>1&&!imported_bytes.get().is_empty(){"track-picker"}else{"track-picker hidden"}}>"MIDI track"<select prop:value=move || exercise.get().selected_track.to_string() on:change=move |event|{let index=event_target_value(&event).parse::<usize>().unwrap_or(0);if let Ok(parsed)=parse_midi(&imported_bytes.get_untracked(),&imported_name.get_untracked(),Some(index)){exercise.set(parsed);}}>{move || exercise.get().track_names.into_iter().enumerate().map(|(index,name)|view!{<option value=index.to_string()>{name}</option>}).collect_view()}</select></label></div>
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
-              <div class="position-row"><span>{move || {let current=(progress.get().max(0.0)/exercise.get().meter_numerator as f64).floor() as usize+1;format!("BAR {current} / {}",(exercise_beats(&exercise.get())*loops.get() as f64/exercise.get().meter_numerator as f64) as usize)}}</span><div class="timeline"><i style=move || format!("width:{:.2}%",(progress.get().max(0.0)/(exercise_beats(&exercise.get())*loops.get() as f64)*100.0).clamp(0.0,100.0))></i></div><span>{move || format!("{} / {} LOOP",((progress.get().max(0.0)/exercise_beats(&exercise.get())).floor() as u8+1).min(loops.get()),loops.get())}</span></div>
+              <div class="position-row"><span>{move || {let bar_beats=beats_per_bar(&exercise.get());let current=(progress.get().max(0.0)/bar_beats).floor() as usize+1;format!("BAR {current} / {}",(exercise_beats(&exercise.get())*loops.get() as f64/bar_beats) as usize)}}</span><div class="timeline"><i style=move || format!("width:{:.2}%",(progress.get().max(0.0)/(exercise_beats(&exercise.get())*loops.get() as f64)*100.0).clamp(0.0,100.0))></i></div><span>{move || format!("{} / {} LOOP",((progress.get().max(0.0)/exercise_beats(&exercise.get())).floor() as u8+1).min(loops.get()),loops.get())}</span></div>
             </section>
             <section class="feedback-strip" aria-live="polite"><div class=move || format!("feedback-orb {}",feedback.get().split_whitespace().next().unwrap_or("ready").to_lowercase())></div><strong>{move || feedback.get()}</strong><span>{move || {let hits=observed.get().len();format!("{hits} received")}}</span><span>{move || audio_state.get()}</span></section>
             <section class="practice-controls">
               <button class=move || if matches!(phase.get().as_str(),"running"|"count_in"){"pad is-hit"}else{"pad"} aria-label="Play snare hit" on:pointerdown={let pad_hit=pad_hit.clone();move |_|pad_hit(web_sys::window().unwrap().performance().unwrap().now(),Instrument::Snare,108,InputSource::Demo,None,None)}><span>"SNARE"</span><kbd>"J"</kbd></button>
               <div class="transport">
-                <div class="transport-secondary"><button on:click=move |_|{stop_audio();phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let launch=start_click.clone();move |_|{stop_audio();observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);launch(0.0,count_in.get_untracked());}}>"↻ Restart"</button></div>
-                <button class="primary start-button" on:click={let launch=start_click.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>{stop_audio();phase.set("paused".into());feedback.set("Paused".into());},"paused"=>launch(progress.get_untracked().max(0.0),0),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});launch(0.0,count_in.get_untracked());}}}>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>"Start practice"}}<small>{move || if count_in.get()>0{format!("{} bar count-in",count_in.get())}else{"No count-in".into()}}</small></button>
+                <div class="transport-secondary"><button on:click=move |_|{stop_audio();phase.set("idle".into());progress.set(-1.0);feedback.set("Stopped — results were not saved".into());}>"■ Stop"</button><button on:click={let start=start_new_run.clone();move |_|{stop_audio();observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"↻ Restart"</button></div>
+                <button class="primary start-button" on:click={let launch=start_click.clone();let start=start_new_run.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>{stop_audio();phase.set("paused".into());feedback.set("Paused".into());},"paused"=>launch(progress.get_untracked().max(0.0),0),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>"Start practice"}}<small>{move || if count_in.get()>0{format!("{} bar count-in",count_in.get())}else{"No count-in".into()}}</small></button>
               </div>
               <button class="preview-card" on:click=move |_|{audio_state.set("Loading acoustic snare…".into());let promise=preview_snare();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){audio_state.set("Acoustic snare ready".into());}});}><span>"Preview"</span><strong>"Acoustic snare"</strong><em>"▶"</em></button>
             </section>
@@ -898,7 +904,7 @@ fn App() -> impl IntoView {
               <div class="score-ring" style=move || format!("--score:{}",result.get().and_then(|session|session.summary.score).unwrap_or(0))><div><strong>{move || result.get().and_then(|session|session.summary.score).unwrap_or(0)}</strong><span>"/ 100"</span></div></div>
               <div class="result-metrics"><article><span>"HITS"</span><strong>{move || result.get().map(|session|format!("{} / {}",session.summary.matched,session.summary.expected)).unwrap_or_else(||"—".into())}</strong></article><article><span>"MEAN ERROR"</span><strong>{move || result.get().and_then(|session|session.summary.mean_abs_error_ms).map(|value|format!("{value:.0} ms")).unwrap_or_else(||"—".into())}</strong></article><article><span>"TIMING BIAS"</span><strong>{move || result.get().and_then(|session|session.summary.signed_mean_error_ms).map(|value|if value<0.0{format!("{:.0} ms early",value.abs())}else{format!("{value:.0} ms late")}).unwrap_or_else(||"—".into())}</strong></article><article><span>"MISSED"</span><strong>{move || result.get().map(|session|session.summary.missed.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"EXTRAS"</span><strong>{move || result.get().map(|session|session.summary.extras.to_string()).unwrap_or_else(||"—".into())}</strong></article><article><span>"WRONG DRUM"</span><strong>{move || result.get().map(|session|session.summary.wrong_instrument.to_string()).unwrap_or_else(||"—".into())}</strong></article></div>
               <div class="comparison-card"><div><span>"COMPARABLE PREVIOUS RUN"</span><strong>{move || comparison.get().map(|delta|if delta>0{format!("+{delta} points") }else if delta<0{format!("{delta} points")}else{"No change".into()}).unwrap_or_else(||"First comparable run".into())}</strong></div><div><span>"PERSONAL BEST"</span><strong>{move || result.get().map(|session|history.get().iter().filter(|item|item.exercise_hash==session.exercise_hash&&(item.bpm-session.bpm).abs()<0.01&&item.input_mode==session.input_mode&&item.scoring_version==session.scoring_version&&(item.tolerance_ms-session.tolerance_ms).abs()<0.01).filter_map(|item|item.summary.score).max().unwrap_or(session.summary.score.unwrap_or(0)).to_string()).unwrap_or_else(||"—".into())}</strong></div><small>"Same exercise version, tempo, input mode, tolerance and scoring v1 only."</small></div>
-              <div class="result-actions"><button class="primary" on:click={let launch=start_click.clone();move |_|{observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);launch(0.0,count_in.get_untracked());}}>"Practise again"</button><button on:click=move |_|{phase.set("idle".into());result.set(None);progress.set(-1.0);}>"Back to score"</button></div>
+              <div class="result-actions"><button class="primary" on:click={let start=start_new_run.clone();move |_|{observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Practise again"</button><button on:click=move |_|{phase.set("idle".into());result.set(None);progress.set(-1.0);}>"Back to score"</button></div>
             </section>
 
         <aside class=move || if settings_open.get(){"settings-drawer open"}else{"settings-drawer"} aria-hidden=move || (!settings_open.get()).to_string()>
@@ -911,7 +917,7 @@ fn App() -> impl IntoView {
               <label>"Metronome volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || click_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.48);click_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},value);save_click_volume();}/></label>
             </section>
             <section><h3>"Reference snare"</h3><label class="toggle-row"><span>"Play app snare"<small>"Mute this if your drum module is audible."</small></span><input type="checkbox" prop:checked=move || !snare_muted.get() on:change=move |event|{snare_muted.set(!event_target_checked(&event));set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},click_volume.get_untracked());save_snare_mute();}/></label><label>"Snare volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || snare_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);snare_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{value},click_volume.get_untracked());save_snare_volume();}/></label></section>
-            <section><h3>"Exercise"</h3><label>"Loops"<select prop:value=move || loops.get().to_string() on:change=move |event|{loops.set(event_target_value(&event).parse().unwrap_or(1));save_loops();}><option value="1">"1 run"</option><option value="2">"2 loops"</option><option value="4">"4 loops"</option></select></label><label>"Score following"<select prop:value=move || follow.get() on:change=move |event|{follow.set(event_target_value(&event));save_follow();}><option value="continuous">"Continuous horizontal"</option><option value="page">"Bar/page follow"</option></select></label></section>
+            <section><h3>"Exercise"</h3><label>"Loops"<select prop:value=move || loops.get().to_string() on:change=move |event|{loops.set(event_target_value(&event).parse().unwrap_or(1));save_loops();}><option value="1">"1 run"</option><option value="2">"2 loops"</option><option value="4">"4 loops"</option></select></label><p class="help">"The score follows playback vertically, keeping the current and next bar in view."</p></section>
             <section><h3>"MIDI drums"</h3><p class="help">"Use the MIDI status control in the top bar to connect or rescan. Rudiment never uploads your events."</p><p class="midi-state">{move || midi_status.get()}</p>
               <label class=move || if midi_ports.get().is_empty(){"hidden"}else{""}>"Input device"<select prop:value=move || selected_midi.get().unwrap_or_default() on:change=move |event|select_midi(&event_target_value(&event))>{move || midi_ports.get().into_iter().map(|port|view!{<option value=port.id.clone()>{format!("{} · {}",port.manufacturer,port.name)}</option>}).collect_view()}</select></label>
               <div class="learn-card"><strong>{move || if midi_learn.get(){"Hit your snare now…"}else{"Quick MIDI Learn"}}</strong><span>{move || format!("Current snare: note {}, channel {}",snare_note.get(),snare_channel.get())}</span><button on:click=move |_|midi_learn.set(true)>{move || if midi_learn.get(){"Listening…"}else{"Learn snare"}}</button></div>
@@ -919,7 +925,7 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);feedback.set("Calibration: tap with each click".into());let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">"Excellent is the tight green flash. Hits inside the wider on-time window remain green; earlier hits are blue and later hits yellow."</p><label>{move || format!("Excellent window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="25" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(15.0).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("On-time window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(35.0);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.48);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);follow.set("continuous".into());latency_ms.set(0.0);on_time_ms.set(35.0);excellent_ms.set(15.0);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.48);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);latency_ms.set(0.0);on_time_ms.set(35.0);excellent_ms.set(15.0);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" on:click=move |_|settings_open.set(false)></button>
       </main>

@@ -179,12 +179,14 @@ test('score feedback expires misses and playhead interpolates continuously', asy
   // SVG lines have a zero-width bounding box, so Playwright correctly reports
   // no box even while the stroked playhead is visibly rendered.
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
-  const first=Number(await page.locator('#playhead').getAttribute('data-x'));await page.waitForTimeout(70);const second=Number(await page.locator('#playhead').getAttribute('data-x'));
-  expect(second).toBeGreaterThan(first);
+  const first=Number(await page.locator('#playhead').getAttribute('data-x'));
+  await expect.poll(async()=>Number(await page.locator('#playhead').getAttribute('data-x')),{timeout:1500}).toBeGreaterThan(first);
   expect(await page.locator('#playhead').evaluate(element=>(element as SVGElement).style.transform)).toContain('translate3d');
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element).scrollBehavior)).toBe('auto');
+  expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element).scrollbarWidth)).toBe('none');
+  expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element,'::-webkit-scrollbar').display)).toBe('none');
   await expect(page.locator('.score-note[data-judgement="missed"]').first()).toBeVisible();
-  await expect.poll(()=>page.locator('#notation').evaluate(element=>element.scrollLeft),{timeout:2500}).toBeGreaterThan(0);
+  expect(await page.locator('#notation').evaluate(element=>element.scrollLeft)).toBe(0);
   const frameStats=await page.evaluate(()=>new Promise<{median:number,p95:number}>(resolve=>{const deltas:number[]=[];let previous=performance.now();const sample=(now:number)=>{deltas.push(now-previous);previous=now;if(deltas.length<40)requestAnimationFrame(sample);else{const sorted=[...deltas.slice(1)].sort((a,b)=>a-b);resolve({median:sorted[Math.floor(sorted.length*.5)],p95:sorted[Math.floor(sorted.length*.95)]});}};requestAnimationFrame(sample);}));
   expect(frameStats.median).toBeLessThan(25);expect(frameStats.p95).toBeLessThan(55);
   await page.getByRole('button',{name:/Pause/}).click();const paused=await page.locator('#playhead').getAttribute('data-x');await page.waitForTimeout(120);expect(await page.locator('#playhead').getAttribute('data-x')).toBe(paused);
@@ -193,20 +195,201 @@ test('score feedback expires misses and playhead interpolates continuously', asy
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
 });
 
+test('score wraps responsively and follows playback vertically without horizontal scrolling',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>{
+    const hits=Array.from({length:64},(_,index)=>({beat:index*.5,notation_beat:index*.5,notation_duration_beats:.5,hand:index%2===0?'R':'L',accent:false}));
+    (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Multi-line Test',meter_numerator:4,meter_denominator:4,hits});
+  });
+  const score=page.locator('#notation'),svg=score.locator('svg');
+  await expect.poll(()=>svg.getAttribute('data-bars-per-line')).toBe('3');
+  await expect(svg).toHaveAttribute('data-staff-lines','5');
+  const desktopRows=await page.locator('.score-note').evaluateAll(notes=>new Set(notes.map(note=>note.getAttribute('data-system-row'))).size);
+  expect(desktopRows).toBeGreaterThan(1);
+  const barSpacing=await page.evaluate(()=>{
+    const center=(note:Element)=>{const bounds=(note.querySelector('.vf-notehead > text') as SVGGraphicsElement).getBBox();return bounds.x+bounds.width/2;};
+    const firstBar=[...document.querySelectorAll('.score-note[data-score-bar="0"]')],secondBar=[...document.querySelectorAll('.score-note[data-score-bar="1"]')];
+    const innerGaps=[...firstBar.slice(1).map((note,index)=>center(note)-center(firstBar[index])),...secondBar.slice(1).map((note,index)=>center(note)-center(secondBar[index]))];
+    return {boundary:center(secondBar[0])-center(firstBar.at(-1)!),inner:innerGaps.sort((a,b)=>a-b)[Math.floor(innerGaps.length/2)]};
+  });
+  expect(barSpacing.boundary).toBeGreaterThan(barSpacing.inner*.7);
+  expect(barSpacing.boundary).toBeLessThan(barSpacing.inner*1.4);
+
+  const sameLineTransition=await page.evaluate(()=>{
+    const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    app.updateScore(3.99,[]);const before=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    app.updateScore(4,[]);const after=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    return {before,after,row:document.querySelector('#playhead')?.getAttribute('data-row')};
+  });
+  expect(sameLineTransition.row).toBe('0');
+  expect(sameLineTransition.after-sameLineTransition.before).toBeGreaterThanOrEqual(0);
+  expect(sameLineTransition.after-sameLineTransition.before).toBeLessThan(5);
+
+  await page.setViewportSize({width:390,height:844});
+  await expect.poll(()=>svg.getAttribute('data-bars-per-line')).toBe('1');
+  expect(await score.evaluate(element=>element.scrollWidth<=element.clientWidth&&element.scrollLeft===0)).toBe(true);
+
+  await page.evaluate(()=>{
+    const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    app.updateScore(0,[]);const first=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    app.updateScore(.5,[]);const next=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    (window as unknown as {__scoreXProgresses:boolean}).__scoreXProgresses=next>first;
+    app.updateScore(3.99,[]);const endOfBar=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    app.updateScore(4,[]);const nextBar=Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+    (window as unknown as {__scoreBarWraps:boolean}).__scoreBarWraps=nextBar<endOfBar;
+    for(let frame=0;frame<30;frame++)app.updateScore(4,[]);
+  });
+  expect(await page.evaluate(()=>(window as unknown as {__scoreXProgresses:boolean}).__scoreXProgresses)).toBe(true);
+  expect(await page.evaluate(()=>(window as unknown as {__scoreBarWraps:boolean}).__scoreBarWraps)).toBe(true);
+  await expect(page.locator('#playhead')).toHaveAttribute('data-row','1');
+  expect(await score.evaluate(element=>element.scrollTop)).toBeGreaterThan(0);
+  expect(await score.evaluate(element=>element.scrollLeft)).toBe(0);
+  expect(await score.evaluate(element=>{
+    const viewport=element.getBoundingClientRect();
+    return [1,2].every(bar=>{
+      const note=element.querySelector(`.score-note[data-score-bar="${bar}"]`);
+      if(!note)return false;
+      const bounds=note.getBoundingClientRect();
+      return bounds.top<viewport.bottom&&bounds.bottom>viewport.top;
+    });
+  })).toBe(true);
+
+  await page.setViewportSize({width:1440,height:900});
+  await expect.poll(()=>svg.getAttribute('data-bars-per-line')).toBe('3');
+});
+
+test('single-line snare notation is available only when explicitly selected',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>{
+    const hits=Array.from({length:8},(_,index)=>({beat:index*.5,notation_beat:index*.5,notation_duration_beats:.5,instrument:'snare',note:38,hand:index%2?'L':'R'}));
+    (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Snare Rudiment',meter_numerator:4,meter_denominator:4,hits,staff_mode:'single_line'});
+  });
+  await expect(page.locator('#notation svg')).toHaveAttribute('data-staff-lines','1');
+});
+
+test('kit MIDI maps to drum staff positions with mixed rhythms and compact final system',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>{
+    const hits=[
+      {beat:0,notation_beat:0,notation_duration_beats:.5,instrument:'kick',note:36,hand:'R',accent:true},
+      {beat:0,notation_beat:0,notation_duration_beats:.5,instrument:'snare',note:38,hand:'R',accent:true},
+      {beat:0,notation_beat:0,notation_duration_beats:.5,instrument:'closed_hat',note:42,hand:'R',accent:true},
+      {beat:1.5,notation_beat:1.5,notation_duration_beats:.75,instrument:'snare',note:38,hand:'L',accent:false},
+      {beat:2.25,notation_beat:2.25,notation_duration_beats:.25,instrument:'snare',note:38,hand:'R',accent:false},
+      {beat:3,notation_beat:3,notation_duration_beats:.5,instrument:'snare',note:40,hand:'L',accent:false},
+      {beat:4,notation_beat:4,notation_duration_beats:.5,instrument:'ride',note:51,hand:'R',accent:false},
+      {beat:6,notation_beat:6,notation_duration_beats:.5,instrument:'tom',note:50,hand:'L',accent:false},
+      {beat:7,notation_beat:7,notation_duration_beats:.5,instrument:'closed_hat',note:42,hand:'R',accent:false},
+      {beat:9,notation_beat:9,notation_duration_beats:.5,instrument:'snare',note:38,hand:'L',accent:false},
+      {beat:10,notation_beat:10,notation_duration_beats:.5,instrument:'crash',note:49,hand:'R',accent:true},
+      {beat:12,notation_beat:12,notation_duration_beats:.5,instrument:'kick',note:36,hand:'R',accent:false},
+      {beat:12.5,notation_beat:12.5,notation_duration_beats:.5,instrument:'snare',note:40,hand:'L',accent:false}
+    ];
+    (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Kit and mixed meter',meter_numerator:6,meter_denominator:8,hits});
+  });
+  const svg=page.locator('#notation svg');
+  await expect(svg).toHaveAttribute('data-staff-lines','5');
+  await expect(svg).toHaveAttribute('data-system-bar-counts');
+  const layout=await svg.evaluate(element=>({
+    counts:JSON.parse(element.getAttribute('data-system-bar-counts')!),
+    widths:JSON.parse(element.getAttribute('data-system-widths')!),
+    barsPerLine:Number(element.getAttribute('data-bars-per-line'))
+  }));
+  expect(layout.counts.reduce((sum:number,count:number)=>sum+count,0)).toBe(5);
+  expect(layout.counts.at(-1)).toBeLessThan(layout.barsPerLine);
+  expect(layout.widths.at(-1)).toBeLessThan(layout.widths[0]);
+  await expect(page.locator('.score-measure-number')).toHaveCount(5);
+  await expect(page.locator('.score-barline')).toHaveCount(3);
+  await expect(page.locator('[data-score-rest="true"]').first()).toBeVisible();
+  await expect(page.locator('.score-note[data-beat="1.5"]')).toHaveAttribute('data-dotted','true');
+  const chord=page.locator('.score-note[data-beat="0"]');
+  await expect(chord).toHaveAttribute('data-midi-notes','36,38,42');
+  const chordY=await chord.locator('.vf-notehead').evaluateAll(heads=>heads.map(head=>(head as SVGGraphicsElement).getBBox().y));
+  expect(new Set(chordY).size).toBeGreaterThan(1);
+});
+
+test('playhead interpolates between noteheads and aligns with each note beat',async({page})=>{
+  await page.goto('/');
+  const hit=page.locator('.score-note[data-beat="1"]');
+  const headX=await hit.locator('.vf-notehead > text').evaluate(head=>{
+    const bounds=(head as SVGGraphicsElement).getBBox();return bounds.x+bounds.width/2;
+  });
+  const xAtBeat=async(beat:number)=>page.evaluate(value=>{
+    (window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(value,[]);
+    return Number(document.querySelector('#playhead')?.getAttribute('data-x'));
+  },beat);
+  const exact=await xAtBeat(1);
+  const before=await xAtBeat(.99);
+  const between=await xAtBeat(1.25);
+  const after=await xAtBeat(1.5);
+  expect(exact).toBeCloseTo(headX,1);
+  expect(before).toBeLessThan(exact);
+  expect(between).toBeGreaterThan(exact);
+  expect(between).toBeLessThan(after);
+});
+
+test('note glyphs keep their color and opacity as the playhead passes',async({page})=>{
+  await page.goto('/');
+  const first=page.locator('.score-note[data-beat="0"]');
+  const before=await first.evaluate(note=>{
+    const head=note.querySelector('.vf-notehead > text')!;
+    return {fill:getComputedStyle(head).fill,opacity:getComputedStyle(note).opacity,filter:getComputedStyle(note).filter};
+  });
+  await page.evaluate(()=>{
+    const update=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore;
+    for(const beat of [0,1,2,3.5,4,8])update(beat,[]);
+  });
+  const after=await first.evaluate(note=>{
+    const head=note.querySelector('.vf-notehead > text')!;
+    return {fill:getComputedStyle(head).fill,opacity:getComputedStyle(note).opacity,filter:getComputedStyle(note).filter};
+  });
+  expect(after).toEqual(before);
+  expect(after.fill).toBe('rgb(0, 0, 0)');
+});
+
 test('notehead feedback and unmatched strike markers stay at their own timestamps',async({page})=>{
   await page.goto('/');
+  const hit=page.locator('.score-note[data-beat="1"]');
+  const originalFill=await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill);
   await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1,[
     {expected_beat:1,actual_beat:1.01,judgement:'on_time',error_ms:4,excellent:true,event_id:'hit'},
     {expected_beat:null,actual_beat:1.25,judgement:'extra',error_ms:0,excellent:false,event_id:'extra'}
   ]));
-  const hit=page.locator('.score-note[data-beat="1"]');
   await expect(hit).toHaveAttribute('data-judgement','excellent');
   await expect(hit).toHaveClass(/excellent-flash/);
-  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(8, 122, 89)');
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+  const halo=hit.locator(':scope > .vf-notehead > .judgement-halo');
+  await expect(halo).toHaveCount(1);
+  expect(await halo.evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(56, 174, 142)');
+  const haloSize=await halo.evaluate(element=>{
+    const head=element.parentElement!.querySelector(':scope > text')!,bounds=head.getBBox();
+    return {radius:Number(element.getAttribute('r')),headWidth:bounds.width};
+  });
+  expect(haloSize.radius).toBeCloseTo(haloSize.headWidth*.62,5);
+  expect(await halo.evaluate(element=>element.compareDocumentPosition(element.parentElement!.querySelector(':scope > text')!)&Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
   const marker=page.locator('.unmatched-hit-marker');await expect(marker).toHaveCount(1);await expect(marker).toHaveAttribute('data-beat','1.25');
   const markerX=Number(await marker.getAttribute('cx')),expectedX=await hit.evaluate(element=>{const box=(element as SVGGElement).getBBox();return box.x+box.width/2;});expect(markerX).not.toBeCloseTo(expectedX,1);
-  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1.5,[{expected_beat:1.5,actual_beat:null,judgement:'missed',error_ms:0,excellent:false,event_id:null}]));
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1.5,[{expected_beat:1,actual_beat:null,judgement:'missed',error_ms:0,excellent:false,event_id:null}]));
+  await expect(hit).toHaveAttribute('data-judgement','missed');
+  await expect(hit.locator('.judgement-halo')).toHaveCount(0);
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
   await expect(marker).toHaveCount(0);
+});
+
+test('restarting practice clears the previous session note colours',async({page})=>{
+  await page.goto('/');
+  const hit=page.locator('.score-note[data-beat="1"]');
+  const originalFill=await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill);
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(1,[{expected_beat:1,actual_beat:1,judgement:'on_time',error_ms:0,excellent:false,event_id:'previous-session-hit'}]));
+  await expect(hit).toHaveAttribute('data-judgement','on_time');
+  await expect(hit.locator('.judgement-halo')).toHaveCount(1);
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+
+  await page.getByRole('button',{name:/Restart/}).click();
+  await expect(hit).not.toHaveAttribute('data-judgement','on_time');
+  await expect(hit.locator('.judgement-halo')).toHaveCount(0);
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
 });
 
 test('rapid repeated monitored strikes allocate an audio voice for every hit', async ({ page }) => {

@@ -31,7 +31,7 @@ The static release is written to `dist/`. `npm run fixtures` deterministically r
 
 ## GitHub Pages
 
-`.github/workflows/pages.yml` tests the application, rebuilds it with a repository-relative public URL, verifies the deployable asset graph, and deploys through the official Pages actions after every push to `main` (or a manual workflow dispatch). In GitHub, open **Settings → Pages** and set **Source** to **GitHub Actions** once. No custom secrets are required. The deployed URL is shown on the workflow's `github-pages` environment after a successful run.
+`.github/workflows/pages.yml` tests the application, rebuilds it with a repository-relative public URL, explicitly configures GitHub Pages to publish the Actions artifact, verifies the deployable app asset graph, and deploys through the official Pages actions after every push to `main` (or a manual workflow dispatch). No custom secrets or manual Pages source selection are required. The deployed URL is shown on the workflow's `github-pages` environment after a successful run.
 
 ## Architecture
 
