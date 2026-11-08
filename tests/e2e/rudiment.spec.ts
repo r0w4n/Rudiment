@@ -542,7 +542,7 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   await expect(hit.locator('.judgement-halo')).toHaveCount(0);
   await expect(hit.locator('.missed-note-marker')).toHaveCount(0);
   await expect(hit.locator(':scope > .vf-notehead > circle')).toHaveCount(0);
-  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(194, 62, 53)');
+  expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
   expect(await hit.evaluate(element=>getComputedStyle(element).opacity)).toBe(originalOpacity);
   await expect(marker).toHaveCount(0);
 });
@@ -565,6 +565,8 @@ test('restarting practice clears the previous session note colours',async({page}
 
 test('all five timing judgements colour the notehead and expose text alternatives',async({page})=>{
   await page.goto('/');
+  const missedHead=page.locator('.score-note[data-beat="2"] .vf-notehead > text').first();
+  const missedOriginalFill=await missedHead.evaluate(element=>getComputedStyle(element).fill);
   await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(2,[
     {expected_beat:0,actual_beat:0,judgement:'perfect',error_ms:0,excellent:true,note_score:100,event_id:'perfect'},
     {expected_beat:.5,actual_beat:.53,judgement:'good',error_ms:30,excellent:false,note_score:90,event_id:'good'},
@@ -577,7 +579,7 @@ test('all five timing judgements colour the notehead and expose text alternative
     {beat:'0.5',judgement:'good',fill:'rgb(36, 147, 87)',label:'good +30 milliseconds'},
     {beat:'1',judgement:'early',fill:'rgb(197, 91, 20)',label:'early -60 milliseconds'},
     {beat:'1.5',judgement:'late',fill:'rgb(112, 64, 167)',label:'late +60 milliseconds'},
-    {beat:'2',judgement:'missed',fill:'rgb(194, 62, 53)',label:'missed'}
+    {beat:'2',judgement:'missed',fill:missedOriginalFill,label:'missed'}
   ];
   for(const item of expected){
     const note=page.locator(`.score-note[data-beat="${item.beat}"]`).first(),head=note.locator(':scope > .vf-notehead').first();
@@ -585,6 +587,24 @@ test('all five timing judgements colour the notehead and expose text alternative
     await expect(head).toHaveAttribute('aria-label',item.label);
     expect(await head.locator(':scope > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe(item.fill);
   }
+  await expect(page.locator('.score-note[data-beat="2"] .judgement-halo')).toHaveCount(0);
+  await expect(page.locator('.score-note[data-beat="2"] .missed-note-marker')).toHaveCount(0);
+});
+
+test('missed notes keep their original notehead color',async({page})=>{
+  await page.goto('/');
+  const note=page.locator('.score-note[data-beat="2"]').first();
+  const notehead=note.locator('.vf-notehead').first();
+  const glyph=notehead.locator(':scope > text').first();
+  const originalFill=await glyph.evaluate(element=>getComputedStyle(element).fill);
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(2,[
+    {expected_beat:2,actual_beat:null,judgement:'missed',error_ms:0,excellent:false,event_id:null}
+  ]));
+  await expect(note).toHaveAttribute('data-judgement','missed');
+  await expect(notehead).toHaveAttribute('data-judgement','missed');
+  expect(await glyph.evaluate(element=>getComputedStyle(element).fill)).toBe(originalFill);
+  await expect(notehead.locator(':scope > .judgement-halo')).toHaveCount(0);
+  await expect(notehead.locator(':scope > circle')).toHaveCount(0);
 });
 
 test('rapid repeated monitored strikes allocate an audio voice for every hit', async ({ page }) => {
