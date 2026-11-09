@@ -1439,7 +1439,29 @@ fn App() -> impl IntoView {
         <header class="topbar">
           <a class="brand" href="#" aria-label="Rudiment home"><span class="brand-mark">"R"</span><span>"Rudiment"</span></a>
           <div class="exercise-heading"><span class="eyebrow">"CURRENT EXERCISE"</span><strong>{move || exercise.get().title}</strong><small>"4/4 · sticking and accents"</small></div>
-          <div class="tempo-control"><button aria-label="Decrease tempo" on:click=move |_|{tempo_down(bpm.get_untracked()-1.0);save_tempo_down();}><Minus size=17/></button><label><input aria-label="Tempo in BPM" title="Type a tempo from 30 to 240 BPM" type="number" inputmode="numeric" min="30" max="240" step="1" prop:value=move || bpm.get().round().to_string() on:focus=move |event|{let _=event_target::<web_sys::HtmlInputElement>(&event).select();} on:input=move |event|{if let Ok(value)=event_target_value(&event).parse::<f64>(){if (30.0..=240.0).contains(&value){tempo_input(value.round());save_tempo_input();}}} on:change=move |event|{let input=event_target::<web_sys::HtmlInputElement>(&event);let value=input.value().parse::<f64>().unwrap_or_else(|_|bpm.get_untracked()).round().clamp(30.0,240.0);tempo_commit(value);input.set_value(&value.to_string());save_tempo_commit();}/><span>"BPM"</span></label><button aria-label="Increase tempo" on:click=move |_|{tempo_up(bpm.get_untracked()+1.0);save_tempo_up();}><Plus size=17/></button></div>
+          <div class="tempo-control">
+            <button aria-label="Decrease tempo" on:click=move |_|{tempo_down(bpm.get_untracked()-1.0);save_tempo_down();}><Minus size=17/></button>
+            <label>
+              <input aria-label="Tempo in BPM" title="Type a tempo from 30 to 240 BPM" type="number" inputmode="numeric" min="30" max="240" step="1"
+                prop:value=move || bpm.get().round().to_string()
+                on:focus=move |event|{event_target::<web_sys::HtmlInputElement>(&event).select();}
+                on:input=move |event|{
+                  if let Ok(value)=event_target_value(&event).parse::<f64>() && (30.0..=240.0).contains(&value){
+                    tempo_input(value.round());
+                    save_tempo_input();
+                  }
+                }
+                on:change=move |event|{
+                  let input=event_target::<web_sys::HtmlInputElement>(&event);
+                  let value=input.value().parse::<f64>().unwrap_or_else(|_|bpm.get_untracked()).round().clamp(30.0,240.0);
+                  tempo_commit(value);
+                  input.set_value(&value.to_string());
+                  save_tempo_commit();
+                }/>
+              <span>"BPM"</span>
+            </label>
+            <button aria-label="Increase tempo" on:click=move |_|{tempo_up(bpm.get_untracked()+1.0);save_tempo_up();}><Plus size=17/></button>
+          </div>
           <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label="MIDI connection" on:click={let connect=connect_action.clone();move |_|{stop_for_connect();connect();}}><span class="status-dot"></span>{move || midi_status.get()}</button>
           <button id="midi-library-trigger" class="stats-trigger library-topbar-trigger" aria-label="MIDI library" title=move || format!("MIDI library · {} exercises",saved_imports.get().len()+BUILTIN_RUDIMENTS.len()) aria-haspopup="dialog" aria-expanded=move || library_open.get().to_string() on:click=move |_|{
             stop_for_library();
