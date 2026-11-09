@@ -6,10 +6,13 @@
     "fixtures": "node scripts/generate-fixtures.mjs",
     "bundle": "node scripts/build-bridge.mjs",
     "spike:alphatab": "node scripts/build-alphatab-spike.mjs",
-    "dev": "npm run fixtures && npm run bundle && cd web && trunk serve index.html --dist dist --watch src --watch index.html --watch styles.css --watch public --watch Cargo.toml --watch ../Cargo.toml --watch ../Cargo.lock --watch ../crates/core --enable-cooldown --port 5173 --skip-version-check --locked=true",
+    "dev": "node scripts/dev.mjs",
     "build": "npm run fixtures && npm run bundle && cd web && trunk build index.html --release --dist ../dist --skip-version-check --locked=true",
     "test": "cargo test --workspace",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "check": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --locked && npm run build",
+    "security": "npm audit --audit-level=high",
+    "hooks:install": "sh scripts/install-hooks.sh"
   },
   "dependencies": {
     "idb": "8.0.4",

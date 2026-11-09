@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root"
+
+echo "Checking Rust formatting and compilation..."
+cargo fmt --all -- --check
+node --check web/js/bridge.js
+node --check scripts/build-bridge.mjs
+node --check scripts/dev.mjs
+node --check scripts/generate-fixtures.mjs
+cargo check --workspace --all-targets

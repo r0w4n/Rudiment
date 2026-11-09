@@ -52,6 +52,7 @@ jobs:
           tar --extract --gzip --file "$archive" --directory "$bin_dir"
           echo "$bin_dir" >> "$GITHUB_PATH"
       - run: npm ci
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --locked
       - name: Generate browser assets
         run: |
@@ -62,12 +63,21 @@ jobs:
         run: trunk build index.html --release --locked=true --skip-version-check --dist ../dist --public-url "./"
       - name: Run browser tests with runner Chrome
         run: npm run test:e2e
+      - name: Upload browser failure comparisons
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rudiment-browser-failures
+          path: test-results
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Verify deployable asset graph
         run: |
           test -s dist/index.html
           grep -q '<title>Rudiment' dist/index.html
           test -s dist/public/bridge.js
           test -s dist/public/audio/snare-medium.m4a
+          test ! -e dist/public/reference
           test -n "$(find dist -name '*.wasm' -print -quit)"
           grep -q 'href="./' dist/index.html
           grep -q "from './" dist/index.html

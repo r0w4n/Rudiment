@@ -1,10 +1,12 @@
 import * as Tone from 'tone';
 import { WebMidi } from 'webmidi';
 import { openDB } from 'idb';
-import { Renderer, Stave, StaveNote, Voice, Formatter, Beam, Annotation, Articulation, BarlineType, Dot, Fraction, Tuplet } from 'vexflow';
+import { Renderer, Stave, StaveNote, GraceNote, GraceNoteGroup, Voice, Formatter, Beam, Annotation, AnnotationVerticalJustify, Articulation, BarlineType, Dot, Fraction, Tuplet } from 'vexflow';
 
 const DB_NAME = 'rudiment';
 const DB_VERSION = 2;
+const STICKING_PLACEMENT = AnnotationVerticalJustify.BOTTOM;
+const SYSTEM_MARK_BASELINE_CLEARANCE = 24;
 const bridgeUrl = document.currentScript?.src || document.querySelector('script[src*="bridge.js"]')?.src || document.baseURI;
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 const dbPromise = openDB(DB_NAME, DB_VERSION, {
@@ -33,6 +35,56 @@ const velocityLayers = velocity => {
 };
 function tempoAtBeat(beat,map,initialBpm){let bpm=initialBpm;for(const change of map){if(change.beat>beat)break;bpm=change.bpm;}return bpm;}
 function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),within=beat-bars*meter;return `${bars}:${within}:0`;}
+
+// A glanceable drummer-style display: the sweep borrows the left/right motion
+// of a digital needle, while the LEDs show beat position and a stronger
+// downbeat. Pulses are queued from the same Tone callback and output timestamp
+// as the audible click, so there is no independent visual timer to drift.
+const visualMetronome = {
+  pending: [], lastStep: null,
+  schedule(performanceTime,beat,meter,subdivision){
+    const step=Math.round(beat*Math.max(1,subdivision));
+    this.pending.push({performanceTime,beat,meter:Math.max(1,Math.round(meter)),step});
+  },
+  pulse(event){
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    const dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+    const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
+    const dot=dots[index];if(!dot)return;
+    root.dataset.pulse=String(event.step);root.dataset.scheduledAt=String(event.performanceTime);
+    dot.animate([
+      {transform:'scale(1)',opacity:.72,boxShadow:'0 0 0 transparent'},
+      {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1,boxShadow:index===0?'0 0 11px #e7ad66':'0 0 9px #72d1bd'},
+      {transform:'scale(1)',opacity:.72,boxShadow:'0 0 0 transparent'}
+    ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
+  },
+  render(beat,meter,subdivision,now){
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    meter=Math.max(1,Math.round(meter));subdivision=Math.max(1,subdivision);
+    const whole=Math.floor(beat),fraction=((beat%1)+1)%1;
+    const beatInBar=((whole%meter)+meter)%meter;
+    const swing=whole%2===0?-1+fraction*2:1-fraction*2;
+    root.classList.add('active');root.classList.toggle('count-in',beat<0);
+    root.style.setProperty('--metronome-swing',String(swing));
+    root.dataset.beat=String(beatInBar+1);root.dataset.step=String(Math.floor(beat*subdivision));
+    const dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+    dots.forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
+    const label=root.querySelector('.visual-metronome-label');if(label)label.textContent=beat<0?'COUNT IN':'PLAY';
+    root.setAttribute('aria-label',`Visual metronome, ${beat<0?'count-in':'practice'}, beat ${beatInBar+1} of ${meter}`);
+    while(this.pending.length&&this.pending[0].performanceTime<=now+8){
+      const event=this.pending.shift();if(event.step!==this.lastStep){this.lastStep=event.step;this.pulse(event);}
+    }
+  },
+  stop(){
+    this.pending.length=0;this.lastStep=null;
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    root.classList.remove('active','count-in');root.style.setProperty('--metronome-swing','0');
+    delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
+    root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>dot.classList.remove('current'));
+    const label=root.querySelector('.visual-metronome-label');if(label)label.textContent='READY';
+    root.setAttribute('aria-label','Visual metronome, stopped');
+  }
+};
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
@@ -129,7 +181,7 @@ const audio = {
   stop() {
     this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
     const transport = Tone.getTransport(); transport.stop(); transport.cancel(0); transport.seconds = 0;
-    this.activeRun=null;
+    this.activeRun=null;visualMetronome.stop();
   },
   setTempo(bpm) {
     const requested=Math.max(30,Math.min(240,Number(bpm)||60)),run=this.activeRun;
@@ -158,6 +210,7 @@ const audio = {
     for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time),position);}
     transport.scheduleRepeat(time => {
       const localBeat = step / subdivision, globalBeat = localBeat < countBeats ? localBeat : offset + localBeat - countBeats;
+      visualMetronome.schedule(this.perfAt(time),globalBeat,options.meter,subdivision);
       if (options.metronome) this.click(time, Number.isInteger(globalBeat) && Math.round(globalBeat) % options.meter === 0, options.timbre);
       step++;
     }, interval, 0);
@@ -168,7 +221,9 @@ const audio = {
       // scheduling lead-in. Without the clamp, resuming visibly jumps the
       // playhead backwards before the Tone transport starts.
       const now = performance.now(), elapsedBeats=transport.ticks/transport.PPQ;
-      const beat = offset + elapsedBeats-countBeats; onFrame(beat, now, this.activeRun?.runPerformance??runPerformance);
+      const beat = offset + elapsedBeats-countBeats;
+      visualMetronome.render(beat,options.meter,subdivision,now);
+      onFrame(beat, now, this.activeRun?.runPerformance??runPerformance);
       if (elapsedBeats >= countBeats+remaining) { this.stop(); onDone(); } else this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
@@ -229,7 +284,7 @@ function instrumentForHit(hit) {
   if(note>=39&&note<=81)return 'other_percussion';
   return 'snare';
 }
-function renderScore(exercise) {
+function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
   const element = document.getElementById('notation'); if (!element) return; element.innerHTML = '';
   const isResize=scoreData.exercise===exercise;
   const previousBeat=isResize&&Number.isFinite(scoreData.lastBeat)?scoreData.lastBeat:-99;
@@ -238,8 +293,6 @@ function renderScore(exercise) {
   const hits=exercise.hits,metersPerBar=exercise.meter_numerator*4/Math.max(1,exercise.meter_denominator);
   const lastBeat=hits.reduce((last,hit)=>Math.max(last,hit.notation_beat??hit.beat),0);
   const barCount=Math.max(1,Math.floor(lastBeat/metersPerBar)+1);
-  const shortest=hits.length?Math.min(...hits.map(hit=>hit.notation_duration_beats||.25)):1;
-  const minimumBarWidth=shortest<.4?145:shortest<.75?120:100;
   const singleLine=exercise.staff_mode==='single_line'&&hits.length>0&&hits.every(hit=>instrumentForHit(hit)==='snare');
   const width=Math.max(280,element.clientWidth),availableWidth=Math.max(240,width-28);
   const compactLandscape=window.innerHeight<=600&&window.innerWidth>window.innerHeight;
@@ -251,12 +304,14 @@ function renderScore(exercise) {
   firstStave.setBegBarType(BarlineType.NONE).addClef('percussion').addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
   const headerWidth=firstStave.getNoteStartX()-14;
   const musicWidth=Math.max(120,availableWidth-headerWidth);
-  const barsPerLine=Math.max(1,Math.min(compactLandscape?4:3,barCount,Math.floor(musicWidth/minimumBarWidth)));
+  const barsPerLine=1;
   const barWidth=musicWidth/barsPerLine,lineCount=Math.ceil(barCount/barsPerLine);
   const viewportHeight=Math.max(0,element.clientHeight);
-  const targetSystems=lineCount>=2&&viewportHeight>=230?2:1;
-  const fittedRowHeight=(viewportHeight-scoreTopMargin-scoreBottomMargin)/targetSystems;
-  const scoreRowHeight=Math.max(compactLandscape?98:108,Math.min(compactLandscape?118:SCORE_ROW_HEIGHT,fittedRowHeight||SCORE_ROW_HEIGHT));
+  const availableSystemHeight=Math.max(1,viewportHeight-scoreTopMargin-scoreBottomMargin);
+  const minimumRowHeight=Math.max(compactLandscape?84:94,minimumRowHeightOverride);
+  const targetSystems=Math.max(1,Math.min(lineCount,Math.floor(availableSystemHeight/minimumRowHeight)||1));
+  const fittedRowHeight=availableSystemHeight/targetSystems;
+  const scoreRowHeight=Math.max(minimumRowHeight,Math.min(compactLandscape?118:SCORE_ROW_HEIGHT,fittedRowHeight||SCORE_ROW_HEIGHT));
   const height=scoreTopMargin+lineCount*scoreRowHeight+scoreBottomMargin;
   renderer.resize(width,height);
   const context=renderer.getContext(),systemBarCounts=[],systemWidths=[];
@@ -286,6 +341,7 @@ function renderScore(exercise) {
       const start=bar*metersPerBar,end=start+metersPerBar,slots=[];
       const groups=new Map();
       for(const hit of hits){
+        if(hit.grace)continue;
         const position=hit.notation_beat??hit.beat;
         if(position<start-.001||position>=end-.001)continue;
         const key=position.toFixed(4);
@@ -306,10 +362,24 @@ function renderScore(exercise) {
         const note=noteWithDuration(keys,value);
         eventHitsByNote.set(note,group.hits);
         const hands=[...new Set(group.hits.map(hit=>hit.hand).filter(hand=>hand==='R'||hand==='L'))];
-        if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(1).setFont('Inter',11,'700'),0);
+        // Keep sticking below the staff so accents cannot displace individual hand labels.
+        if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter',11,'700'),0);
         if(group.hits.some(hit=>hit.accent))note.addModifier(new Articulation('a>').setPosition(3),0);
         barSlotBeats.set(note,group.position);slots.push(note);
         for(const hit of group.hits){const key=pitchForHit(hit);notesMeta.push({note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,key,headIndex:Math.max(0,keys.indexOf(key)),row,bar});}
+        const ornamentHits=hits.filter(hit=>hit.grace&&Math.abs((hit.notation_beat??hit.beat)-group.position)<.001);
+        if(ornamentHits.length){
+          const graceNotes=ornamentHits.map(hit=>{
+            const key=pitchForHit(hit),graceNote=new GraceNote({keys:[key],duration:'16',clef:'percussion',stemDirection:1,slash:true});
+            if(hit.hand==='R'||hit.hand==='L')graceNote.addModifier(new Annotation(handText(hit.hand)).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter',8,'600'),0);
+            eventHitsByNote.set(graceNote,[hit]);
+            notesMeta.push({note:graceNote,beat:hit.beat,notationBeat:group.position,durationBeats:.125,hit,key,headIndex:0,row,bar});
+            return graceNote;
+          });
+          const graceGroup=new GraceNoteGroup(graceNotes,false);
+          if(graceNotes.length>1)graceGroup.beamNotes();
+          note.addModifier(graceGroup,0);
+        }
         cursor=group.position+value;
       }
       if(cursor<end-.001)for(const value of restValues(end-cursor)){
@@ -382,9 +452,26 @@ function renderScore(exercise) {
       group.dataset.beat=String(meta.beat);group.dataset.writtenDuration=writtenDuration(meta.durationBeats);group.dataset.systemRow=String(meta.row);group.dataset.scoreBar=String(meta.bar);
       group.dataset.dotted=String(durationSpec(meta.durationBeats)[2]);
       group.dataset.tuplet=String(durationSpec(meta.durationBeats)[3]);
+      group.dataset.grace=String(Boolean(meta.hit.grace));
+      group.dataset.accent=String(Boolean(meta.hit.accent));
       group.dataset.midiNotes=eventHits.map(candidate=>candidate.note??38).join(',');
       group.dataset.instruments=[...new Set(eventHits.map(instrumentForHit))].join(',');
       group.classList.add('score-note');
+    }
+  }
+  if(svg&&lineCount>1){
+    const textBaseline=text=>{
+      const matrix=text.getCTM(),x=Number(text.getAttribute('x'))||0,y=Number(text.getAttribute('y'))||0;
+      return matrix?matrix.b*x+matrix.d*y+matrix.f:y;
+    };
+    const stickingBaselines=Array.from({length:lineCount},(_,row)=>[...svg.querySelectorAll(`.score-note[data-system-row="${row}"] .vf-annotation > text`)].map(textBaseline));
+    const accentBaselines=Array.from({length:lineCount},(_,row)=>[...svg.querySelectorAll(`.score-note[data-system-row="${row}"][data-accent="true"]`)].flatMap(note=>[...note.querySelectorAll(':scope > .vf-notehead > text')].slice(1)).map(textBaseline));
+    const clearances=stickingBaselines.slice(0,-1).map((baselines,row)=>baselines.length&&accentBaselines[row+1].length?Math.min(...accentBaselines[row+1])-Math.max(...baselines):null);
+    svg.dataset.systemMarkClearances=JSON.stringify(clearances);
+    const shortfall=Math.max(0,...clearances.filter(Number.isFinite).map(clearance=>SYSTEM_MARK_BASELINE_CLEARANCE-clearance));
+    if(shortfall>.5&&layoutPass<2){
+      renderScore(exercise,Math.ceil(scoreRowHeight+shortfall),layoutPass+1);
+      return;
     }
   }
   const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
@@ -497,8 +584,8 @@ function selectMidi(id){selectedInput=WebMidi.inputs.find(input=>input.id===id)|
 
 async function readFile(file,callback){if(!file)return;if(file.size>8*1024*1024){callback(new Uint8Array(),file.name,'Files larger than 8 MB are not supported.');return;}try{callback(new Uint8Array(await file.arrayBuffer()),file.name,'');}catch(error){callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
 function chooseMidi(callback){midiFileCallback=callback;const input=document.createElement('input');input.type='file';input.accept='.mid,.midi,audio/midi';input.onchange=()=>readFile(input.files?.[0],callback);input.click();}
-async function loadBundled(url,callback,saveToLibrary=false){try{const response=await fetch(url);if(!response.ok)throw new Error(`HTTP ${response.status}`);callback(new Uint8Array(await response.arrayBuffer()),url.split('/').pop(),'',saveToLibrary);}catch(error){callback(new Uint8Array(),url,error?.message||'Could not load bundled exercise.');}}
-function closeMidiLibrary(){const library=document.querySelector('.midi-library');if(library)library.open=false;}
+async function loadBundled(url,callback,saveToLibrary=false,displayName=''){try{const response=await fetch(url);if(!response.ok)throw new Error(`HTTP ${response.status}`);callback(new Uint8Array(await response.arrayBuffer()),displayName||url.split('/').pop(),'',saveToLibrary);}catch(error){callback(new Uint8Array(),displayName||url,error?.message||'Could not load bundled exercise.');}}
+async function loadBundledFromLibrary(url,displayName=''){if(!midiFileCallback)return;return loadBundled(url,midiFileCallback,false,displayName);}
 let dropController;
 let midiFileCallback;
 function bindDrop(callback){
@@ -512,16 +599,21 @@ function bindDrop(callback){
   element.addEventListener('dragleave',()=>element.classList.remove('dragging'),options);
   element.addEventListener('drop',event=>{event.preventDefault();element.classList.remove('dragging');readFile(event.dataTransfer?.files?.[0],callback);},options);
 }
+function trapDialogTab(event,selector){
+  if(event.key!=='Tab')return;
+  const root=document.querySelector(selector);if(!root)return;
+  const focusable=[...root.querySelectorAll('button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>element.getClientRects().length>0);
+  if(!focusable.length){event.preventDefault();return;}
+  const first=focusable[0],last=focusable.at(-1),active=document.activeElement;
+  if(event.shiftKey&&(active===first||!root.contains(active))){event.preventDefault();last.focus();}
+  else if(!event.shiftKey&&(active===last||!root.contains(active))){event.preventDefault();first.focus();}
+}
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),activeVoices:audio.voices.size,clickGain:audio.clickGain?.gain.value??0,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,closeMidiLibrary,bindDrop,
+  renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };
-document.addEventListener('click',event=>{
-  const library=document.querySelector('.midi-library[open]');
-  if(library&&event.target instanceof Node&&!library.contains(event.target))library.open=false;
-});

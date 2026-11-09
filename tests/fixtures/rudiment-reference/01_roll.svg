@@ -1,0 +1,268 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1900" viewBox="0 0 2400 1900">
+<rect width="2400" height="1900" fill="white"/>
+<rect width="2400" height="18" fill="#192b3f"/>
+<text x="150.00" y="115.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="76" font-weight="750" fill="#192b3f">Roll</text>
+<text x="153.00" y="172.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="650" fill="#596b80">SNARE DRUM  /  4⁄4  /  quarter = 72 BPM</text>
+<line x1="150.00" y1="204.00" x2="2250.00" y2="204.00" stroke="#d7e2e9" stroke-width="3" stroke-linecap="round"/>
+<text x="153.00" y="258.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="32" font-weight="normal" fill="#596b80">Modern reference fixture  •  one measure per staff  •  R/L = sticking</text>
+<text x="153.00" y="304.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="normal" fill="#758498">Historical source: C. S. Ashworth (1812), printed p. 3</text>
+<text x="143.00" y="557.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="650" fill="#758498">01</text>
+<line x1="150.00" y1="545.00" x2="2245.00" y2="545.00" stroke="#192b3f" stroke-width="3" stroke-linecap="round"/>
+<line x1="150.00" y1="520.00" x2="150.00" y2="570.00" stroke="#192b3f" stroke-width="2" stroke-linecap="round"/>
+<line x1="2245.00" y1="520.00" x2="2245.00" y2="570.00" stroke="#192b3f" stroke-width="2" stroke-linecap="round"/>
+<text x="136.00" y="485.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="normal" fill="#596b80">SNARE</text>
+<line x1="222.00" y1="543.00" x2="222.00" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="346.38" y1="543.00" x2="346.38" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="470.75" y1="543.00" x2="470.75" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="595.12" y1="543.00" x2="595.12" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="719.50" y1="543.00" x2="719.50" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="843.88" y1="543.00" x2="843.88" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="968.25" y1="543.00" x2="968.25" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1092.62" y1="543.00" x2="1092.62" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1217.00" y1="543.00" x2="1217.00" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1341.38" y1="543.00" x2="1341.38" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1465.75" y1="543.00" x2="1465.75" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1590.12" y1="543.00" x2="1590.12" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1714.50" y1="543.00" x2="1714.50" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1838.88" y1="543.00" x2="1838.88" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1963.25" y1="543.00" x2="1963.25" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="2087.62" y1="543.00" x2="2087.62" y2="435.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="222.00" y1="435.00" x2="595.12" y2="435.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="222.00" y1="447.00" x2="595.12" y2="447.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="719.50" y1="435.00" x2="1092.62" y2="435.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="719.50" y1="447.00" x2="1092.62" y2="447.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1217.00" y1="435.00" x2="1590.12" y2="435.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1217.00" y1="447.00" x2="1590.12" y2="447.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1714.50" y1="435.00" x2="2087.62" y2="435.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1714.50" y1="447.00" x2="2087.62" y2="447.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<ellipse cx="210.00" cy="545.00" rx="14" ry="10" transform="rotate(-19 210.00 545.00)" fill="#192b3f" />
+<text x="210.00" y="394.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="750" fill="#192b3f">›</text>
+<text x="210.00" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="334.38" cy="545.00" rx="14" ry="10" transform="rotate(-19 334.38 545.00)" fill="#192b3f" />
+<text x="334.38" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="458.75" cy="545.00" rx="14" ry="10" transform="rotate(-19 458.75 545.00)" fill="#192b3f" />
+<text x="458.75" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="583.12" cy="545.00" rx="14" ry="10" transform="rotate(-19 583.12 545.00)" fill="#192b3f" />
+<text x="583.12" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="707.50" cy="545.00" rx="14" ry="10" transform="rotate(-19 707.50 545.00)" fill="#192b3f" />
+<text x="707.50" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="831.88" cy="545.00" rx="14" ry="10" transform="rotate(-19 831.88 545.00)" fill="#192b3f" />
+<text x="831.88" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="956.25" cy="545.00" rx="14" ry="10" transform="rotate(-19 956.25 545.00)" fill="#192b3f" />
+<text x="956.25" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1080.62" cy="545.00" rx="14" ry="10" transform="rotate(-19 1080.62 545.00)" fill="#192b3f" />
+<text x="1080.62" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1205.00" cy="545.00" rx="14" ry="10" transform="rotate(-19 1205.00 545.00)" fill="#192b3f" />
+<text x="1205.00" y="394.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="750" fill="#192b3f">›</text>
+<text x="1205.00" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1329.38" cy="545.00" rx="14" ry="10" transform="rotate(-19 1329.38 545.00)" fill="#192b3f" />
+<text x="1329.38" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1453.75" cy="545.00" rx="14" ry="10" transform="rotate(-19 1453.75 545.00)" fill="#192b3f" />
+<text x="1453.75" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1578.12" cy="545.00" rx="14" ry="10" transform="rotate(-19 1578.12 545.00)" fill="#192b3f" />
+<text x="1578.12" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1702.50" cy="545.00" rx="14" ry="10" transform="rotate(-19 1702.50 545.00)" fill="#192b3f" />
+<text x="1702.50" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1826.88" cy="545.00" rx="14" ry="10" transform="rotate(-19 1826.88 545.00)" fill="#192b3f" />
+<text x="1826.88" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1951.25" cy="545.00" rx="14" ry="10" transform="rotate(-19 1951.25 545.00)" fill="#192b3f" />
+<text x="1951.25" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="2075.62" cy="545.00" rx="14" ry="10" transform="rotate(-19 2075.62 545.00)" fill="#192b3f" />
+<text x="2075.62" y="623.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<text x="2260.00" y="554.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="normal" fill="#8d9ca9">↴</text>
+<text x="143.00" y="897.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="650" fill="#758498">02</text>
+<line x1="150.00" y1="885.00" x2="2245.00" y2="885.00" stroke="#192b3f" stroke-width="3" stroke-linecap="round"/>
+<line x1="150.00" y1="860.00" x2="150.00" y2="910.00" stroke="#192b3f" stroke-width="2" stroke-linecap="round"/>
+<line x1="2245.00" y1="860.00" x2="2245.00" y2="910.00" stroke="#192b3f" stroke-width="2" stroke-linecap="round"/>
+<text x="136.00" y="825.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="normal" fill="#596b80">SNARE</text>
+<line x1="222.00" y1="883.00" x2="222.00" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="346.38" y1="883.00" x2="346.38" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="470.75" y1="883.00" x2="470.75" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="595.12" y1="883.00" x2="595.12" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="719.50" y1="883.00" x2="719.50" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="843.88" y1="883.00" x2="843.88" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="968.25" y1="883.00" x2="968.25" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1092.62" y1="883.00" x2="1092.62" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1217.00" y1="883.00" x2="1217.00" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1341.38" y1="883.00" x2="1341.38" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1465.75" y1="883.00" x2="1465.75" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1590.12" y1="883.00" x2="1590.12" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1714.50" y1="883.00" x2="1714.50" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1838.88" y1="883.00" x2="1838.88" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1963.25" y1="883.00" x2="1963.25" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="2087.62" y1="883.00" x2="2087.62" y2="775.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="222.00" y1="775.00" x2="595.12" y2="775.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="222.00" y1="787.00" x2="595.12" y2="787.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="719.50" y1="775.00" x2="1092.62" y2="775.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="719.50" y1="787.00" x2="1092.62" y2="787.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1217.00" y1="775.00" x2="1590.12" y2="775.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1217.00" y1="787.00" x2="1590.12" y2="787.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1714.50" y1="775.00" x2="2087.62" y2="775.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1714.50" y1="787.00" x2="2087.62" y2="787.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<ellipse cx="210.00" cy="885.00" rx="14" ry="10" transform="rotate(-19 210.00 885.00)" fill="#192b3f" />
+<text x="210.00" y="734.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="750" fill="#192b3f">›</text>
+<text x="210.00" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="334.38" cy="885.00" rx="14" ry="10" transform="rotate(-19 334.38 885.00)" fill="#192b3f" />
+<text x="334.38" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="458.75" cy="885.00" rx="14" ry="10" transform="rotate(-19 458.75 885.00)" fill="#192b3f" />
+<text x="458.75" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="583.12" cy="885.00" rx="14" ry="10" transform="rotate(-19 583.12 885.00)" fill="#192b3f" />
+<text x="583.12" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="707.50" cy="885.00" rx="14" ry="10" transform="rotate(-19 707.50 885.00)" fill="#192b3f" />
+<text x="707.50" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="831.88" cy="885.00" rx="14" ry="10" transform="rotate(-19 831.88 885.00)" fill="#192b3f" />
+<text x="831.88" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="956.25" cy="885.00" rx="14" ry="10" transform="rotate(-19 956.25 885.00)" fill="#192b3f" />
+<text x="956.25" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1080.62" cy="885.00" rx="14" ry="10" transform="rotate(-19 1080.62 885.00)" fill="#192b3f" />
+<text x="1080.62" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1205.00" cy="885.00" rx="14" ry="10" transform="rotate(-19 1205.00 885.00)" fill="#192b3f" />
+<text x="1205.00" y="734.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="750" fill="#192b3f">›</text>
+<text x="1205.00" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1329.38" cy="885.00" rx="14" ry="10" transform="rotate(-19 1329.38 885.00)" fill="#192b3f" />
+<text x="1329.38" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1453.75" cy="885.00" rx="14" ry="10" transform="rotate(-19 1453.75 885.00)" fill="#192b3f" />
+<text x="1453.75" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1578.12" cy="885.00" rx="14" ry="10" transform="rotate(-19 1578.12 885.00)" fill="#192b3f" />
+<text x="1578.12" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1702.50" cy="885.00" rx="14" ry="10" transform="rotate(-19 1702.50 885.00)" fill="#192b3f" />
+<text x="1702.50" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1826.88" cy="885.00" rx="14" ry="10" transform="rotate(-19 1826.88 885.00)" fill="#192b3f" />
+<text x="1826.88" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1951.25" cy="885.00" rx="14" ry="10" transform="rotate(-19 1951.25 885.00)" fill="#192b3f" />
+<text x="1951.25" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="2075.62" cy="885.00" rx="14" ry="10" transform="rotate(-19 2075.62 885.00)" fill="#192b3f" />
+<text x="2075.62" y="963.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<text x="2260.00" y="894.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="normal" fill="#8d9ca9">↴</text>
+<text x="143.00" y="1237.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="650" fill="#758498">03</text>
+<line x1="150.00" y1="1225.00" x2="2245.00" y2="1225.00" stroke="#192b3f" stroke-width="3" stroke-linecap="round"/>
+<line x1="150.00" y1="1200.00" x2="150.00" y2="1250.00" stroke="#192b3f" stroke-width="2" stroke-linecap="round"/>
+<line x1="2245.00" y1="1200.00" x2="2245.00" y2="1250.00" stroke="#192b3f" stroke-width="2" stroke-linecap="round"/>
+<text x="136.00" y="1165.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="normal" fill="#596b80">SNARE</text>
+<line x1="222.00" y1="1223.00" x2="222.00" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="346.38" y1="1223.00" x2="346.38" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="470.75" y1="1223.00" x2="470.75" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="595.12" y1="1223.00" x2="595.12" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="719.50" y1="1223.00" x2="719.50" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="843.88" y1="1223.00" x2="843.88" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="968.25" y1="1223.00" x2="968.25" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1092.62" y1="1223.00" x2="1092.62" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1217.00" y1="1223.00" x2="1217.00" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1341.38" y1="1223.00" x2="1341.38" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1465.75" y1="1223.00" x2="1465.75" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1590.12" y1="1223.00" x2="1590.12" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1714.50" y1="1223.00" x2="1714.50" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1838.88" y1="1223.00" x2="1838.88" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1963.25" y1="1223.00" x2="1963.25" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="2087.62" y1="1223.00" x2="2087.62" y2="1115.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="222.00" y1="1115.00" x2="595.12" y2="1115.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="222.00" y1="1127.00" x2="595.12" y2="1127.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="719.50" y1="1115.00" x2="1092.62" y2="1115.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="719.50" y1="1127.00" x2="1092.62" y2="1127.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1217.00" y1="1115.00" x2="1590.12" y2="1115.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1217.00" y1="1127.00" x2="1590.12" y2="1127.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1714.50" y1="1115.00" x2="2087.62" y2="1115.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1714.50" y1="1127.00" x2="2087.62" y2="1127.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<ellipse cx="210.00" cy="1225.00" rx="14" ry="10" transform="rotate(-19 210.00 1225.00)" fill="#192b3f" />
+<text x="210.00" y="1074.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="750" fill="#192b3f">›</text>
+<text x="210.00" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="334.38" cy="1225.00" rx="14" ry="10" transform="rotate(-19 334.38 1225.00)" fill="#192b3f" />
+<text x="334.38" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="458.75" cy="1225.00" rx="14" ry="10" transform="rotate(-19 458.75 1225.00)" fill="#192b3f" />
+<text x="458.75" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="583.12" cy="1225.00" rx="14" ry="10" transform="rotate(-19 583.12 1225.00)" fill="#192b3f" />
+<text x="583.12" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="707.50" cy="1225.00" rx="14" ry="10" transform="rotate(-19 707.50 1225.00)" fill="#192b3f" />
+<text x="707.50" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="831.88" cy="1225.00" rx="14" ry="10" transform="rotate(-19 831.88 1225.00)" fill="#192b3f" />
+<text x="831.88" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="956.25" cy="1225.00" rx="14" ry="10" transform="rotate(-19 956.25 1225.00)" fill="#192b3f" />
+<text x="956.25" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1080.62" cy="1225.00" rx="14" ry="10" transform="rotate(-19 1080.62 1225.00)" fill="#192b3f" />
+<text x="1080.62" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1205.00" cy="1225.00" rx="14" ry="10" transform="rotate(-19 1205.00 1225.00)" fill="#192b3f" />
+<text x="1205.00" y="1074.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="750" fill="#192b3f">›</text>
+<text x="1205.00" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1329.38" cy="1225.00" rx="14" ry="10" transform="rotate(-19 1329.38 1225.00)" fill="#192b3f" />
+<text x="1329.38" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1453.75" cy="1225.00" rx="14" ry="10" transform="rotate(-19 1453.75 1225.00)" fill="#192b3f" />
+<text x="1453.75" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1578.12" cy="1225.00" rx="14" ry="10" transform="rotate(-19 1578.12 1225.00)" fill="#192b3f" />
+<text x="1578.12" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1702.50" cy="1225.00" rx="14" ry="10" transform="rotate(-19 1702.50 1225.00)" fill="#192b3f" />
+<text x="1702.50" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1826.88" cy="1225.00" rx="14" ry="10" transform="rotate(-19 1826.88 1225.00)" fill="#192b3f" />
+<text x="1826.88" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1951.25" cy="1225.00" rx="14" ry="10" transform="rotate(-19 1951.25 1225.00)" fill="#192b3f" />
+<text x="1951.25" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="2075.62" cy="1225.00" rx="14" ry="10" transform="rotate(-19 2075.62 1225.00)" fill="#192b3f" />
+<text x="2075.62" y="1303.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<text x="2260.00" y="1234.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="normal" fill="#8d9ca9">↴</text>
+<text x="143.00" y="1577.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="650" fill="#758498">04</text>
+<line x1="150.00" y1="1565.00" x2="2245.00" y2="1565.00" stroke="#192b3f" stroke-width="3" stroke-linecap="round"/>
+<line x1="150.00" y1="1540.00" x2="150.00" y2="1590.00" stroke="#192b3f" stroke-width="2" stroke-linecap="round"/>
+<line x1="2245.00" y1="1540.00" x2="2245.00" y2="1590.00" stroke="#192b3f" stroke-width="2" stroke-linecap="round"/>
+<text x="136.00" y="1505.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="normal" fill="#596b80">SNARE</text>
+<line x1="222.00" y1="1563.00" x2="222.00" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="346.38" y1="1563.00" x2="346.38" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="470.75" y1="1563.00" x2="470.75" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="595.12" y1="1563.00" x2="595.12" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="719.50" y1="1563.00" x2="719.50" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="843.88" y1="1563.00" x2="843.88" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="968.25" y1="1563.00" x2="968.25" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1092.62" y1="1563.00" x2="1092.62" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1217.00" y1="1563.00" x2="1217.00" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1341.38" y1="1563.00" x2="1341.38" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1465.75" y1="1563.00" x2="1465.75" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1590.12" y1="1563.00" x2="1590.12" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1714.50" y1="1563.00" x2="1714.50" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1838.88" y1="1563.00" x2="1838.88" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="1963.25" y1="1563.00" x2="1963.25" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="2087.62" y1="1563.00" x2="2087.62" y2="1455.00" stroke="#192b3f" stroke-width="3.6" stroke-linecap="round"/>
+<line x1="222.00" y1="1455.00" x2="595.12" y2="1455.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="222.00" y1="1467.00" x2="595.12" y2="1467.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="719.50" y1="1455.00" x2="1092.62" y2="1455.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="719.50" y1="1467.00" x2="1092.62" y2="1467.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1217.00" y1="1455.00" x2="1590.12" y2="1455.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1217.00" y1="1467.00" x2="1590.12" y2="1467.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1714.50" y1="1455.00" x2="2087.62" y2="1455.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<line x1="1714.50" y1="1467.00" x2="2087.62" y2="1467.00" stroke="#192b3f" stroke-width="10" stroke-linecap="round"/>
+<ellipse cx="210.00" cy="1565.00" rx="14" ry="10" transform="rotate(-19 210.00 1565.00)" fill="#192b3f" />
+<text x="210.00" y="1414.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="750" fill="#192b3f">›</text>
+<text x="210.00" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="334.38" cy="1565.00" rx="14" ry="10" transform="rotate(-19 334.38 1565.00)" fill="#192b3f" />
+<text x="334.38" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="458.75" cy="1565.00" rx="14" ry="10" transform="rotate(-19 458.75 1565.00)" fill="#192b3f" />
+<text x="458.75" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="583.12" cy="1565.00" rx="14" ry="10" transform="rotate(-19 583.12 1565.00)" fill="#192b3f" />
+<text x="583.12" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="707.50" cy="1565.00" rx="14" ry="10" transform="rotate(-19 707.50 1565.00)" fill="#192b3f" />
+<text x="707.50" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="831.88" cy="1565.00" rx="14" ry="10" transform="rotate(-19 831.88 1565.00)" fill="#192b3f" />
+<text x="831.88" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="956.25" cy="1565.00" rx="14" ry="10" transform="rotate(-19 956.25 1565.00)" fill="#192b3f" />
+<text x="956.25" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1080.62" cy="1565.00" rx="14" ry="10" transform="rotate(-19 1080.62 1565.00)" fill="#192b3f" />
+<text x="1080.62" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1205.00" cy="1565.00" rx="14" ry="10" transform="rotate(-19 1205.00 1565.00)" fill="#192b3f" />
+<text x="1205.00" y="1414.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="46" font-weight="750" fill="#192b3f">›</text>
+<text x="1205.00" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1329.38" cy="1565.00" rx="14" ry="10" transform="rotate(-19 1329.38 1565.00)" fill="#192b3f" />
+<text x="1329.38" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1453.75" cy="1565.00" rx="14" ry="10" transform="rotate(-19 1453.75 1565.00)" fill="#192b3f" />
+<text x="1453.75" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1578.12" cy="1565.00" rx="14" ry="10" transform="rotate(-19 1578.12 1565.00)" fill="#192b3f" />
+<text x="1578.12" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="1702.50" cy="1565.00" rx="14" ry="10" transform="rotate(-19 1702.50 1565.00)" fill="#192b3f" />
+<text x="1702.50" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1826.88" cy="1565.00" rx="14" ry="10" transform="rotate(-19 1826.88 1565.00)" fill="#192b3f" />
+<text x="1826.88" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">L</text>
+<ellipse cx="1951.25" cy="1565.00" rx="14" ry="10" transform="rotate(-19 1951.25 1565.00)" fill="#192b3f" />
+<text x="1951.25" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<ellipse cx="2075.62" cy="1565.00" rx="14" ry="10" transform="rotate(-19 2075.62 1565.00)" fill="#192b3f" />
+<text x="2075.62" y="1643.00" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="750" fill="#192b3f">R</text>
+<line x1="145.00" y1="1740.00" x2="2250.00" y2="1740.00" stroke="#d7e2e9" stroke-width="3" stroke-linecap="round"/>
+<text x="151.00" y="1784.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="normal" fill="#596b80">Alternating double strokes; long-roll mechanism.</text>
+<text x="151.00" y="1824.00" text-anchor="start" font-family="Inter, Arial, sans-serif" font-size="23" font-weight="normal" fill="#758498">Source notation differs in historical layout; this is an independent modern exercise, not a facsimile.</text>
+<text x="2250.00" y="1825.00" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="650" fill="#596b80">RUDIMENT  ·  PUBLIC-DOMAIN ROOTS</text>
+</svg>

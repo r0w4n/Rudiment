@@ -58,6 +58,8 @@ pub struct ExpectedHit {
     pub instrument: Instrument,
     pub velocity: u8,
     pub accent: bool,
+    #[serde(default)]
+    pub grace: bool,
     pub hand: Hand,
     pub channel: u8,
     pub note: u8,
@@ -148,14 +150,43 @@ fn measure_beats(numerator: u8, denominator: u8) -> f64 {
 /// Infers written percussion values from onset spacing and bar context, never short MIDI gate time.
 fn infer_notation(hits: &mut [ExpectedHit], meter: (u8, u8)) {
     let bar_beats = measure_beats(meter.0, meter.1);
-    let mut positions: Vec<f64> = hits.iter().map(|hit| hit.beat).collect();
+    for index in 0..hits.len() {
+        if hits[index].grace {
+            continue;
+        }
+        let offset = hits[index].beat.rem_euclid(bar_beats);
+        let has_leading_grace = hits[..index]
+            .iter()
+            .rev()
+            .any(|candidate| candidate.grace && hits[index].beat - candidate.beat <= 0.2);
+        if offset <= 0.2 && has_leading_grace {
+            hits[index].notation_beat = hits[index].beat - offset;
+        }
+    }
+    let mut positions: Vec<f64> = hits
+        .iter()
+        .filter(|hit| !hit.grace)
+        .map(|hit| hit.notation_beat)
+        .collect();
+    if positions.is_empty() {
+        positions = hits.iter().map(|hit| hit.beat).collect();
+    }
     positions.sort_by(f64::total_cmp);
     positions.dedup_by(|a, b| (*a - *b).abs() < 0.001);
     let grid = rhythmic_grid(&positions);
-    for hit in hits.iter_mut() {
-        hit.notation_beat = (hit.beat / grid).round() * grid;
+    for hit in hits.iter_mut().filter(|hit| !hit.grace) {
+        let triplet_position = (hit.notation_beat * 3.0).round() / 3.0;
+        hit.notation_beat = if (triplet_position - hit.notation_beat).abs() <= 0.02 {
+            triplet_position
+        } else {
+            (hit.notation_beat / grid).round() * grid
+        };
     }
-    positions = hits.iter().map(|hit| hit.notation_beat).collect();
+    positions = hits
+        .iter()
+        .filter(|hit| !hit.grace)
+        .map(|hit| hit.notation_beat)
+        .collect();
     positions.sort_by(f64::total_cmp);
     positions.dedup_by(|a, b| (*a - *b).abs() < 0.001);
 
@@ -182,7 +213,7 @@ fn infer_notation(hits: &mut [ExpectedHit], meter: (u8, u8)) {
                 .or_default() += 1;
         }
     }
-    for hit in hits.iter_mut() {
+    for hit in hits.iter_mut().filter(|hit| !hit.grace) {
         let bar_end = ((hit.notation_beat / bar_beats).floor() + 1.0) * bar_beats;
         let next = positions
             .iter()
@@ -200,6 +231,43 @@ fn infer_notation(hits: &mut [ExpectedHit], meter: (u8, u8)) {
         let infer_gap_as_note = gap <= pulse * 1.5 || repeated_mixed_value;
         hit.notation_duration_beats =
             nearest_written_value(if infer_gap_as_note { gap } else { pulse }).min(gap);
+    }
+
+    // Grace strokes remain part of the audible/scored timeline, but are
+    // engraved against the principal note they ornament. This keeps their
+    // deliberately early MIDI timestamp without allowing it to distort the
+    // rhythmic grid used for the main voice.
+    for index in 0..hits.len() {
+        if !hits[index].grace {
+            continue;
+        }
+        let principal = hits[index + 1..]
+            .iter()
+            .find(|candidate| !candidate.grace && candidate.beat - hits[index].beat <= 0.25);
+        if let Some(principal) = principal {
+            hits[index].notation_beat = principal.notation_beat;
+            hits[index].notation_duration_beats = 0.125;
+        }
+    }
+}
+
+fn mark_grace_notes(hits: &mut [ExpectedHit], ticks_per_beat: u16) {
+    let maximum_gate = (u64::from(ticks_per_beat) / 12).max(1);
+    for index in 0..hits.len() {
+        let instrument = hits[index].instrument;
+        let beat = hits[index].beat;
+        let velocity = hits[index].velocity;
+        let gate = hits[index].raw_duration_ticks;
+        let has_principal = hits[index + 1..]
+            .iter()
+            .take_while(|candidate| candidate.beat - beat <= 0.2)
+            .any(|candidate| {
+                candidate.instrument == instrument
+                    && candidate.beat > beat + 0.001
+                    && candidate.velocity >= velocity.saturating_add(20)
+            });
+        hits[index].grace =
+            velocity <= 64 && gate.is_some_and(|gate| gate <= maximum_gate) && has_principal;
     }
 }
 
@@ -236,8 +304,16 @@ pub struct PlayableTrack {
 pub enum MidiError {
     #[error("The MIDI file is malformed or truncated: {0}")]
     Parse(String),
+    #[error("MIDI files larger than 8 MB are not supported")]
+    FileTooLarge,
     #[error("SMPTE timing is not supported; use a PPQ MIDI file")]
     Smpte,
+    #[error("MIDI PPQ resolution must be greater than zero")]
+    InvalidPpq,
+    #[error("MIDI tempo must be greater than zero")]
+    InvalidTempo,
+    #[error("MIDI time signature must have a non-zero numerator and a supported denominator")]
+    InvalidMeter,
     #[error("This file contains too many events (limit 100,000)")]
     TooManyEvents,
     #[error("No playable note-on events were found")]
@@ -250,11 +326,12 @@ pub fn parse_midi(
     selected_track: Option<usize>,
 ) -> Result<Exercise, MidiError> {
     if bytes.len() > 8 * 1024 * 1024 {
-        return Err(MidiError::TooManyEvents);
+        return Err(MidiError::FileTooLarge);
     }
     let smf = Smf::parse(bytes).map_err(|e| MidiError::Parse(e.to_string()))?;
     let ppq = match smf.header.timing {
-        Timing::Metrical(v) => v.as_int(),
+        Timing::Metrical(v) if v.as_int() > 0 => v.as_int(),
+        Timing::Metrical(_) => return Err(MidiError::InvalidPpq),
         _ => return Err(MidiError::Smpte),
     };
     let event_count: usize = smf.tracks.iter().map(Vec::len).sum();
@@ -267,6 +344,8 @@ pub fn parse_midi(
     let mut names = vec![];
     let mut candidates: Vec<Vec<RawMidiNote>> = vec![];
     let mut lyrics_by_track: Vec<BTreeMap<u64, Vec<String>>> = vec![];
+    let mut invalid_tempo = false;
+    let mut invalid_meter = false;
     for (ti, track) in smf.tracks.iter().enumerate() {
         let mut tick = 0u64;
         let mut notes: Vec<RawMidiNote> = vec![];
@@ -280,10 +359,18 @@ pub fn parse_midi(
                     name = String::from_utf8_lossy(raw).to_string()
                 }
                 TrackEventKind::Meta(MetaMessage::Tempo(v)) => {
-                    tempo_events.entry(tick).or_insert(v.as_int());
+                    if v.as_int() == 0 {
+                        invalid_tempo = true;
+                    } else {
+                        tempo_events.entry(tick).or_insert(v.as_int());
+                    }
                 }
                 TrackEventKind::Meta(MetaMessage::TimeSignature(n, d, _, _)) => {
-                    meter = (n, 2u8.saturating_pow(d as u32))
+                    if n == 0 || d > 7 {
+                        invalid_meter = true;
+                    } else {
+                        meter = (n, 2u8.pow(d as u32));
+                    }
                 }
                 TrackEventKind::Meta(MetaMessage::Lyric(raw))
                 | TrackEventKind::Meta(MetaMessage::Text(raw))
@@ -332,6 +419,12 @@ pub fn parse_midi(
         names.push(name);
         candidates.push(notes);
         lyrics_by_track.push(lyrics);
+    }
+    if invalid_tempo {
+        return Err(MidiError::InvalidTempo);
+    }
+    if invalid_meter {
+        return Err(MidiError::InvalidMeter);
     }
     // Format-0 files place every channel in one physical track. When that
     // track contains channel 10 percussion, melodic channels are accompaniment
@@ -467,7 +560,8 @@ pub fn parse_midi(
             notation_duration_beats: 0.25,
             instrument,
             velocity,
-            accent: velocity >= 112,
+            accent: velocity >= 105,
+            grace: false,
             hand,
             channel,
             note,
@@ -475,10 +569,19 @@ pub fn parse_midi(
     }
     warnings.sort();
     warnings.dedup();
+    mark_grace_notes(&mut hits, ppq);
     infer_notation(&mut hits, meter);
     let shifted = hits
         .iter()
+        .filter(|hit| !hit.grace)
         .filter(|hit| (hit.notation_beat - hit.beat).abs() > 0.04)
+        .filter(|hit| {
+            !hits.iter().any(|candidate| {
+                candidate.grace
+                    && (candidate.notation_beat - hit.notation_beat).abs() < 0.001
+                    && hit.beat - candidate.beat <= 0.2
+            })
+        })
         .count();
     if shifted > 0 {
         warnings.push(format!("{shifted} onset(s) were quantised by more than 0.04 beats for notation; playback timing is preserved."));
@@ -544,6 +647,7 @@ pub fn paradiddle() -> Exercise {
                 instrument: Instrument::Snare,
                 velocity: if step == 0 || step == 4 { 120 } else { 88 },
                 accent: step == 0 || step == 4,
+                grace: false,
                 hand: *hand,
                 channel: 9,
                 note: 38,
@@ -1207,6 +1311,107 @@ mod tests {
     fn corrupt_midi_is_rejected() {
         assert!(parse_midi(b"MThd\0", "bad.mid", None).is_err());
     }
+    fn minimal_midi(
+        timing: Timing,
+        metadata: Option<MetaMessage<'static>>,
+        include_note: bool,
+    ) -> Vec<u8> {
+        use midly::{
+            Header, TrackEvent,
+            num::{u4, u7, u28},
+        };
+        let mut track = Vec::new();
+        if let Some(message) = metadata {
+            track.push(TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(message),
+            });
+        }
+        if include_note {
+            track.extend([
+                TrackEvent {
+                    delta: u28::new(0),
+                    kind: TrackEventKind::Midi {
+                        channel: u4::new(9),
+                        message: MidiMessage::NoteOn {
+                            key: u7::new(38),
+                            vel: u7::new(100),
+                        },
+                    },
+                },
+                TrackEvent {
+                    delta: u28::new(120),
+                    kind: TrackEventKind::Midi {
+                        channel: u4::new(9),
+                        message: MidiMessage::NoteOff {
+                            key: u7::new(38),
+                            vel: u7::new(0),
+                        },
+                    },
+                },
+            ]);
+        }
+        track.push(TrackEvent {
+            delta: u28::new(0),
+            kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+        });
+        let smf = Smf {
+            header: Header::new(Format::SingleTrack, timing),
+            tracks: vec![track],
+        };
+        let mut bytes = Vec::new();
+        smf.write_std(&mut bytes).unwrap();
+        bytes
+    }
+    #[test]
+    fn parser_rejects_unsafe_sizes_and_invalid_timing_metadata() {
+        use midly::num::{u15, u24};
+
+        assert!(matches!(
+            parse_midi(&vec![0; 8 * 1024 * 1024 + 1], "large.mid", None),
+            Err(MidiError::FileTooLarge)
+        ));
+        assert!(matches!(
+            parse_midi(
+                &minimal_midi(Timing::Metrical(u15::new(0)), None, true),
+                "zero-ppq.mid",
+                None
+            ),
+            Err(MidiError::InvalidPpq)
+        ));
+        assert!(matches!(
+            parse_midi(
+                &minimal_midi(
+                    Timing::Metrical(u15::new(480)),
+                    Some(MetaMessage::Tempo(u24::new(0))),
+                    true
+                ),
+                "zero-tempo.mid",
+                None
+            ),
+            Err(MidiError::InvalidTempo)
+        ));
+        assert!(matches!(
+            parse_midi(
+                &minimal_midi(
+                    Timing::Metrical(u15::new(480)),
+                    Some(MetaMessage::TimeSignature(4, 8, 24, 8)),
+                    true
+                ),
+                "invalid-meter.mid",
+                None
+            ),
+            Err(MidiError::InvalidMeter)
+        ));
+        assert!(matches!(
+            parse_midi(
+                &minimal_midi(Timing::Metrical(u15::new(480)), None, false),
+                "empty.mid",
+                None
+            ),
+            Err(MidiError::NoNotes)
+        ));
+    }
     #[test]
     fn ambiguous_lyrics_are_not_guessed() {
         let e = parse_midi(&fixture(true), "ambiguous.mid", None).unwrap();
@@ -1236,6 +1441,167 @@ mod tests {
         assert!((e.hits[1].beat - 0.5).abs() < f64::EPSILON);
         assert!(e.hits[0].accent);
         assert_eq!(e.hits[0].channel, 9);
+    }
+
+    #[test]
+    fn public_domain_rudiment_library_matches_reference_manifest() {
+        type ReferenceFixture = (
+            &'static str,
+            &'static [u8],
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+        );
+        let fixtures: [ReferenceFixture; 11] = [
+            (
+                "Roll.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/01_roll.mid"),
+                64,
+                4,
+                0,
+                8,
+                0,
+            ),
+            (
+                "Mother or 5 S. Roll.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/02_mother_or_5_s_roll.mid"),
+                40,
+                4,
+                0,
+                8,
+                0,
+            ),
+            (
+                "7 Stroke Roll.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/03_7_stroke_roll.mid"),
+                56,
+                4,
+                0,
+                8,
+                0,
+            ),
+            (
+                "9 Stroke Roll.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/04_9_stroke_roll.mid"),
+                36,
+                4,
+                0,
+                4,
+                0,
+            ),
+            (
+                "Hard Flams.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/05_hard_flams.mid"),
+                64,
+                4,
+                32,
+                32,
+                0,
+            ),
+            (
+                "Single Paradiddle.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/06_single_paradiddle.mid"),
+                64,
+                4,
+                0,
+                16,
+                0,
+            ),
+            (
+                "Double Paradiddle.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/07_double_paradiddle.mid"),
+                48,
+                4,
+                0,
+                8,
+                48,
+            ),
+            (
+                "Flam Paradiddle.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/08_flam_paradiddle.mid"),
+                80,
+                4,
+                16,
+                16,
+                0,
+            ),
+            (
+                "Single Drag.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/09_single_drag.mid"),
+                96,
+                4,
+                64,
+                16,
+                0,
+            ),
+            (
+                "Single Rotamacue.mid",
+                include_bytes!("../../../web/public/exercises/rudiments/10_single_rotamacue.mid"),
+                80,
+                4,
+                32,
+                16,
+                48,
+            ),
+            (
+                "The Drummers Call — Advanced Study.mid",
+                include_bytes!(
+                    "../../../web/public/exercises/rudiments/11_advanced_the_drummers_call_study.mid"
+                ),
+                122,
+                8,
+                32,
+                29,
+                24,
+            ),
+        ];
+
+        for (name, bytes, note_count, bars, grace_count, accent_count, tuplet_count) in fixtures {
+            let exercise = parse_midi(bytes, name, None).unwrap();
+            assert_eq!(exercise.hits.len(), note_count, "{name}");
+            assert_eq!(
+                exercise.hits.iter().filter(|hit| hit.grace).count(),
+                grace_count,
+                "{name}"
+            );
+            assert_eq!(
+                exercise.hits.iter().filter(|hit| hit.accent).count(),
+                accent_count,
+                "{name}"
+            );
+            assert_eq!(
+                exercise
+                    .hits
+                    .iter()
+                    .filter(
+                        |hit| !hit.grace && (hit.notation_duration_beats - 1.0 / 3.0).abs() < 0.01
+                    )
+                    .count(),
+                tuplet_count,
+                "{name}"
+            );
+            assert!(
+                exercise.hits.iter().all(|hit| hit.hand != Hand::Unknown),
+                "{name}"
+            );
+            assert!(exercise.hits.iter().all(|hit| hit.note == 38), "{name}");
+            assert!((exercise.tempo_bpm - 72.0).abs() < 0.01, "{name}");
+            assert!(
+                exercise.hits.last().unwrap().beat >= (bars - 1) as f64 * 4.0,
+                "{name}"
+            );
+            assert!(
+                exercise.hits.last().unwrap().beat < bars as f64 * 4.0,
+                "{name}"
+            );
+            assert!(
+                exercise.warnings.is_empty(),
+                "{name}: {:?}",
+                exercise.warnings
+            );
+        }
     }
     #[test]
     fn smf1_multitrack_uses_absolute_deltas_and_metadata() {
@@ -1379,6 +1745,7 @@ mod tests {
                 instrument: Instrument::Snare,
                 velocity: 100,
                 accent: false,
+                grace: false,
                 hand: Hand::Unknown,
                 channel: 9,
                 note: 38,

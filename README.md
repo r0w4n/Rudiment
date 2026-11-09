@@ -1,6 +1,6 @@
 # Rudiment
 
-Rudiment is a client-side drum practice app for Chrome. It opens directly on a four-bar single paradiddle at 60 BPM with a one-bar count-in, engraved percussion notation, sampled acoustic snare, keyboard demo input, deterministic scoring, and local practice history. USB MIDI, MIDI-file import, MIDI Learn, calibration, looping and score following use the same canonical Rust exercise timeline.
+Rudiment is a client-side drum practice app for Chrome. It opens directly on a four-bar single paradiddle at 60 BPM with a one-bar count-in, engraved percussion notation, sampled acoustic snare, keyboard demo input, deterministic scoring, and local practice history. Its MIDI library includes 11 historically rooted, modernised rudiment exercises with reference engravings. USB MIDI, MIDI-file import, MIDI Learn, calibration, looping and score following use the same canonical Rust exercise timeline.
 
 ## Run locally
 
@@ -11,27 +11,32 @@ rustup target add wasm32-unknown-unknown
 cargo install trunk --locked
 source "$HOME/.cargo/env"
 npm ci
+npm run hooks:install
 npm run dev
 ```
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in desktop Chrome. Starting practice unlocks browser audio. No account, server, registration or MIDI device is required; press `J` for demo snare input. Space pauses/resumes and `R` restarts when focus is not in a form field.
 
-The development server writes its disposable hot-reload build to `web/dist/`; release builds continue to use the repository-level `dist/`. Its watcher is restricted to source paths and uses Trunk's post-build cooldown, preventing macOS copy events or generated output from retriggering the build.
+The development server writes its disposable hot-reload build to `web/dist/`; release builds continue to use the repository-level `dist/`. It watches both Rust/Trunk inputs and `web/js/bridge.js`, rebuilding the browser bridge before Trunk reloads the page. The watchers are restricted to source paths and use Trunk's post-build cooldown, preventing generated output from retriggering its own build.
 
 ## Build and test
 
 ```bash
 source "$HOME/.cargo/env"
-npm run build
-npm test
+npm run check
 npm run test:e2e
+npm run security
 ```
 
 The static release is written to `dist/`. `npm run build` and `npm run dev` deterministically regenerate the ignored bundled SMF files. `npm run spike:alphatab` rebuilds the ignored renderer-selection spike.
 
+`npm run hooks:install` opts this checkout into the tracked hooks under `.githooks/`. The pre-commit hook performs formatting, JavaScript syntax and Rust compilation checks; the pre-push hook runs Clippy, Rust tests and the production build. The full browser suite remains in CI so routine pushes do not incur an extra minute locally. `npm run check` runs the complete non-browser quality gate on demand.
+
 ## GitHub Pages
 
 `.github/workflows/pages.yml` tests the application, builds one relocatable release for both Playwright and GitHub Pages, verifies the deployable app asset graph, and deploys through the official Pages actions after every push to `main` (or a manual workflow dispatch). The workflow uses the hosted runner's bundled Chrome and an integrity-checked prebuilt Trunk binary, avoiding a custom browser image and a source build of the deployment tool. Before the first deployment, set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**; repository settings cannot be changed by the workflow's restricted `GITHUB_TOKEN`. No custom secrets are required. The deployed URL is shown on the workflow's `github-pages` environment after a successful run.
+
+Dependency security is checked separately by `.github/workflows/security.yml` on lockfile changes and every Monday. RustSec audits Cargo dependencies and npm audits the JavaScript lockfile; Dependabot monitors Cargo, npm and GitHub Actions weekly with grouped updates.
 
 ## Architecture
 
@@ -39,6 +44,8 @@ The static release is written to `dist/`. `npm run build` and `npm run dev` dete
 - `web/src`: Leptos state machine and accessible product UI. Rust/JS snapshots cross with `serde-wasm-bindgen`.
 - `web/js/bridge.js`: narrow browser adapter for Tone.js/Web Audio, WEBMIDI.js, VexFlow and IndexedDB (`idb`). Tone.Transport is the sole musical scheduler; scoring and the requestAnimationFrame playhead share its explicitly bridged timeline.
 - `web/public`: source-verified CC0 acoustic snare layers, versioned JSON prescriptions/profiles, and build-time generated MIDI fixtures and browser bundle.
+
+The built-in MIDI exercises live under `web/public/exercises/rudiments`. Their matching PNG/SVG engravings, manifest and provenance material live under `tests/fixtures/rudiment-reference`; those test-only references are not linked from the app or included in the deployed site. Automated Rust and browser tests decode each supplied PNG, derive its system structure, and compare that with the generated score alongside the manifest's note, sticking, accent, grace-note, tuplet, bar and tempo expectations. On failure, CI retains the reference and generated images together for visual review; no pixel-perfect identity is required.
 
 ## Timing assessment
 

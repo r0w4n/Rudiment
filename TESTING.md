@@ -5,9 +5,9 @@
 Run from the repository root after `npm ci` and loading Cargo into `PATH`:
 
 ```bash
-npm test
-npm run build
+npm run check
 npm run test:e2e
+npm run security
 ```
 
 Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguity, Note On velocity zero, instrument mapping, onset-derived quarter/eighth/sixteenth/triplet values, mixed subdivisions and rests, short-gate quarter-note imports, deterministic optimal one-to-one matching, exact timing boundaries, continuous piecewise scores, input offsets, score rounding, aggregate timing statistics, simultaneous and rapid hits, misses, duplicates, extras and wrong instruments. Browser tests cover the first-run workspace, bundled and file import, saved MIDI library restoration/deletion, readable non-scrolling results, two-hit result dismissal/start behavior, hit-to-start and statistics dialog behavior and persisted Perfect/Good/Early/Late/Miss totals, removed snare demo controls, score-integrated timing feedback, continuous playhead/pause/resume, rapid independent audio voices, keyboard lifecycle, local persistence, responsive layout (including Pixel 8 Pro portrait and landscape viewports), looping and simulated MIDI permission/device/message/reconnect states.
@@ -21,7 +21,7 @@ Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguit
    Confirm Perfect notes turn green, Good notes light green, Early notes orange and Late notes purple; missed noteheads must keep their original colour and show no circle. Hit noteheads must change colour and their accessible labels must state the judgement and signed offset. Adjust the Perfect and Good thresholds in Settings and repeat.
 5. Start with a drum hit or `J`; pause/resume with Space, then test Stop and Restart. A natural completion must save a real 0–100 result in a readable, non-scrolling modal without leaving the practice workspace. The first new hit should dismiss the results modal; a second hit should begin the next run.
 6. Practise the same tempo/input twice; confirm the second result compares against the previous run. Reload and check that the history count remains.
-7. Select “Load bundled .mid”. Confirm R/L sticking and accents render through the same import callback. Drag `single-stroke-roll.mid` onto the score and try the ambiguous fixture to inspect its warning.
+7. Open MIDI library. Confirm the 11 built-in exercises are paginated, contain no reference-image links, and load R/L sticking and accents through the same import callback. Import or drag `single-stroke-roll.mid` onto the score and try the ambiguous fixture to inspect its warning.
 8. Open settings: preview all three click timbres, toggle the exercise click and app snare independently, change loops, run eight-tap calibration and Reset it.
 9. Import `web/public/exercises/quarter-note-reference.mid`. Confirm eight quarter notes render even though each raw MIDI gate is only 110 ticks. Open the MIDI library, reload the saved file, reload the browser and verify it restores the last selected import; delete it from the library and confirm the prompt.
 

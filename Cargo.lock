@@ -858,6 +858,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
+name = "lucide-leptos"
+version = "3.63.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "661b2ffddfcdc941dd37d7b14316ebc3903c7b021711fb6b35b82e890df774bf"
+dependencies = [
+ "leptos",
+]
+
+[[package]]
 name = "manyhow"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1189,6 +1198,7 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "leptos",
+ "lucide-leptos",
  "rudiment-core",
  "serde",
  "serde-wasm-bindgen",
