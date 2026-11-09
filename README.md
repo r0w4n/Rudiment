@@ -27,7 +27,7 @@ npm test
 npm run test:e2e
 ```
 
-The static release is written to `dist/`. `npm run fixtures` deterministically regenerates the bundled SMF files, and `npm run spike:alphatab` rebuilds the renderer-selection spike.
+The static release is written to `dist/`. `npm run build` and `npm run dev` deterministically regenerate the ignored bundled SMF files. `npm run spike:alphatab` rebuilds the ignored renderer-selection spike.
 
 ## GitHub Pages
 
@@ -38,7 +38,7 @@ The static release is written to `dist/`. `npm run fixtures` deterministically r
 - `crates/core`: web-independent Rust domain model, SMF normalisation with `midly`, instrument mapping, onset-grid and rhythmic-value inference, configurable per-note timing classification, one-to-one matching and Score v1 aggregation.
 - `web/src`: Leptos state machine and accessible product UI. Rust/JS snapshots cross with `serde-wasm-bindgen`.
 - `web/js/bridge.js`: narrow browser adapter for Tone.js/Web Audio, WEBMIDI.js, VexFlow and IndexedDB (`idb`). Tone.Transport is the sole musical scheduler; scoring and the requestAnimationFrame playhead share its explicitly bridged timeline.
-- `web/public`: local MIDI fixtures, source-verified CC0 acoustic snare layers, versioned JSON prescriptions/profiles and the generated browser bundle.
+- `web/public`: source-verified CC0 acoustic snare layers, versioned JSON prescriptions/profiles, and build-time generated MIDI fixtures and browser bundle.
 
 ## Timing assessment
 

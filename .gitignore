@@ -4,6 +4,8 @@
 /node_modules/
 /web/dist/
 /web/public/bridge.js
+/web/public/exercises/*.mid
+/spikes/alphatab-dist/
 /.DS_Store
 *.log
 /test-results/

@@ -1214,9 +1214,8 @@ mod tests {
         assert!(e.warnings.iter().any(|w| w.contains("ambiguous")));
     }
     #[test]
-    fn bundled_paradiddle_has_expected_grid_and_sticking() {
-        let bytes = include_bytes!("../../../web/public/exercises/single-paradiddle.mid");
-        let e = parse_midi(bytes, "single-paradiddle.mid", None).unwrap();
+    fn bundled_paradiddle_model_has_expected_grid_and_sticking() {
+        let e = paradiddle();
         assert_eq!(e.hits.len(), 32);
         assert_eq!((e.meter_numerator, e.meter_denominator), (4, 4));
         assert!((e.tempo_bpm - 60.0).abs() < 0.01);
