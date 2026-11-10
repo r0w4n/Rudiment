@@ -89,7 +89,7 @@ const visualMetronome = {
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
-  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], sampleErrors: [], fallbackHits: 0, snareStarts: 0, lastSnareError: null, voices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null,
+  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], sampleErrors: [], fallbackHits: 0, snareStarts: 0, lastSnareError: null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
   async ensure() {
     this.state = 'loading';
     // Start/resume the context immediately while the Connect click still has
@@ -153,7 +153,7 @@ const audio = {
   playSnare(velocity = 105, when = null) {
     if (!this.raw || this.raw.state !== 'running') { this.state='locked'; return false; }
     if(Number(velocity)<=0)return false;
-    const time = when ?? this.raw.currentTime, response=velocityGain(velocity);
+    const time = when ?? this.raw.currentTime, scheduled=time>this.raw.currentTime+.001, response=velocityGain(velocity);
     const layers=velocityLayers(velocity).filter(layer=>this.buffers[layer.index]);
     let started=0;
     if (layers.length) {
@@ -163,12 +163,14 @@ const audio = {
           source.playbackRate.value = .99 + Math.random() * .02;
           gain.gain.value = (this.layerGains[layer.index]||1) * response * layer.weight;
           source.connect(gain); gain.connect(this.snareGain);this.voices.add(source);
-          source.onended=()=>{this.voices.delete(source);source.disconnect();gain.disconnect();}; source.start(time);started++;
+          source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);source.disconnect();gain.disconnect();};
+          if(scheduled)this.scheduledVoices.add(source);
+          source.start(time);started++;
         } catch(error) { this.lastSnareError=audioErrorMessage(error); }
       }
     }
     if(!started){
-      try { this.syntheticSnare(time, velocity);this.fallbackHits++;started=1; }
+      try { this.syntheticSnare(time, velocity, scheduled);this.fallbackHits++;started=1; }
       catch(error) { this.lastSnareError=audioErrorMessage(error); }
     }
     this.snareStarts+=started;
@@ -186,12 +188,15 @@ const audio = {
     this.ensure().then(()=>this.playSnare(velocity)).catch(error=>{this.lastSnareError=audioErrorMessage(error);});
     return true;
   },
-  syntheticSnare(time, velocity) {
+  syntheticSnare(time, velocity, scheduled = false) {
     const length = Math.floor(this.raw.sampleRate * .2), buffer = this.raw.createBuffer(1, length, this.raw.sampleRate), data = buffer.getChannelData(0);
     for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.raw.sampleRate * .05));
     const source = this.raw.createBufferSource(), filter = this.raw.createBiquadFilter(), gain = this.raw.createGain();
     source.buffer = buffer; filter.type = 'highpass'; filter.frequency.value = 850; gain.gain.value = .6 * velocityGain(velocity);
-    source.connect(filter); filter.connect(gain); gain.connect(this.snareGain);this.voices.add(source);source.onended=()=>{this.voices.delete(source);source.disconnect();filter.disconnect();gain.disconnect();}; source.start(time);
+    source.connect(filter); filter.connect(gain); gain.connect(this.snareGain);this.voices.add(source);
+    source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);source.disconnect();filter.disconnect();gain.disconnect();};
+    if(scheduled)this.scheduledVoices.add(source);
+    source.start(time);
   },
   click(time, accent = false, timbre = 'woodblock') {
     const osc = this.raw.createOscillator(), gain = this.raw.createGain(), filter = this.raw.createBiquadFilter();
@@ -203,8 +208,14 @@ const audio = {
     osc.connect(filter); filter.connect(gain); gain.connect(this.clickGain); osc.start(time); osc.stop(time+duration+.01);
   },
   stop() {
+    if(this.activeRun)this.lastBeat=this.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-this.activeRun.countBeats;
     this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
     const transport = Tone.getTransport(); transport.stop(); transport.cancel(0); transport.seconds = 0;
+    for(const source of this.scheduledVoices){
+      try{source.stop();}
+      catch(error){this.lastSnareError=audioErrorMessage(error);}
+    }
+    this.scheduledVoices.clear();
     this.activeRun=null;visualMetronome.stop();
   },
   setTempo(bpm) {
@@ -226,15 +237,16 @@ const audio = {
     await this.ensure();
     if(generation!==this.generation)return {cancelled:true,state:this.state};
     const transport = Tone.getTransport(), tempoMap=(options.tempoMap||[]).slice().sort((a,b)=>a.beat-b.beat),sourceBpm=options.sourceBpm||options.bpm,tempoScale=options.bpm/sourceBpm,offset = options.offsetBeat || 0,initialBpm=tempoAtBeat(offset,tempoMap,sourceBpm)*tempoScale,countBeats = options.countInBars * options.meter;
-    const remaining = Math.max(0, options.totalBeats - offset), startDelay = .16;
+    const remaining = Math.max(0, options.totalBeats - offset), startDelay = options.immediate ? 0 : .16;
     const countInSeconds=countBeats*60/initialBpm,runAudio = this.raw.currentTime + startDelay + countInSeconds;
     const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
     const referenceNotes=(options.referenceNotes||[]).filter(note=>Number.isFinite(Number(note.beat))&&Number(note.beat)>=offset-.000001&&Number(note.beat)<options.totalBeats-.000001&&Number(note.velocity)>0);
     this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,runPerformance,referenceNoteCount:referenceNotes.length};
     transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
-    for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time),position);}
-    for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>this.playSnare(Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time),position);}
+    for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.activeRun&&transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time);},position);}
+    for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.playSnare(Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time);},position);}
     const scheduleClick=(time,step)=>{
+      if(generation!==this.generation)return;
       const beat=step/subdivision;
       visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision);
       if(options.metronome)this.click(time,step%(options.meter*subdivision)===0,options.timbre);
@@ -249,7 +261,7 @@ const audio = {
     let practiceStep=Math.ceil(offset*subdivision);
     const firstPracticeBeat=countBeats+practiceStep/subdivision-offset;
     transport.scheduleRepeat(time=>scheduleClick(time,practiceStep++),interval,transportPositionAtBeat(firstPracticeBeat,options.meter));
-    transport.start(`+${startDelay}`);
+    transport.start(startDelay ? `+${startDelay}` : undefined);
     let lastStateFrame=-Infinity;
     const frame = () => {
       if (generation !== this.generation) return;
@@ -258,6 +270,7 @@ const audio = {
       // playhead backwards before the Tone transport starts.
       const now = performance.now(), elapsedBeats=transport.ticks/transport.PPQ;
       const beat = offset + elapsedBeats-countBeats;
+      this.lastBeat=beat;
       const scoreBeat=beat>=0?beat%options.exerciseBeats:beat;
       updateScore(scoreBeat,undefined);
       visualMetronome.render(beat,options.meter,subdivision,now);
@@ -707,7 +720,7 @@ function trapDialogTab(event,selector){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),referenceNoteCount:audio.activeRun?.referenceNoteCount??0,activeVoices:audio.voices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],fallbackHits:audio.fallbackHits,snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],fallbackHits:audio.fallbackHits,snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},

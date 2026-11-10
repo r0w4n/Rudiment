@@ -23,7 +23,7 @@ use wasm_bindgen_futures::{JsFuture, spawn_local};
 type FrameCallback = Closure<dyn FnMut(f64, f64, f64)>;
 type DoneCallback = Closure<dyn FnMut()>;
 type CallbackSlot<T> = Rc<RefCell<Option<T>>>;
-type LaunchRun = Rc<dyn Fn(f64, u8)>;
+type LaunchRun = Rc<dyn Fn(f64, u8, bool)>;
 type LaunchSlot = Rc<RefCell<Option<LaunchRun>>>;
 type HitInput = Rc<dyn Fn(f64, Instrument, u8, InputSource, Option<u8>, Option<u8>)>;
 type MidiFileCallback = Closure<dyn FnMut(Uint8Array, String, String, JsValue)>;
@@ -477,6 +477,26 @@ fn hits_in_bar(expected: &[ExpectedHit], start_beat: f64, end_beat: f64) -> Vec<
         .collect()
 }
 
+fn repeat_bar_segment(offset: f64, bar_beats: f64, total_beats: f64) -> (f64, f64) {
+    let start = (offset.max(0.0) / bar_beats).floor() * bar_beats;
+    (start, (start + bar_beats).min(total_beats))
+}
+
+fn hits_for_bar_attempt(
+    expected: &[ExpectedHit],
+    start_beat: f64,
+    bar_beats: f64,
+) -> Vec<ExpectedHit> {
+    hits_in_bar(expected, start_beat, start_beat + bar_beats)
+}
+
+fn rebase_hits_for_resume(hits: &mut [ObservedHit], previous_start_ms: f64, next_start_ms: f64) {
+    let shift = next_start_ms - previous_start_ms;
+    for hit in hits {
+        hit.timestamp_ms += shift;
+    }
+}
+
 fn bar_attempt_is_good(
     expected_count: usize,
     matched_expected_count: usize,
@@ -728,7 +748,9 @@ fn App() -> impl IntoView {
     let repeat_bar_until_good = RwSignal::new(false);
     let progress = RwSignal::new(-1.0);
     let run_start_ms = RwSignal::new(0.0);
+    let paused_run_start_ms = RwSignal::new(None::<f64>);
     let run_expected = RwSignal::new(Arc::new(Vec::<ExpectedHit>::new()));
+    let active_segment_start = RwSignal::new(0.0);
     let observed = RwSignal::new(Vec::<ObservedHit>::new());
     let feedback_dirty = RwSignal::new(true);
     let accepted_observed = RwSignal::new(Vec::<ObservedHit>::new());
@@ -855,7 +877,7 @@ fn App() -> impl IntoView {
         let frame_holder = frame_holder.clone();
         let done_holder = done_holder.clone();
         let launch_holder = launch_holder.clone();
-        Rc::new(move |offset, count_bars| {
+        Rc::new(move |offset, count_bars, immediate| {
             phase.set(if count_bars > 0 {
                 "count_in".into()
             } else {
@@ -865,16 +887,12 @@ fn App() -> impl IntoView {
             let total = exercise_beats(&current_exercise) * loops.get_untracked() as f64;
             let bar_beats = beats_per_bar(&current_exercise);
             let repeat_enabled = repeat_bar_until_good.get_untracked();
-            let offset = if repeat_enabled {
-                (offset.max(0.0) / bar_beats).floor() * bar_beats
+            let (segment_start, segment_end) = if repeat_enabled {
+                repeat_bar_segment(offset, bar_beats, total)
             } else {
-                offset
+                (offset, total)
             };
-            let segment_end = if repeat_enabled {
-                (offset + bar_beats).min(total)
-            } else {
-                total
-            };
+            active_segment_start.set(segment_start);
             let tempo_map = expanded_tempo_map(&current_exercise, loops.get_untracked());
             if offset <= 0.000_001 {
                 runtime_tempo_map.set(scaled_tempo_map(
@@ -894,10 +912,9 @@ fn App() -> impl IntoView {
             } else {
                 Vec::new()
             };
-            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":bar_beats,"exerciseBeats":exercise_beats(&current_exercise),"totalBeats":segment_end,"offsetBeat":offset,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes})).unwrap_or(JsValue::NULL);
+            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":bar_beats,"exerciseBeats":exercise_beats(&current_exercise),"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes})).unwrap_or(JsValue::NULL);
             let origin_set = Rc::new(Cell::new(false));
             let frame = Closure::wrap(Box::new(move |beat: f64, _now: f64, start: f64| {
-                progress.set(beat);
                 let score_tempo_map = runtime_tempo_map.get_untracked();
                 let scoring_bpm = score_tempo_map
                     .first()
@@ -905,7 +922,13 @@ fn App() -> impl IntoView {
                     .unwrap_or(bpm.get_untracked());
                 let session_start =
                     start - elapsed_ms_at_beat(offset, scoring_bpm, &score_tempo_map);
+                if let Some(previous_start) = paused_run_start_ms.get_untracked() {
+                    observed
+                        .update(|hits| rebase_hits_for_resume(hits, previous_start, session_start));
+                    paused_run_start_ms.set(None);
+                }
                 run_start_ms.set(session_start);
+                progress.set(beat);
                 if repeat_enabled
                     && !origin_set.replace(true)
                     && accepted_observed.get_untracked().is_empty()
@@ -932,7 +955,7 @@ fn App() -> impl IntoView {
                     return;
                 }
                 let all_expected = run_expected.get_untracked();
-                let expected = hits_in_bar(all_expected.as_ref(), offset, segment_end);
+                let expected = hits_in_bar(all_expected.as_ref(), segment_start, segment_end);
                 let attempt_origin = run_start_ms.get_untracked();
                 if bar_attempt_is_good(
                     expected.len(),
@@ -963,7 +986,7 @@ fn App() -> impl IntoView {
                         clear_score_feedback();
                         let next = repeat_launch.borrow().as_ref().cloned();
                         if let Some(launch) = next {
-                            spawn_local(async move { launch(segment_end, 0) });
+                            spawn_local(async move { launch(segment_end, 0, true) });
                         }
                     }
                 } else {
@@ -975,7 +998,7 @@ fn App() -> impl IntoView {
                     clear_score_feedback();
                     let next = repeat_launch.borrow().as_ref().cloned();
                     if let Some(launch) = next {
-                        spawn_local(async move { launch(offset, 0) });
+                        spawn_local(async move { launch(segment_start, 0, true) });
                     }
                 }
             }) as Box<dyn FnMut()>);
@@ -1000,6 +1023,21 @@ fn App() -> impl IntoView {
     };
     *launch_holder.borrow_mut() = Some(launch_run.clone());
 
+    let pause_run: Rc<dyn Fn()> = Rc::new(move || {
+        progress.set(current_audio_beat().max(0.0));
+        paused_run_start_ms.set(Some(run_start_ms.get_untracked()));
+        stop_audio();
+        phase.set("paused".into());
+    });
+    let resume_run: Rc<dyn Fn()> = {
+        let launch = launch_run.clone();
+        Rc::new(move || {
+            if phase.get_untracked() == "paused" {
+                launch(progress.get_untracked().max(0.0), 0, true);
+            }
+        })
+    };
+
     let reset_run: Rc<dyn Fn()> = Rc::new(move || {
         stop_audio();
         result_modal_open.set(false);
@@ -1007,6 +1045,7 @@ fn App() -> impl IntoView {
         feedback_dirty.set(true);
         accepted_observed.set(vec![]);
         practice_origin_ms.set(0.0);
+        paused_run_start_ms.set(None);
         bar_attempt.set(1);
         live.set(vec![]);
         live_matched_expected.set(HashSet::new());
@@ -1026,6 +1065,7 @@ fn App() -> impl IntoView {
             feedback_dirty.set(true);
             accepted_observed.set(vec![]);
             practice_origin_ms.set(0.0);
+            paused_run_start_ms.set(None);
             bar_attempt.set(1);
             live.set(vec![]);
             live_matched_expected.set(HashSet::new());
@@ -1068,13 +1108,14 @@ fn App() -> impl IntoView {
             feedback_dirty.set(true);
             accepted_observed.set(vec![]);
             practice_origin_ms.set(0.0);
+            paused_run_start_ms.set(None);
             bar_attempt.set(1);
             live.set(vec![]);
             live_matched_expected.set(HashSet::new());
             result.set(None);
             progress.set(-1.0);
             clear_score_feedback();
-            launch(0.0, count_bars);
+            launch(0.0, count_bars, false);
         })
     };
 
@@ -1141,19 +1182,11 @@ fn App() -> impl IntoView {
             let expected_in_bar;
             let expected = if repeat_bar_until_good.get_untracked() {
                 let bar_beats = beats_per_bar(&current_exercise);
-                let tempo_map = runtime_tempo_map.get_untracked();
-                let scoring_bpm = tempo_map
-                    .first()
-                    .map(|change| change.bpm)
-                    .unwrap_or(bpm.get_untracked());
-                let hit_beat = beat_at_elapsed_ms(
-                    timestamp - latency_ms.get_untracked() - run_start_ms.get_untracked(),
-                    scoring_bpm,
-                    &tempo_map,
+                expected_in_bar = hits_for_bar_attempt(
+                    all_expected.as_ref(),
+                    active_segment_start.get_untracked(),
+                    bar_beats,
                 );
-                let bar_start = (hit_beat.max(0.0) / bar_beats).floor() * bar_beats;
-                expected_in_bar =
-                    hits_in_bar(all_expected.as_ref(), bar_start, bar_start + bar_beats);
                 expected_in_bar.as_slice()
             } else {
                 all_expected.as_slice()
@@ -1200,6 +1233,7 @@ fn App() -> impl IntoView {
                 observed.set(vec![]);
                 accepted_observed.set(vec![]);
                 practice_origin_ms.set(0.0);
+                paused_run_start_ms.set(None);
                 bar_attempt.set(1);
                 live.set(vec![]);
                 live_matched_expected.set(HashSet::new());
@@ -1284,6 +1318,7 @@ fn App() -> impl IntoView {
 
     let save_for_midi = save_current_settings.clone();
     let midi_hit = hit_input.clone();
+    let midi_pause = pause_run.clone();
     let midi_callback: Rc<Closure<dyn FnMut(JsValue)>> = Rc::new(Closure::wrap(Box::new(
         move |value: JsValue| {
             let Ok(event) = serde_wasm_bindgen::from_value::<MidiEnvelope>(value) else {
@@ -1297,8 +1332,7 @@ fn App() -> impl IntoView {
                 } else if event.disconnected_id.is_some() {
                     midi_status.set("Drums disconnected — reconnecting when available".into());
                     if matches!(phase.get_untracked().as_str(), "running" | "count_in") {
-                        stop_audio();
-                        phase.set("paused".into());
+                        midi_pause();
                     }
                 } else if let Some(id) = event.selected_id {
                     let port = event.ports.iter().find(|port| port.id == id);
@@ -1528,10 +1562,11 @@ fn App() -> impl IntoView {
         }
     });
 
-    let key_launch = launch_run.clone();
     let key_reset_run = reset_run.clone();
     let key_start_new_run = start_new_run.clone();
     let key_hit = hit_input.clone();
+    let key_pause_run = pause_run.clone();
+    let key_resume_run = resume_run.clone();
     let keyboard = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
         // A held computer key generates synthetic keydown events at the OS
         // repeat interval. Those are not additional physical drum strikes and
@@ -1606,23 +1641,8 @@ fn App() -> impl IntoView {
             " " => {
                 event.prevent_default();
                 match phase.get_untracked().as_str() {
-                    "running" | "count_in" => {
-                        progress.set(current_audio_beat().max(0.0));
-                        stop_audio();
-                        phase.set("paused".into());
-                    }
-                    "paused" => {
-                        let mut offset = progress.get_untracked().max(0.0);
-                        if repeat_bar_until_good.get_untracked() {
-                            let bar_beats = beats_per_bar(&exercise.get_untracked());
-                            offset = (offset / bar_beats).floor() * bar_beats;
-                            observed.set(vec![]);
-                            live.set(vec![]);
-                            live_matched_expected.set(HashSet::new());
-                            clear_score_feedback();
-                        }
-                        key_launch(offset, 0);
-                    }
+                    "running" | "count_in" => key_pause_run(),
+                    "paused" => key_resume_run(),
                     "idle" | "complete" => {
                         observed.set(vec![]);
                         live.set(vec![]);
@@ -1644,6 +1664,7 @@ fn App() -> impl IntoView {
         .add_event_listener_with_callback("keydown", keyboard.as_ref().unchecked_ref());
     keyboard.forget();
 
+    let visibility_pause = pause_run.clone();
     let visibility = Closure::wrap(Box::new(move || {
         if web_sys::window()
             .and_then(|window| window.document())
@@ -1651,8 +1672,7 @@ fn App() -> impl IntoView {
             .unwrap_or(false)
             && matches!(phase.get_untracked().as_str(), "running" | "count_in")
         {
-            stop_audio();
-            phase.set("paused".into());
+            visibility_pause();
         }
     }) as Box<dyn FnMut()>);
     if let Some(document) = web_sys::window().and_then(|window| window.document()) {
@@ -1663,7 +1683,8 @@ fn App() -> impl IntoView {
     }
     visibility.forget();
 
-    let start_click = launch_run.clone();
+    let button_pause = pause_run.clone();
+    let button_resume = resume_run.clone();
     let connect_cb = midi_callback.clone();
     let connect_action: Rc<dyn Fn()> = {
         let callback = connect_cb.clone();
@@ -1810,7 +1831,7 @@ fn App() -> impl IntoView {
             <section class="practice-controls">
               <div class="transport">
                 <button class="restart-button" on:click={let reset=reset_run.clone();move |_|reset()}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true"><RotateCcw size=24/></span><span>"Restart"</span></span><small>"Clear current run"</small></button>
-                <button class="primary start-button" on:click={let launch=start_click.clone();let start=start_new_run.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>{progress.set(current_audio_beat().max(0.0));stop_audio();phase.set("paused".into());},"paused"=>{let mut offset=progress.get_untracked().max(0.0);if repeat_bar_until_good.get_untracked(){let bar_beats=beats_per_bar(&exercise.get_untracked());offset=(offset/bar_beats).floor()*bar_beats;observed.set(vec![]);live.set(vec![]);live_matched_expected.set(HashSet::new());clear_score_feedback();}launch(offset,0)},_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>"Start practice"}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
+                <button class="primary start-button" on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>"Start practice"}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
                 <aside class="timing-key" aria-label="Timing feedback key">
                   <span class="perfect"><i aria-hidden="true"></i>"Perfect"</span>
                   <span class="good"><i aria-hidden="true"></i>"Good"</span>
@@ -2145,6 +2166,76 @@ mod tests {
 
         let early = live_feedback(&expected, &[0.0, 950.0]);
         assert!(!bar_attempt_is_good(2, 2, &early));
+    }
+
+    #[test]
+    fn final_note_late_window_stays_with_its_bar_across_the_boundary() {
+        let mut expected = two_note_bar();
+        expected[1].beat = 3.9;
+        let attempt = hits_for_bar_attempt(&expected, 0.0, 4.0);
+        let target = elapsed_ms_at_beat(3.9, 120.0, &[]);
+        let mut matched = HashSet::new();
+        let judgement = live_judgement_for_hit(
+            &attempt,
+            &mut matched,
+            &ObservedHit {
+                timestamp_ms: target + 75.0,
+                ..observed_at(target + 75.0)
+            },
+            &LiveTimingContext {
+                session_start_ms: 0.0,
+                bpm: 120.0,
+                tempo_map: &[],
+                exercise_length: 4.0,
+                latency_ms: 0.0,
+                config: ScoringConfig::default(),
+            },
+        );
+
+        assert!(target + 75.0 > elapsed_ms_at_beat(4.0, 120.0, &[]));
+        assert_eq!(judgement.expected_id.as_deref(), Some("bar-note-2"));
+        assert_eq!(judgement.judgement, Judgement::Late);
+    }
+
+    #[test]
+    fn repeat_segments_keep_the_paused_offset_without_moving_bar_boundaries() {
+        for (offset, start, end) in [
+            (0.25, 0.0, 4.0),
+            (3.999, 0.0, 4.0),
+            (4.25, 4.0, 8.0),
+            (15.9, 12.0, 16.0),
+        ] {
+            assert_eq!(repeat_bar_segment(offset, 4.0, 16.0), (start, end));
+        }
+    }
+
+    #[test]
+    fn resuming_rebases_keyboard_and_midi_hits_without_counting_paused_time() {
+        for bpm in [60.0, 72.0, 120.0, 240.0] {
+            for beat in [0.25, 1.5, 3.999] {
+                let mut hits = [
+                    ObservedHit {
+                        source: InputSource::Demo,
+                        ..observed_at(1_000.0 + elapsed_ms_at_beat(beat, bpm, &[]))
+                    },
+                    ObservedHit {
+                        source: InputSource::Midi,
+                        ..observed_at(1_000.0 + elapsed_ms_at_beat(beat, bpm, &[]))
+                    },
+                ];
+                let pause_at = 1_000.0 + elapsed_ms_at_beat(beat + 0.1, bpm, &[]);
+                let resume_at = pause_at + 5_000.0;
+                let resumed_origin = resume_at - elapsed_ms_at_beat(beat + 0.1, bpm, &[]);
+
+                rebase_hits_for_resume(&mut hits, 1_000.0, resumed_origin);
+
+                let expected_hit_time = resumed_origin + elapsed_ms_at_beat(beat, bpm, &[]);
+                assert!(
+                    hits.iter()
+                        .all(|hit| (hit.timestamp_ms - expected_hit_time).abs() < 0.001)
+                );
+            }
+        }
     }
 
     #[test]

@@ -1409,27 +1409,78 @@ test('repeat-until-good setting persists and retries a failed bar', async ({ pag
     };
   }))).toBe(true);
   await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.evaluate(() => {
+    let started = false;
+    const label = document.querySelector('.position-row span')!;
+    new MutationObserver(() => {
+      if (started || !label.textContent?.includes('TRY 2')) return;
+      started = true;
+      void (async () => {
+        const firstHit = performance.now() + 20;
+        for (let index = 0; index < 8; index += 1) {
+          const delay = Math.max(0, firstHit + index * 125 - performance.now());
+          await new Promise(resolve => setTimeout(resolve, delay));
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+        }
+      })();
+    }).observe(label, { childList: true, subtree: true, characterData: true });
+  });
   await page.getByRole('button', { name: /Start practice/ }).click();
 
   await expect(page.getByText(/BAR 1 \/ 4 · TRY 2/)).toBeVisible({ timeout: 4_000 });
   await expect(page.getByRole('button', { name: /Pause/ })).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Practice complete' })).toHaveCount(0);
-  await page.getByRole('button', { name: /Pause/ }).click();
-  await page.getByRole('button', { name: /Resume/ }).click();
-  await page.evaluate(async () => {
-    const firstHit = performance.now() + 165;
-    for (let index = 0; index < 8; index += 1) {
-      const delay = Math.max(0, firstHit + index * 125 - performance.now());
-      await new Promise(resolve => setTimeout(resolve, delay));
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
-    }
-  });
   await expect(page.getByText(/BAR 2 \/ 4 · TRY 1/)).toBeVisible({ timeout: 3_000 });
   await page.getByRole('button', { name: /Restart/ }).click();
 
   await page.reload();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await expect(page.getByLabel('Repeat bar until Good')).toBeChecked();
+});
+
+test('bar retries stay on tempo and pause/resume preserves position without scoring paused hits', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('72');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByLabel('Repeat bar until Good').check();
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+
+  await page.evaluate(() => {
+    (window as any).__attemptTimes = [];
+    const label = document.querySelector('.position-row span')!;
+    new MutationObserver(() => {
+      const match = label.textContent?.match(/TRY (\d+)/);
+      if (match) (window as any).__attemptTimes.push({ attempt: Number(match[1]), at: performance.now() });
+    }).observe(label, { childList: true, subtree: true, characterData: true });
+  });
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect(page.getByText(/BAR 1 \/ 4 · TRY 5/)).toBeVisible({ timeout: 15_000 });
+  const attempts = await page.evaluate(() => (window as any).__attemptTimes as { attempt: number; at: number }[]);
+  for (let attempt = 3; attempt <= 5; attempt += 1) {
+    const previous = attempts.find(item => item.attempt === attempt - 1)!;
+    const current = attempts.find(item => item.attempt === attempt)!;
+    expect(current.at - previous.at).toBeGreaterThan(3_200);
+    expect(current.at - previous.at).toBeLessThan(3_450);
+  }
+
+  const diagnostics = () => page.evaluate(() => (window as any).rudiment.audioDiagnostics());
+  await expect.poll(() => diagnostics().then(value => value.currentBeat)).toBeGreaterThan(1);
+  const feedbackCount = await page.locator('.score-note[data-judgement]').count();
+  await page.getByRole('button', { name: /Pause/ }).click();
+  await expect(page.getByRole('button', { name: /Resume/ })).toBeVisible();
+  const pausedBeat = await diagnostics().then(value => value.currentBeat);
+  await page.waitForTimeout(200);
+  expect((await diagnostics()).currentBeat).toBeCloseTo(pausedBeat, 2);
+  await page.keyboard.press('j');
+  await page.waitForTimeout(100);
+  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(feedbackCount);
+
+  await page.getByRole('button', { name: /Resume/ }).click();
+  await expect.poll(() => diagnostics().then(value => value.currentBeat)).toBeGreaterThanOrEqual(pausedBeat - 0.03);
+  await expect.poll(() => diagnostics().then(value => value.currentBeat)).toBeGreaterThan(pausedBeat + 0.15);
+  await page.getByRole('button', { name: /Restart/ }).click();
+  expect((await diagnostics()).scheduledVoices).toBe(0);
 });
 
 test('permission denial and narrow layout remain usable', async ({ page }) => {
