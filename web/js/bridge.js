@@ -229,16 +229,28 @@ const audio = {
     const remaining = Math.max(0, options.totalBeats - offset), startDelay = .16;
     const countInSeconds=countBeats*60/initialBpm,runAudio = this.raw.currentTime + startDelay + countInSeconds;
     const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
-    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,runPerformance};
-    let step = 0; transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
+    const referenceNotes=(options.referenceNotes||[]).filter(note=>Number.isFinite(Number(note.beat))&&Number(note.beat)>=offset-.000001&&Number(note.beat)<options.totalBeats-.000001&&Number(note.velocity)>0);
+    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,runPerformance,referenceNoteCount:referenceNotes.length};
+    transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
     for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time),position);}
-    transport.scheduleRepeat(time => {
-      const localBeat = step / subdivision, globalBeat = localBeat < countBeats ? localBeat : offset + localBeat - countBeats;
-      visualMetronome.schedule(this.perfAt(time),globalBeat,options.meter,subdivision);
-      if (options.metronome) this.click(time, Number.isInteger(globalBeat) && Math.round(globalBeat) % options.meter === 0, options.timbre);
-      step++;
-    }, interval, 0);
+    for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>this.playSnare(Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time),position);}
+    const scheduleClick=(time,step)=>{
+      const beat=step/subdivision;
+      visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision);
+      if(options.metronome)this.click(time,step%(options.meter*subdivision)===0,options.timbre);
+    };
+    // Count-in uses its own grid. Practice resumes on the original exercise
+    // grid, so a pause between beats never redefines the downbeat or shifts
+    // subsequent clicks away from the written notes.
+    for(let step=0;step<countBeats*subdivision;step++){
+      const position=transportPositionAtBeat(step/subdivision,options.meter);
+      transport.scheduleOnce(time=>scheduleClick(time,step-countBeats*subdivision),position);
+    }
+    let practiceStep=Math.ceil(offset*subdivision);
+    const firstPracticeBeat=countBeats+practiceStep/subdivision-offset;
+    transport.scheduleRepeat(time=>scheduleClick(time,practiceStep++),interval,transportPositionAtBeat(firstPracticeBeat,options.meter));
     transport.start(`+${startDelay}`);
+    let lastStateFrame=-Infinity;
     const frame = () => {
       if (generation !== this.generation) return;
       // Keep the score at the exact paused position during the short audio
@@ -246,8 +258,15 @@ const audio = {
       // playhead backwards before the Tone transport starts.
       const now = performance.now(), elapsedBeats=transport.ticks/transport.PPQ;
       const beat = offset + elapsedBeats-countBeats;
+      const scoreBeat=beat>=0?beat%options.exerciseBeats:beat;
+      updateScore(scoreBeat,undefined);
       visualMetronome.render(beat,options.meter,subdivision,now);
-      onFrame(beat, now, this.activeRun?.runPerformance??runPerformance);
+      // UI counters and scoring state do not need 60 updates per second. Keep
+      // the playhead on every display frame, independent of the WASM work.
+      if(now-lastStateFrame>=32||beat>=options.totalBeats){
+        onFrame(beat,now,this.activeRun?.runPerformance??runPerformance);
+        lastStateFrame=now;
+      }
       if (elapsedBeats >= countBeats+remaining) { this.stop(); onDone(); } else this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
@@ -261,7 +280,7 @@ const audio = {
 };
 
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
-let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
 let scoreResizeObserver=null;
 const handText = hand => hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·';
 const durationTable=[[4,'w',false,false],[3,'h',true,false],[2,'h',false,false],[1.5,'q',true,false],[1,'q',false,false],[.75,'8',true,false],[2/3,'q',false,true],[.5,'8',false,false],[.375,'16',true,false],[1/3,'8',false,true],[.25,'16',false,false],[1/6,'16',false,true],[.125,'32',false,false]];
@@ -317,12 +336,37 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
   const hits=exercise.hits,metersPerBar=exercise.meter_numerator*4/Math.max(1,exercise.meter_denominator);
   const lastBeat=hits.reduce((last,hit)=>Math.max(last,hit.notation_beat??hit.beat),0);
   const barCount=Math.max(1,Math.floor(lastBeat/metersPerBar)+1);
+  const onsetGroupsByBar=Array.from({length:barCount},()=>new Map()),onsetBuckets=new Map(),graceHits=[];
+  for(const hit of hits){
+    const position=hit.notation_beat??hit.beat;
+    if(!Number.isFinite(position))continue;
+    if(hit.grace){graceHits.push({hit,position});continue;}
+    const bar=Math.floor((position+.001)/metersPerBar);
+    if(bar<0||bar>=barCount)continue;
+    const key=position.toFixed(4),groups=onsetGroupsByBar[bar];
+    let group=groups.get(key);
+    if(!group){
+      group={position,hits:[],graceHits:[]};groups.set(key,group);
+      const bucket=Math.round(position*1000),bucketGroups=onsetBuckets.get(bucket)??[];
+      bucketGroups.push(group);onsetBuckets.set(bucket,bucketGroups);
+    }
+    group.hits.push(hit);
+  }
+  for(const {hit,position} of graceHits){
+    const bucket=Math.round(position*1000),candidates=[];
+    for(let offset=-1;offset<=1;offset++)candidates.push(...(onsetBuckets.get(bucket+offset)??[]));
+    const group=candidates
+      .filter(candidate=>Math.abs(candidate.position-position)<.001)
+      .sort((left,right)=>Math.abs(left.position-position)-Math.abs(right.position-position))[0];
+    group?.graceHits.push(hit);
+  }
+  const orderedOnsetsByBar=onsetGroupsByBar.map(groups=>[...groups.values()].sort((left,right)=>left.position-right.position));
   const singleLine=exercise.staff_mode==='single_line'&&hits.length>0&&hits.every(hit=>instrumentForHit(hit)==='snare');
   const width=Math.max(280,element.clientWidth),availableWidth=Math.max(240,width-28);
   const compactLandscape=window.innerHeight<=600&&window.innerWidth>window.innerHeight;
   const scoreTopMargin=compactLandscape?25:SCORE_TOP_MARGIN,scoreBottomMargin=compactLandscape?7:SCORE_BOTTOM_MARGIN;
   const renderer=new Renderer(element,Renderer.Backends.SVG);
-  const notesMeta=[],barLayouts=[],staves=[],barSlots=new Map(),barSlotBeats=new Map(),beams=[],tuplets=[],eventHitsByNote=new Map();
+  const notesMeta=[],firstNoteByRow=[],barLayouts=[],staves=[],barSlots=new Map(),barSlotBeats=new Map(),beams=[],tuplets=[],eventHitsByNote=new Map();
   const firstStave=new Stave(14,scoreTopMargin,availableWidth);
   firstStave.setConfigForLines(Array.from({length:5},(_,index)=>({visible:!singleLine||index===2})));
   firstStave.setBegBarType(BarlineType.NONE).addClef('percussion').addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
@@ -363,16 +407,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
     const firstBar=row*barsPerLine,lastBar=Math.min(barCount,firstBar+barsPerLine),rowTickables=[];
     for(let bar=firstBar;bar<lastBar;bar++){
       const start=bar*metersPerBar,end=start+metersPerBar,slots=[];
-      const groups=new Map();
-      for(const hit of hits){
-        if(hit.grace)continue;
-        const position=hit.notation_beat??hit.beat;
-        if(position<start-.001||position>=end-.001)continue;
-        const key=position.toFixed(4);
-        if(!groups.has(key))groups.set(key,{position,hits:[]});
-        groups.get(key).hits.push(hit);
-      }
-      const ordered=[...groups.values()].sort((a,b)=>a.position-b.position);let cursor=start;
+      const ordered=orderedOnsetsByBar[bar];let cursor=start;
       for(let index=0;index<ordered.length;index++){
         const group=ordered[index],next=ordered[index+1]?.position??end;
         if(group.position>cursor+.001){
@@ -390,14 +425,14 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
         if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter',11,'700'),0);
         if(group.hits.some(hit=>hit.accent))note.addModifier(new Articulation('a>').setPosition(3),0);
         barSlotBeats.set(note,group.position);slots.push(note);
-        for(const hit of group.hits){const key=pitchForHit(hit);notesMeta.push({note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,key,headIndex:Math.max(0,keys.indexOf(key)),row,bar});}
-        const ornamentHits=hits.filter(hit=>hit.grace&&Math.abs((hit.notation_beat??hit.beat)-group.position)<.001);
+        for(const hit of group.hits){const key=pitchForHit(hit),meta={note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,key,headIndex:Math.max(0,keys.indexOf(key)),row,bar};notesMeta.push(meta);firstNoteByRow[row]??=meta;}
+        const ornamentHits=group.graceHits;
         if(ornamentHits.length){
           const graceNotes=ornamentHits.map(hit=>{
             const key=pitchForHit(hit),graceNote=new GraceNote({keys:[key],duration:'16',clef:'percussion',stemDirection:1,slash:true});
             if(hit.hand==='R'||hit.hand==='L')graceNote.addModifier(new Annotation(handText(hit.hand)).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter',8,'600'),0);
             eventHitsByNote.set(graceNote,[hit]);
-            notesMeta.push({note:graceNote,beat:hit.beat,notationBeat:group.position,durationBeats:.125,hit,key,headIndex:0,row,bar});
+            const meta={note:graceNote,beat:hit.beat,notationBeat:group.position,durationBeats:.125,hit,key,headIndex:0,row,bar};notesMeta.push(meta);firstNoteByRow[row]??=meta;
             return graceNote;
           });
           const graceGroup=new GraceNoteGroup(graceNotes,false);
@@ -436,7 +471,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
   for(const tuplet of tuplets)tuplet.setContext(context).draw();
   const svg=element.querySelector('svg');
   for(let row=0;row<lineCount;row++){
-    const firstNote=notesMeta.find(meta=>meta.row===row),head=firstNote?.note.getSVGElement?.()?.querySelector('.vf-notehead > text');
+    const firstNote=firstNoteByRow[row],head=firstNote?.note.getSVGElement?.()?.querySelector('.vf-notehead > text');
     const bounds=head?.getBBox();
     if(!firstNote||!bounds)continue;
     const layout=barLayouts[firstNote.bar],target=layout.xStart+(firstNote.notationBeat-layout.startBeat)*barWidth/metersPerBar;
@@ -500,7 +535,12 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
   }
   const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
   const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
-  scoreData={notes:notesMeta,svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  const noteByExpectedId=new Map(),noteByBeatInstrument=new Map();
+  for(const meta of notesMeta){
+    if(meta.hit?.id)noteByExpectedId.set(meta.hit.id,meta);
+    noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`,meta);
+  }
+  scoreData={notes:notesMeta,noteByExpectedId,noteByBeatInstrument,appliedExpectedJudgements:new Map(),svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:0,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
   applyJudgements(previousJudgements);updateScore(previousBeat,null);
   if(typeof ResizeObserver!=='undefined'){
     scoreResizeObserver??=new ResizeObserver(entries=>{
@@ -518,35 +558,62 @@ function positionAtBeat(beat) {
   const ratio=Math.max(0,Math.min(1,(value-bar.startBeat)/Math.max(.001,bar.endBeat-bar.startBeat)));
   return {x:bar.xStart+(bar.xEnd-bar.xStart)*ratio,y:bar.y,y1:bar.y1,y2:bar.y2,row:bar.row,bar:index};
 }
+function cameraAtBeat(beat,position) {
+  if(beat<0||position.row<=0)return 0;
+  const firstBarInRow=scoreData.bars.find(bar=>bar.row===position.row)??scoreData.bars[position.bar];
+  const transitionBeats=Math.max(.25,Math.min(1,scoreData.meter*.25));
+  const linear=Math.max(0,Math.min(1,(beat-firstBarInRow.startBeat)/transitionBeats));
+  // A musical-time smoothstep makes the page movement deterministic at every
+  // refresh rate and settles the new system during its first beat.
+  const eased=linear*linear*(3-2*linear);
+  const from=Math.min((position.row-1)*scoreData.rowHeight,scoreData.maxScroll);
+  const to=Math.min(position.row*scoreData.rowHeight,scoreData.maxScroll);
+  return from+(to-from)*eased;
+}
+function expectedJudgementKey(result){return result.expected_id?`id:${result.expected_id}`:`beat:${Number(result.expected_beat).toFixed(6)}|${result.instrument??''}`;}
+function noteForJudgement(result){
+  return (result.expected_id&&scoreData.noteByExpectedId?.get(result.expected_id))
+    ??scoreData.noteByBeatInstrument?.get(`${Number(result.expected_beat).toFixed(6)}|${result.instrument??'snare'}`)
+    ??scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001&&(!result.instrument||instrumentForHit(note.hit)===result.instrument));
+}
+function clearExpectedJudgement(result,touchedGroups){
+  const meta=noteForJudgement(result),group=meta?.note.getSVGElement?.();if(!group)return;
+  const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
+  if(noteheads.length<=1)delete group.dataset.judgement;
+  if(notehead){delete notehead.dataset.judgement;notehead.removeAttribute('role');notehead.removeAttribute('aria-label');notehead.querySelector('.judgement-halo')?.remove();}
+  touchedGroups.add(group);
+}
+function paintExpectedJudgement(result,touchedGroups){
+  const meta=noteForJudgement(result),group=meta?.note.getSVGElement?.();if(!group)return;
+  const judgement=result.judgement==='on_time'?(result.excellent?'perfect':'good'):(result.excellent?'perfect':result.judgement);
+  const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
+  if(noteheads.length<=1)group.dataset.judgement=judgement;
+  if(notehead){const hasOffset=judgement!=='missed'&&Number.isFinite(result.error_ms);notehead.dataset.judgement=judgement;notehead.setAttribute('role','img');notehead.setAttribute('aria-label',`${judgement.replace('_',' ')}${hasOffset?` ${Number(result.error_ms)>=0?'+':''}${Number(result.error_ms).toFixed(0)} milliseconds`:''}`);}
+  if(['perfect','good','early','late'].includes(judgement)){
+    const head=notehead?.querySelector(':scope > text');
+    if(notehead&&head){
+      const bounds=head.getBBox(),halo=document.createElementNS('http://www.w3.org/2000/svg','circle');
+      halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(bounds.x+bounds.width/2));halo.setAttribute('cy',String(bounds.y+bounds.height/2));halo.setAttribute('r',String(Math.max(6,bounds.width*.84)));
+      notehead.insertBefore(halo,head);
+    }
+  }
+  touchedGroups.add(group);
+}
 function applyJudgements(judgements) {
   const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
   scoreData.lastJudgements=judgements;
-  const groups=new Set(scoreData.notes.map(meta=>meta.note.getSVGElement?.()).filter(Boolean));
-  for(const group of groups){delete group.dataset.judgement;group.classList.remove('excellent-flash');for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');head.querySelector('.judgement-halo')?.remove();}}
-  for(const result of judgements){
-    if(Number.isFinite(result.expected_beat)){
-      const meta=scoreData.notes.find(note=>result.expected_id&&note.hit?.id===result.expected_id)
-        ??scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001&&(!result.instrument||instrumentForHit(note.hit)===result.instrument)),group=meta?.note.getSVGElement?.();if(!group)continue;
-      const judgement=result.judgement==='on_time'?(result.excellent?'perfect':'good'):(result.excellent?'perfect':result.judgement);
-      const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
-      if(noteheads.length<=1)group.dataset.judgement=judgement;
-      if(notehead){const hasOffset=judgement!=='missed'&&Number.isFinite(result.error_ms);notehead.dataset.judgement=judgement;notehead.setAttribute('role','img');notehead.setAttribute('aria-label',`${judgement.replace('_',' ')}${hasOffset?` ${Number(result.error_ms)>=0?'+':''}${Number(result.error_ms).toFixed(0)} milliseconds`:''}`);}
-      if(['perfect','good','early','late'].includes(judgement)){
-        const head=notehead?.querySelector(':scope > text');
-        if(notehead&&head){
-          const bounds=head.getBBox(),halo=document.createElementNS('http://www.w3.org/2000/svg','circle');
-          halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(bounds.x+bounds.width/2));halo.setAttribute('cy',String(bounds.y+bounds.height/2));halo.setAttribute('r',String(Math.max(6,bounds.width*.84)));
-          notehead.insertBefore(halo,head);
-          if(judgement==='perfect'){
-            group.classList.add('excellent-flash');
-          }
-        }
-      }
-    }
+  const previous=scoreData.appliedExpectedJudgements??new Map(),next=new Map(),touchedGroups=new Set();
+  for(const result of judgements)if(Number.isFinite(result.expected_beat))next.set(expectedJudgementKey(result),result);
+  for(const [key,result] of previous)if(!next.has(key)||JSON.stringify(next.get(key))!==JSON.stringify(result))clearExpectedJudgement(result,touchedGroups);
+  for(const [key,result] of next)if(!previous.has(key)||JSON.stringify(previous.get(key))!==JSON.stringify(result))paintExpectedJudgement(result,touchedGroups);
+  for(const group of touchedGroups){
+    const perfect=[...group.querySelectorAll('.vf-notehead')].some(head=>head.dataset.judgement==='perfect');
+    group.classList.toggle('excellent-flash',perfect);
   }
+  scoreData.appliedExpectedJudgements=next;
   const markers=scoreData.svg.querySelector('#unmatched-markers');markers?.replaceChildren();
   for(const result of judgements.filter(item=>!Number.isFinite(item.expected_beat)&&Number.isFinite(item.actual_beat)&&(item.judgement==='extra'||item.judgement==='wrong_instrument'))){
-    const position=positionAtBeat(result.actual_beat),nearest=scoreData.notes.reduce((best,note)=>Math.abs(note.beat-result.actual_beat)<Math.abs(best.beat-result.actual_beat)?note:best,scoreData.notes[0]);
+    const position=positionAtBeat(result.actual_beat),nearest=scoreData.notes.reduce((best,note)=>note.row===position.row&&(!best||Math.abs(note.beat-result.actual_beat)<Math.abs(best.beat-result.actual_beat))?note:best,null);
     const head=nearest?.note.getSVGElement?.()?.querySelector('.vf-notehead > text'),bounds=head?.getBBox(),matrix=head?.getCTM();
     const headY=bounds&&matrix?matrix.b*(bounds.x+bounds.width/2)+matrix.d*(bounds.y+bounds.height/2)+matrix.f:(position.y1+position.y2)/2;
     const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',String(position.x));circle.setAttribute('cy',String(headY));circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
@@ -557,12 +624,16 @@ function updateScore(beat, judgements) {
   if(Array.isArray(judgements))applyJudgements(judgements);
   scoreData.lastBeat=beat;
   const position=positionAtBeat(beat),playhead=svg.querySelector('#playhead');
-  if(playhead){playhead.style.transform=`translate3d(${position.x}px,0,0)`;playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.x=String(position.x);playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);playhead.classList.toggle('visible',beat>=0&&beat<=scoreData.totalBeats);}
+  if(playhead){
+    playhead.style.transform=`translate3d(${position.x}px,0,0)`;
+    playhead.dataset.x=String(position.x);
+    if(position.row!==scoreData.lastPlayheadRow){playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);scoreData.lastPlayheadRow=position.row;}
+    const visible=beat>=0&&beat<=scoreData.totalBeats;
+    if(visible!==scoreData.lastPlayheadVisible){playhead.classList.toggle('visible',visible);scoreData.lastPlayheadVisible=visible;}
+  }
   if(beat>=0){
-    const target=Math.min(position.row*scoreData.rowHeight,Math.max(0,container.scrollHeight-container.clientHeight));
-    const distance=target-container.scrollTop;
-    if(container.scrollLeft!==0)container.scrollLeft=0;
-    container.scrollTop=Math.abs(distance)<.5?target:container.scrollTop+distance*.14;
+    const cameraY=cameraAtBeat(beat,position);
+    if(Math.abs(cameraY-scoreData.cameraY)>.05){container.scrollTop=cameraY;scoreData.cameraY=cameraY;}
   }
 }
 function clearScoreFeedback() {
@@ -574,9 +645,10 @@ function clearScoreFeedback() {
     group.getAnimations?.().forEach(animation=>animation.cancel());
   }
   scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;
+  scoreData.appliedExpectedJudgements=new Map();
   scoreData.lastBeat=-Infinity;
   scoreData.svg?.querySelector('#unmatched-markers')?.replaceChildren();
-  scoreData.container.scrollTop=0;scoreData.container.scrollLeft=0;
+  scoreData.cameraY=0;scoreData.container.scrollTop=0;scoreData.container.scrollLeft=0;
   updateScore(-99,empty);
 }
 
@@ -635,8 +707,8 @@ function trapDialogTab(event,selector){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),activeVoices:audio.voices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],fallbackHits:audio.fallbackHits,snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
-  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),referenceNoteCount:audio.activeRun?.referenceNoteCount??0,activeVoices:audio.voices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],fallbackHits:audio.fallbackHits,snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
+  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')

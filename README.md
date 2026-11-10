@@ -17,6 +17,8 @@ npm run dev
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in desktop Chrome. Starting practice unlocks browser audio. No account, server, registration or MIDI device is required; press `J` for demo snare input. Space pauses/resumes and `R` restarts when focus is not in a form field.
 
+Enable **Settings → Exercise → Repeat bar until Good** for focused practice. Rudiment then holds each bar until every expected note is graded Perfect or Good with no extra or wrong-drum hits. Failed attempts are discarded, the attempt counter advances, and successful bars are retained in the final saved session; empty rest bars pass automatically when no hit is played.
+
 The development server writes its disposable hot-reload build to `web/dist/`; release builds continue to use the repository-level `dist/`. It watches both Rust/Trunk inputs and `web/js/bridge.js`, rebuilding the browser bridge before Trunk reloads the page. The watchers are restricted to source paths and use Trunk's post-build cooldown, preventing generated output from retriggering its own build.
 
 ## Build and test

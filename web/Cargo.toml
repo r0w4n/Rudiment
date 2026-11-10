@@ -18,5 +18,5 @@ web-sys = { version = "0.3", features = [
   "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlSelectElement",
   "File", "FileList", "Event", "KeyboardEvent", "DragEvent", "DataTransfer", "VisibilityState", "Performance"
 ] }
-lucide-leptos = { version = "3.63.0", features = ["account", "arrows", "charts", "files", "math", "multimedia", "time"] }
+lucide-leptos = { version = "3.63.0", features = ["accessibility", "account", "arrows", "charts", "files", "math", "multimedia", "time"] }
 

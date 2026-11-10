@@ -258,6 +258,33 @@ test('visual metronome pulses from the audible transport clock and marks the dow
   await expect(page.locator('.visual-metronome-label')).toHaveText('READY');
 });
 
+test('resuming between beats keeps the metronome accent on bar downbeats', async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = AudioParam.prototype.setValueAtTime;
+    (window as any).__clickFrequencies = [];
+    AudioParam.prototype.setValueAtTime = function(value, time) {
+      if (value === 1450 || value === 1080) (window as any).__clickFrequencies.push(value);
+      return original.call(this, value, time);
+    };
+  });
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__clickFrequencies.length)).toBeGreaterThanOrEqual(2);
+  await page.getByRole('button', { name: /Pause/ }).click();
+  await page.evaluate(() => { (window as any).__clickFrequencies = []; });
+  await page.getByRole('button', { name: /Resume/ }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__clickFrequencies.length)).toBeGreaterThanOrEqual(10);
+  const clicks = await page.evaluate(() => (window as any).__clickFrequencies as number[]);
+  expect(clicks).toContain(1450);
+  // The oscillator and filter both set the click frequency; each beat appears twice.
+  expect(clicks.slice(0, 10).filter(value => value === 1450)).toHaveLength(2);
+  expect(clicks.slice(0, 10).every((value, index) => index % 2 === 0 || value === clicks[index - 1])).toBe(true);
+});
+
 test('navigation and configuration controls stop an active practice cleanly', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: /Start practice/ }).click();
@@ -444,7 +471,7 @@ test('a run with no drum input never shows hit circles',async({page})=>{
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
   await expect(page.locator('.judgement-halo')).toHaveCount(0);
-  await expect(page.locator('.score-note[data-judgement="missed"]').first()).toBeVisible();
+  await expect(page.locator('.score-note[data-judgement="missed"]')).toHaveCount(0);
   await expect(page.locator('.missed-note-marker')).toHaveCount(0);
   await expect(page.locator('.judgement-halo')).toHaveCount(0);
   await expect(page.getByRole('dialog',{name:'Practice complete.'})).toBeVisible({timeout:10000});
@@ -569,7 +596,15 @@ test('built-in and personal MIDI import paths remain distinct and broken files e
   await expect(page.locator('#notation')).toContainText('R');
   await expect(page.locator('#notation')).toContainText('L');
   await expect(page.locator('.warning-row')).toHaveCount(0);
-  await expect(page.locator('.file-details')).toBeHidden();
+  await expect(page.locator('.score-meta .file-details')).toHaveCount(0);
+  await libraryTrigger.click();
+  const bundledCard=libraryDialog.locator('.bundled-entry').filter({hasText:'Single Paradiddle'});
+  const bundledInformation=bundledCard.getByRole('button',{name:'File information for Single Paradiddle.mid'});
+  await expect(libraryDialog.getByRole('button',{name:/File information for/})).toHaveCount(1);
+  await bundledInformation.click();
+  await expect(bundledCard.locator('.library-card-info-body')).toContainText('1 playable drum track');
+  await expect(libraryDialog.getByLabel('Drum track')).toBeHidden();
+  await libraryDialog.getByRole('button',{name:'Close MIDI library'}).click();
 
   const quarterChooser=page.waitForEvent('filechooser');
   await libraryTrigger.click();
@@ -581,8 +616,17 @@ test('built-in and personal MIDI import paths remain distinct and broken files e
   await expect(page.getByText('MIDI imported — review sticking and press Start',{exact:true})).toHaveCount(0);
   await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
   await expect(page.locator('.warning-row')).toHaveCount(0);
-  await expect(page.locator('.file-details')).toBeHidden();
+  await expect(page.locator('.score-meta .file-details')).toHaveCount(0);
   await expect(page.getByLabel('Drum track')).toBeHidden();
+  await libraryTrigger.click();
+  await libraryDialog.getByRole('tab',{name:/Your imports/}).click();
+  const personalCard=libraryDialog.locator('.personal-library-card').filter({hasText:'quarter-note-reference.mid'});
+  const personalInformation=personalCard.getByRole('button',{name:'File information for quarter-note-reference.mid'});
+  await expect(libraryDialog.getByRole('button',{name:/File information for/})).toHaveCount(1);
+  await personalInformation.click();
+  await expect(personalCard.locator('.library-card-info-body')).toContainText('1 playable drum track');
+  await expect(libraryDialog.getByLabel('Drum track')).toBeHidden();
+  await libraryDialog.getByRole('button',{name:'Close MIDI library'}).click();
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve, reject) => {
     const request = indexedDB.open('rudiment');
     request.onerror = () => reject(request.error);
@@ -849,7 +893,7 @@ test('previously authorised sole MIDI input reconnects automatically', async ({ 
   await expect(page.locator('.mode-badge')).toHaveText('MIDI INPUT');
 });
 
-test('score feedback expires misses and playhead interpolates continuously', async ({ page }) => {
+test('unplayed notes stay neutral and the playhead interpolates continuously', async ({ page }) => {
   await page.goto('/');
   await page.getByLabel('Tempo in BPM').fill('240');
   await page.getByRole('button',{name:'Open settings'}).click();
@@ -865,10 +909,11 @@ test('score feedback expires misses and playhead interpolates continuously', asy
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element).scrollBehavior)).toBe('auto');
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element).scrollbarWidth)).toBe('none');
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element,'::-webkit-scrollbar').display)).toBe('none');
-  await expect(page.locator('.score-note[data-judgement="missed"]').first()).toBeVisible();
+  await page.waitForTimeout(350);
+  await expect(page.locator('.score-note[data-judgement="missed"]')).toHaveCount(0);
   expect(await page.locator('#notation').evaluate(element=>element.scrollLeft)).toBe(0);
   const frameStats=await page.evaluate(()=>new Promise<{median:number,p95:number}>(resolve=>{const deltas:number[]=[];let previous=performance.now();const sample=(now:number)=>{deltas.push(now-previous);previous=now;if(deltas.length<40)requestAnimationFrame(sample);else{const sorted=[...deltas.slice(1)].sort((a,b)=>a-b);resolve({median:sorted[Math.floor(sorted.length*.5)],p95:sorted[Math.floor(sorted.length*.95)]});}};requestAnimationFrame(sample);}));
-  expect(frameStats.median).toBeLessThan(25);expect(frameStats.p95).toBeLessThan(55);
+  expect(frameStats.median).toBeLessThan(20);expect(frameStats.p95).toBeLessThan(40);
   await page.getByRole('button',{name:/Pause/}).click();const paused=await page.locator('#playhead').getAttribute('data-x');await page.waitForTimeout(120);expect(await page.locator('#playhead').getAttribute('data-x')).toBe(paused);
   await page.getByRole('button',{name:/Resume/}).click();
   await expect.poll(()=>page.locator('#playhead').getAttribute('data-x')).not.toBe(paused);
@@ -913,6 +958,20 @@ test('score keeps one bar per system and follows playback vertically without hor
   expect(systemLayout.counts.every((count:number)=>count===1)).toBe(true);
   expect(systemLayout.firstStart).toBeCloseTo(systemLayout.secondStart,1);
   expect(systemLayout.gapSpread).toBeLessThan(2);
+
+  const cameraMotion=await page.evaluate(()=>{
+    const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    const notation=document.querySelector<HTMLElement>('#notation')!;
+    const positions=[3.99,4,4.25,4.5,4.75,5].map(beat=>{app.updateScore(beat,[]);return notation.scrollTop;});
+    app.updateScore(4.5,[]);
+    const repeated=notation.scrollTop;
+    return {positions,repeated};
+  });
+  expect(Math.abs(cameraMotion.positions[1]-cameraMotion.positions[0])).toBeLessThan(1);
+  expect(cameraMotion.positions.slice(1).every((position,index,items)=>index===0||position>=items[index-1])).toBe(true);
+  expect(cameraMotion.positions[2]).toBeGreaterThan(cameraMotion.positions[1]);
+  expect(cameraMotion.positions[4]).toBeLessThan(cameraMotion.positions[5]);
+  expect(cameraMotion.repeated).toBeCloseTo(cameraMotion.positions[3],5);
 
   const nextSystemTransition=await page.evaluate(()=>{
     const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
@@ -1149,6 +1208,21 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   await expect(marker).toHaveCount(0);
 });
 
+test('adding live feedback preserves existing notehead feedback nodes',async({page})=>{
+  await page.goto('/');
+  const preserved=await page.evaluate(()=>{
+    const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    const first={expected_beat:0,actual_beat:0,judgement:'good',error_ms:20,excellent:false,event_id:'first'};
+    const second={expected_beat:.5,actual_beat:.5,judgement:'perfect',error_ms:2,excellent:true,event_id:'second'};
+    app.updateScore(.25,[first]);
+    const original=document.querySelector('.score-note[data-beat="0"] .judgement-halo');
+    app.updateScore(.75,[first,second]);
+    return Boolean(original)&&original===document.querySelector('.score-note[data-beat="0"] .judgement-halo');
+  });
+  expect(preserved).toBe(true);
+  await expect(page.locator('.judgement-halo')).toHaveCount(2);
+});
+
 test('unmatched marker positions preserve millisecond offsets without rhythmic snapping',async({page})=>{
   await page.goto('/');
   const offsets=[0,7,20,43,80,-35,-91];
@@ -1167,6 +1241,24 @@ test('unmatched marker positions preserve millisecond offsets without rhythmic s
   const scale=(markers[4].x-markers[0].x)/.08;
   expect(scale).toBeGreaterThan(0);
   for(let index=0;index<offsets.length;index++)expect(markers[index].x).toBeCloseTo(markers[0].x+offsets[index]/1000*scale,5);
+});
+
+test('an unmatched strike before a bar line stays on the preceding system',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(4,[{
+    expected_beat:null,actual_beat:3.999,judgement:'extra',error_ms:0,excellent:false,event_id:'before-bar-line'
+  }]));
+  const marker=page.locator('.unmatched-hit-marker');
+  await expect(marker).toHaveAttribute('data-system-row','0');
+  const alignment=await marker.evaluate(element=>{
+    const centre=(target:Element)=>{const box=target.getBoundingClientRect();return box.top+box.height/2;};
+    const row0=document.querySelector('.score-note[data-system-row="0"] .vf-notehead > text')!;
+    const row1=document.querySelector('.score-note[data-system-row="1"] .vf-notehead > text')!;
+    const markerY=centre(element);
+    return {row0:Math.abs(markerY-centre(row0)),row1:Math.abs(markerY-centre(row1))};
+  });
+  expect(alignment.row0).toBeLessThan(2);
+  expect(alignment.row1).toBeGreaterThan(20);
 });
 
 test('restarting practice clears the previous session note colours',async({page})=>{
@@ -1250,6 +1342,42 @@ test('rapid repeated monitored strikes allocate an audio voice for every hit', a
   await expect.poll(()=>page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBeGreaterThanOrEqual(41);
 });
 
+test('reference snare can follow written notes instead of physical hits', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  const playbackMode = page.getByLabel('Reference snare timing');
+  await playbackMode.selectOption('notes');
+  await expect(playbackMode).toHaveValue('notes');
+  await expect.poll(() => page.evaluate(() => new Promise<string | undefined>((resolve, reject) => {
+    const request = indexedDB.open('rudiment');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const get = request.result.transaction('settings').objectStore('settings').get('app');
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => resolve(get.result?.value?.snareReferenceMode);
+    };
+  }))).toBe('notes');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+
+  const before = await page.evaluate(() => (window as any).rudiment.audioDiagnostics().snareStarts);
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().referenceNoteCount)).toBe(32);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().snareStarts)).toBeGreaterThan(before);
+
+  await page.getByRole('button', { name: /Pause/ }).click();
+  await page.waitForTimeout(100);
+  const paused = await page.evaluate(() => (window as any).rudiment.audioDiagnostics().snareStarts);
+  await page.keyboard.press('j');
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().snareStarts)).toBe(paused);
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await expect(page.getByLabel('Reference snare timing')).toHaveValue('notes');
+});
+
 test('loop and restart leave practice stopped until started again', async ({ page }) => {
   await page.goto('/');
   await page.getByLabel('Tempo in BPM').fill('240');
@@ -1262,6 +1390,46 @@ test('loop and restart leave practice stopped until started again', async ({ pag
   await page.getByRole('button', { name: /Restart/ }).click();
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
   await expect(page.locator('.feedback-strip')).toHaveCount(0);
+});
+
+test('repeat-until-good setting persists and retries a failed bar', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  const repeatBar = page.getByLabel('Repeat bar until Good');
+  await repeatBar.check();
+  await expect.poll(() => page.evaluate(() => new Promise<boolean | undefined>((resolve, reject) => {
+    const request = indexedDB.open('rudiment');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const get = request.result.transaction('settings').objectStore('settings').get('app');
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => resolve(get.result?.value?.repeatBarUntilGood);
+    };
+  }))).toBe(true);
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+
+  await expect(page.getByText(/BAR 1 \/ 4 · TRY 2/)).toBeVisible({ timeout: 4_000 });
+  await expect(page.getByRole('button', { name: /Pause/ })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Practice complete' })).toHaveCount(0);
+  await page.getByRole('button', { name: /Pause/ }).click();
+  await page.getByRole('button', { name: /Resume/ }).click();
+  await page.evaluate(async () => {
+    const firstHit = performance.now() + 165;
+    for (let index = 0; index < 8; index += 1) {
+      const delay = Math.max(0, firstHit + index * 125 - performance.now());
+      await new Promise(resolve => setTimeout(resolve, delay));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+    }
+  });
+  await expect(page.getByText(/BAR 2 \/ 4 · TRY 1/)).toBeVisible({ timeout: 3_000 });
+  await page.getByRole('button', { name: /Restart/ }).click();
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await expect(page.getByLabel('Repeat bar until Good')).toBeChecked();
 });
 
 test('permission denial and narrow layout remain usable', async ({ page }) => {
