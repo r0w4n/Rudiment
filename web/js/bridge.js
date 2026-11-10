@@ -33,6 +33,7 @@ const velocityLayers = velocity => {
   if(lower===upper)return [{index:lower,weight:1}];
   return [{index:lower,weight:Math.cos(mix*Math.PI/2)},{index:upper,weight:Math.sin(mix*Math.PI/2)}];
 };
+const audioErrorMessage = error => error instanceof Error ? error.message : String(error ?? 'Unknown audio error');
 function tempoAtBeat(beat,map,initialBpm){let bpm=initialBpm;for(const change of map){if(change.beat>beat)break;bpm=change.bpm;}return bpm;}
 function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),within=beat-bars*meter;return `${bars}:${within}:0`;}
 
@@ -88,7 +89,7 @@ const visualMetronome = {
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
-  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], voices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null,
+  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], sampleErrors: [], fallbackHits: 0, snareStarts: 0, lastSnareError: null, voices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null,
   async ensure() {
     this.state = 'loading';
     // Start/resume the context immediately while the Connect click still has
@@ -102,7 +103,13 @@ const audio = {
       this.clickGain = this.raw.createGain(); this.clickGain.gain.value = 1.08;
       const limiter = this.raw.createDynamicsCompressor(); limiter.threshold.value = -3; limiter.ratio.value = 12;
       this.snareGain.connect(this.master); this.clickGain.connect(this.master); this.master.connect(limiter); limiter.connect(this.raw.destination);
-      const urls = ['audio/snare-soft.m4a','audio/snare-medium.m4a','audio/snare-hard.m4a','audio/snare-accent.m4a'].map(publicAsset);
+      // PCM WAV avoids the optional AAC decoder used by several embedded Web
+      // MIDI browsers while preserving the same four acoustic recordings.
+      const urls = ['audio/snare-soft.wav','audio/snare-medium.wav','audio/snare-hard.wav','audio/snare-accent.wav'].map(publicAsset);
+      // Sample loading must never hold the audio context or practice transport
+      // hostage. Some Web MIDI wrapper browsers expose Web Audio but leave audio
+      // decodeAudioData pending forever. Hits use the synthesised snare until a
+      // valid layer has decoded, and switch to the acoustic layers as they arrive.
       this.buffersPromise = Promise.all(urls.map(async (url,index) => {
         try {
           const response = await fetch(url); if (!response.ok) throw new Error(String(response.status));
@@ -115,16 +122,22 @@ const audio = {
           // The source recordings vary by almost 28 dB. Normalise their
           // transients after decoding so velocity changes timbre/dynamics
           // without making a successfully triggered layer sound missing.
+          if (!Number.isFinite(peak) || peak < .00001) throw new Error('Decoded sample is silent');
           this.layerPeaks[index]=peak;
           this.layerGains[index]=peak>0?Math.min(24,Math.max(.5,.32/peak)):1;
+          this.buffers[index]=buffer;
           return buffer;
         }
-        catch { return null; }
-      }));
+        catch(error) { this.sampleErrors[index]=audioErrorMessage(error); return null; }
+      })).then(buffers => {
+        this.buffers=buffers;
+        this.state=buffers.some(Boolean)?'ready':'fallback';
+        return buffers;
+      });
     }
-    await startPromise;
-    if(this.buffersPromise)this.buffers=await this.buffersPromise;
-    this.state = this.buffers.some(Boolean) ? 'ready' : 'fallback';
+    try { await startPromise; }
+    catch(error) { this.state='locked'; this.lastSnareError=audioErrorMessage(error); throw error; }
+    this.state = this.buffers.some(Boolean) ? 'ready' : (this.buffersPromise ? 'loading' : 'fallback');
     return { state: this.state, sampleLayers: this.buffers.filter(Boolean).length };
   },
   perfAt(audioTime) {
@@ -142,16 +155,24 @@ const audio = {
     if(Number(velocity)<=0)return false;
     const time = when ?? this.raw.currentTime, response=velocityGain(velocity);
     const layers=velocityLayers(velocity).filter(layer=>this.buffers[layer.index]);
+    let started=0;
     if (layers.length) {
       for(const layer of layers){
-        const source = this.raw.createBufferSource(), gain = this.raw.createGain(); source.buffer = this.buffers[layer.index];
-        source.playbackRate.value = .99 + Math.random() * .02;
-        gain.gain.value = (this.layerGains[layer.index]||1) * response * layer.weight;
-        source.connect(gain); gain.connect(this.snareGain);this.voices.add(source);
-        source.onended=()=>{this.voices.delete(source);source.disconnect();gain.disconnect();}; source.start(time);
+        try {
+          const source = this.raw.createBufferSource(), gain = this.raw.createGain(); source.buffer = this.buffers[layer.index];
+          source.playbackRate.value = .99 + Math.random() * .02;
+          gain.gain.value = (this.layerGains[layer.index]||1) * response * layer.weight;
+          source.connect(gain); gain.connect(this.snareGain);this.voices.add(source);
+          source.onended=()=>{this.voices.delete(source);source.disconnect();gain.disconnect();}; source.start(time);started++;
+        } catch(error) { this.lastSnareError=audioErrorMessage(error); }
       }
-    } else this.syntheticSnare(time, velocity);
-    return true;
+    }
+    if(!started){
+      try { this.syntheticSnare(time, velocity);this.fallbackHits++;started=1; }
+      catch(error) { this.lastSnareError=audioErrorMessage(error); }
+    }
+    this.snareStarts+=started;
+    return started>0;
   },
   monitorSnare(velocity = 105) {
     if(Number(velocity)<=0)return false;
@@ -159,8 +180,11 @@ const audio = {
     // A permission sheet, screen rotation or mobile power policy can suspend a
     // previously unlocked context. The Connect gesture has already authorised
     // audio, so resume it and preserve this first physical strike.
-    if(this.raw){this.ensure().then(()=>this.playSnare(velocity)).catch(()=>{});return true;}
-    return false;
+    // Auto-reconnected MIDI devices can deliver a hit before the user has
+    // opened the connection panel. Create/resume the graph and replay that
+    // first strike as soon as the browser permits audio.
+    this.ensure().then(()=>this.playSnare(velocity)).catch(error=>{this.lastSnareError=audioErrorMessage(error);});
+    return true;
   },
   syntheticSnare(time, velocity) {
     const length = Math.floor(this.raw.sampleRate * .2), buffer = this.raw.createBuffer(1, length, this.raw.sampleRate), data = buffer.getChannelData(0);
@@ -611,7 +635,7 @@ function trapDialogTab(event,selector){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),activeVoices:audio.voices.size,clickGain:audio.clickGain?.gain.value??0,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),activeVoices:audio.voices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],fallbackHits:audio.fallbackHits,snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},

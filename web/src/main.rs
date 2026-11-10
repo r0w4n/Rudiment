@@ -5,9 +5,10 @@ use lucide_leptos::{
     RotateCcw, Settings as SettingsIcon, X,
 };
 use rudiment_core::{
-    Exercise, ExpectedHit, InputSource, Instrument, Judgement, ObservedHit, SCORING_VERSION,
-    ScoringConfig, SessionSummary, TempoChange, beat_at_elapsed_ms, elapsed_ms_at_beat, paradiddle,
-    parse_midi, score_session_with_tempo_map,
+    DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit, InputSource,
+    Instrument, Judgement, ObservedHit, SCORING_VERSION, ScoringConfig, SessionSummary,
+    TempoChange, beat_at_elapsed_ms, elapsed_ms_at_beat, paradiddle, parse_midi,
+    score_session_with_tempo_map,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -596,8 +597,8 @@ fn App() -> impl IntoView {
     let latency_ms = RwSignal::new(0.0);
     let calibration_targets = RwSignal::new(Vec::<f64>::new());
     let calibration_errors = RwSignal::new(Vec::<f64>::new());
-    let on_time_ms = RwSignal::new(40.0);
-    let excellent_ms = RwSignal::new(20.0);
+    let on_time_ms = RwSignal::new(DEFAULT_GOOD_MS);
+    let excellent_ms = RwSignal::new(DEFAULT_PERFECT_MS);
     let runtime_tempo_map = RwSignal::new(scaled_tempo_map(&paradiddle(), 1, 60.0));
 
     let save_current_settings = Rc::new(move || {
@@ -1057,7 +1058,7 @@ fn App() -> impl IntoView {
                 return;
             }
             let line = format!(
-                "{:.1} ms · {} ch{} · note {} · velocity {} · raw {:?}",
+                "{:.3} ms · {} ch{} · note {} · velocity {} · raw {:?}",
                 event.timestamp.unwrap_or(0.0),
                 event.message_type.clone().unwrap_or_default(),
                 event.channel.unwrap_or(0),
@@ -1265,6 +1266,12 @@ fn App() -> impl IntoView {
     let key_start_new_run = start_new_run.clone();
     let key_hit = hit_input.clone();
     let keyboard = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
+        // A held computer key generates synthetic keydown events at the OS
+        // repeat interval. Those are not additional physical drum strikes and
+        // otherwise form a misleading, evenly spaced row of unmatched hits.
+        if event.repeat() {
+            return;
+        }
         if library_open.get_untracked() {
             if event.key() == "Escape" {
                 event.prevent_default();
@@ -1719,8 +1726,8 @@ fn App() -> impl IntoView {
               <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
-            <section><h3>"Timing feedback"</h3><p class="help">"Perfect hits are green (±20 ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±100 ms."</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(20.0).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(40.0);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);latency_ms.set(0.0);on_time_ms.set(40.0);excellent_ms.set(20.0);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed session(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment practice history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);loops.set(1);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" on:click=move |_|settings_open.set(false)></button>
       </main>

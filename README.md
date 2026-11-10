@@ -49,7 +49,7 @@ The built-in MIDI exercises live under `web/public/exercises/rudiments`. Their m
 
 ## Timing assessment
 
-Scoring v2 uses calibrated Web MIDI timestamps against the musical transport clock. Hits within ±20 ms are Perfect; ±20–40 ms are Good; −40–100 ms are Early; +40–100 ms are Late; and notes outside ±100 ms are missed. The Perfect and Good boundaries are centralised configuration values, while ±100 ms is the default matching limit.
+Scoring v2 uses calibrated Web MIDI timestamps against the musical transport clock. Hits within ±15 ms are Perfect; ±15–30 ms are Good; −30–90 ms are Early; +30–90 ms are Late; and notes outside ±90 ms are missed. The Perfect and Good boundaries are user-adjustable settings, while ±90 ms is the matching limit.
 
 Each expected note contributes continuously: 100 points through the Perfect boundary, a linear 100→80 points across the Good band, then a linear 80→1 points through the Early/Late band. Misses contribute zero and extras contribute no points or penalty. The session score is the mean across expected notes, rounded to one decimal place; any non-Perfect result keeps the displayed score below 100%. Results also retain signed error, mean absolute error and standard deviation for timing-bias and consistency feedback.
 

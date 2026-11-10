@@ -719,12 +719,16 @@ pub struct ScoringConfig {
     pub good_floor_score: f64,
     pub match_edge_score: f64,
 }
+pub const DEFAULT_PERFECT_MS: f64 = 15.0;
+pub const DEFAULT_GOOD_MS: f64 = 30.0;
+pub const DEFAULT_MATCH_MS: f64 = 90.0;
+
 impl Default for ScoringConfig {
     fn default() -> Self {
         Self {
-            perfect_ms: 20.0,
-            good_ms: 40.0,
-            match_ms: 100.0,
+            perfect_ms: DEFAULT_PERFECT_MS,
+            good_ms: DEFAULT_GOOD_MS,
+            match_ms: DEFAULT_MATCH_MS,
             good_floor_score: 80.0,
             match_edge_score: 1.0,
         }
@@ -899,9 +903,9 @@ pub fn matching_window_ms_with_tempo_map(
         .filter(|d| *d > 0.0);
     let nearest = distances.fold(f64::INFINITY, f64::min);
     if nearest.is_finite() {
-        120.0_f64.min(0.4 * nearest).max(35.0)
+        DEFAULT_MATCH_MS.min(0.4 * nearest).max(35.0)
     } else {
-        120.0
+        DEFAULT_MATCH_MS
     }
 }
 
@@ -1695,14 +1699,14 @@ mod tests {
         let target = last.beat * 1000.0;
         let s = score_session(
             &[last],
-            &[obs(target + 34.0, Instrument::Snare)],
+            &[obs(target + 89.0, Instrument::Snare)],
             60.0,
             0.0,
             0.0,
         );
         assert_eq!(s.matched, 1);
         assert_eq!(s.missed, 0);
-        assert_eq!(s.results[0].judgement, Judgement::Good);
+        assert_eq!(s.results[0].judgement, Judgement::Late);
     }
     #[test]
     fn quarter_note_onsets_ignore_short_gate_duration() {
@@ -1899,18 +1903,114 @@ mod tests {
     #[test]
     fn timing_boundaries_are_exact_and_have_no_gaps() {
         let config = ScoringConfig::default();
-        for error in [-20.0, 0.0, 20.0] {
+        for error in [-15.0, 0.0, 15.0] {
             assert_eq!(config.classify(error), Judgement::Perfect);
         }
-        for error in [-40.0, -20.000_001, 20.000_001, 40.0] {
+        for error in [-30.0, -15.000_001, 15.000_001, 30.0] {
             assert_eq!(config.classify(error), Judgement::Good);
         }
-        assert_eq!(config.classify(-40.000_001), Judgement::Early);
-        assert_eq!(config.classify(-100.0), Judgement::Early);
-        assert_eq!(config.classify(40.000_001), Judgement::Late);
-        assert_eq!(config.classify(100.0), Judgement::Late);
-        assert_eq!(config.classify(-100.000_001), Judgement::Missed);
-        assert_eq!(config.classify(100.000_001), Judgement::Missed);
+        assert_eq!(config.classify(-30.000_001), Judgement::Early);
+        assert_eq!(config.classify(-90.0), Judgement::Early);
+        assert_eq!(config.classify(30.000_001), Judgement::Late);
+        assert_eq!(config.classify(90.0), Judgement::Late);
+        assert_eq!(config.classify(-90.000_001), Judgement::Missed);
+        assert_eq!(config.classify(90.000_001), Judgement::Missed);
+    }
+
+    #[test]
+    fn performance_timestamps_keep_subdivision_independent_precision_for_demo_and_midi() {
+        let expected = expected_sequence(7, 1.0);
+        let offsets = [0.0, 7.0, 20.0, 43.0, 80.0, -35.0, -91.0];
+        let judgements = [
+            Judgement::Perfect,
+            Judgement::Perfect,
+            Judgement::Good,
+            Judgement::Late,
+            Judgement::Late,
+            Judgement::Early,
+        ];
+        let start_ms = 10_000.0;
+
+        for source in [InputSource::Demo, InputSource::Midi] {
+            let observed = expected
+                .iter()
+                .zip(offsets)
+                .map(|(hit, offset)| ObservedHit {
+                    timestamp_ms: start_ms + hit.beat * 1000.0 + offset,
+                    instrument: hit.instrument,
+                    velocity: 100,
+                    source,
+                    raw_note: (source == InputSource::Midi).then_some(38),
+                    raw_channel: (source == InputSource::Midi).then_some(10),
+                })
+                .collect::<Vec<_>>();
+            let summary = score_session(&expected, &observed, 60.0, start_ms, 0.0);
+
+            assert_eq!(summary.matched, 6);
+            assert_eq!(summary.missed, 1);
+            assert_eq!(summary.extras, 1);
+            for index in 0..6 {
+                let result = &summary.results[index];
+                assert_eq!(result.observed_ms, Some(observed[index].timestamp_ms));
+                assert_eq!(
+                    result.actual_timestamp_ms,
+                    Some(observed[index].timestamp_ms)
+                );
+                assert_eq!(result.error_ms, Some(offsets[index]));
+                assert_eq!(result.judgement, judgements[index]);
+            }
+            assert_eq!(summary.results[6].judgement, Judgement::Missed);
+            let unmatched = summary.results.last().unwrap();
+            assert_eq!(unmatched.judgement, Judgement::Extra);
+            assert_eq!(unmatched.observed_ms, Some(observed[6].timestamp_ms));
+            assert_eq!(
+                unmatched.actual_timestamp_ms,
+                Some(observed[6].timestamp_ms)
+            );
+        }
+    }
+
+    #[test]
+    fn irregular_hits_and_bar_boundaries_retain_fractional_ms_at_different_tempos() {
+        let template = paradiddle().hits[0].clone();
+        for (bpm, beats, offsets) in [
+            (60.0, [1.0, 1.137], [7.125, -35.375]),
+            (120.0, [3.75, 4.25], [7.25, -35.5]),
+        ] {
+            let expected = beats
+                .into_iter()
+                .enumerate()
+                .map(|(index, beat)| ExpectedHit {
+                    id: format!("precision-{bpm}-{index}"),
+                    beat,
+                    notation_beat: beat,
+                    ..template.clone()
+                })
+                .collect::<Vec<_>>();
+            let observed = expected
+                .iter()
+                .zip(offsets)
+                .map(|(hit, offset)| ObservedHit {
+                    timestamp_ms: elapsed_ms_at_beat(hit.beat, bpm, &[]) + offset,
+                    instrument: hit.instrument,
+                    velocity: 100,
+                    source: InputSource::Midi,
+                    raw_note: Some(38),
+                    raw_channel: Some(10),
+                })
+                .collect::<Vec<_>>();
+            let summary = score_session(&expected, &observed, bpm, 0.0, 0.0);
+            assert_eq!(summary.matched, 2);
+            for index in 0..2 {
+                assert_eq!(
+                    summary.results[index].observed_ms,
+                    Some(observed[index].timestamp_ms)
+                );
+                assert!(
+                    (summary.results[index].error_ms.unwrap() - offsets[index]).abs() < 0.000_001
+                );
+            }
+        }
     }
 
     #[test]
@@ -1918,13 +2018,13 @@ mod tests {
         let config = ScoringConfig::default();
         for (error, expected_score) in [
             (0.0, 100.0),
-            (20.0, 100.0),
-            (30.0, 90.0),
-            (40.0, 80.0),
-            (60.0, 53.666_666_666_7),
-            (90.0, 14.166_666_666_7),
-            (100.0, 1.0),
-            (100.000_001, 0.0),
+            (15.0, 100.0),
+            (22.5, 90.0),
+            (30.0, 80.0),
+            (60.0, 40.5),
+            (80.0, 14.166_666_666_7),
+            (90.0, 1.0),
+            (90.000_001, 0.0),
         ] {
             assert!((config.note_score(error) - expected_score).abs() < 0.000_001);
             assert!((config.note_score(-error) - expected_score).abs() < 0.000_001);
@@ -1939,7 +2039,7 @@ mod tests {
             .enumerate()
             .map(|(index, hit)| {
                 obs(
-                    hit.beat * 1000.0 + if index % 2 == 0 { -20.0 } else { 20.0 },
+                    hit.beat * 1000.0 + if index % 2 == 0 { -15.0 } else { 15.0 },
                     hit.instrument,
                 )
             })
@@ -1956,7 +2056,7 @@ mod tests {
         );
 
         let mut mostly_perfect = perfect_observed;
-        mostly_perfect[99].timestamp_ms = expected[99].beat * 1000.0 + 30.0;
+        mostly_perfect[99].timestamp_ms = expected[99].beat * 1000.0 + 22.5;
         let summary = score_session(&expected, &mostly_perfect, 60.0, 0.0, 0.0);
         assert_eq!(summary.score, Some(99.9));
         assert_eq!(
@@ -1977,7 +2077,7 @@ mod tests {
             .map(|hit| obs(hit.beat * 1000.0 + 60.0, hit.instrument))
             .collect::<Vec<_>>();
         let late = score_session(&expected, &late_observed, 60.0, 0.0, 0.0);
-        assert_eq!(late.score, Some(53.7));
+        assert_eq!(late.score, Some(40.5));
         assert_eq!(late.signed_mean_error_ms, Some(60.0));
         assert_eq!(late.timing_consistency_ms, Some(0.0));
         assert!(

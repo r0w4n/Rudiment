@@ -84,8 +84,19 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
 });
 
+test('first-use timing defaults use the stricter practice profile', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await expect(page.getByText('Perfect window · ±15 ms')).toBeVisible();
+  await expect(page.getByText('Good window · ±30 ms')).toBeVisible();
+  await expect(page.getByText(/Matching closes outside ±90 ms/)).toBeVisible();
+  const timingSliders=page.locator('section').filter({hasText:'Timing feedback'}).locator('input[type="range"]');
+  await expect(timingSliders.nth(0)).toHaveValue('15');
+  await expect(timingSliders.nth(1)).toHaveValue('30');
+});
+
 test('restarting while audio loads cannot revive the practice transport', async ({ page }) => {
-  await page.route('**/audio/snare-*.m4a', async route => {
+  await page.route('**/audio/snare-*.wav', async route => {
     await new Promise(resolve => setTimeout(resolve, 350));
     await route.continue();
   });
@@ -412,6 +423,18 @@ test('a drum hit starts practice from idle',async({page})=>{
   await expect(page.locator('.feedback-strip')).toHaveCount(0);
 });
 
+test('held keyboard auto-repeat is not recorded as evenly spaced drum strikes',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>{
+    for(let index=0;index<4;index++)window.dispatchEvent(new KeyboardEvent('keydown',{key:'j',repeat:true,bubbles:true}));
+  });
+  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
+  await expect(page.locator('.unmatched-hit-marker')).toHaveCount(0);
+  await page.evaluate(()=>window.dispatchEvent(new KeyboardEvent('keydown',{key:'j',bubbles:true})));
+  await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
+});
+
 test('a run with no drum input never shows hit circles',async({page})=>{
   await page.goto('/');
   await page.getByLabel('Tempo in BPM').fill('240');
@@ -683,7 +706,7 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
       open: async () => input, close: async () => input,
       addEventListener: () => {},
       removeEventListener: () => {},
-      dispatch: (data: number[]) => input.onmidimessage?.({ data: new Uint8Array(data), timeStamp: performance.now() }),
+      dispatch: (data: number[], timestamp = performance.now()) => input.onmidimessage?.({ data: new Uint8Array(data), timeStamp: timestamp }),
     };
     const stateListeners: Array<(event: unknown) => void> = [];
     const access = {
@@ -710,9 +733,10 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByText('MIDI diagnostics').click();
   await page.evaluate(() => {
-    const input = (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput;
-    input.dispatch([0x99, 38, 1]);
+    const input = (window as unknown as { __rudimentFakeInput: { dispatch(data: number[],timestamp?:number): void } }).__rudimentFakeInput;
+    input.dispatch([0x99, 38, 1],1234.567);
   });
+  await expect(page.locator('.diagnostics')).toContainText('1234.567 ms');
   await expect(page.locator('.diagnostics')).toContainText('velocity 1');
   await expect.poll(()=>page.evaluate(()=>(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts)).toBeGreaterThanOrEqual(1);
   const startsAfterLow=await page.evaluate(()=>(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts);
@@ -740,6 +764,41 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await page.reload();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await expect(page.getByText('Current snare: note 40, channel 10')).toBeVisible();
+});
+
+test('MIDI monitoring falls back immediately when sample decoding stalls', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(BaseAudioContext.prototype,'decodeAudioData',{
+      configurable:true,
+      value:() => new Promise<AudioBuffer>(() => {})
+    });
+    const input = {
+      id:'midiweb-kit',name:'MIDIWeb Kit',manufacturer:'Rudiment Test',type:'input',
+      state:'connected',connection:'open',onmidimessage:null as null | ((event:unknown)=>void),onstatechange:null,
+      open:async()=>input,close:async()=>input,addEventListener:()=>{},removeEventListener:()=>{},
+      dispatch:(data:number[])=>input.onmidimessage?.({data:new Uint8Array(data),timeStamp:performance.now()})
+    };
+    const access={inputs:new Map([[input.id,input]]),outputs:new Map(),sysexEnabled:false,onstatechange:null,addEventListener:()=>{},removeEventListener:()=>{}};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.assign(window,{__rudimentMidiWebInput:input});
+  });
+  await page.goto('/');
+  await page.evaluate(() => {
+    const prototype=AudioBufferSourceNode.prototype,original=prototype.start;
+    (window as unknown as {__midiWebVoiceStarts:number}).__midiWebVoiceStarts=0;
+    prototype.start=function(...args){(window as unknown as {__midiWebVoiceStarts:number}).__midiWebVoiceStarts++;return original.apply(this,args as [number]);};
+  });
+  await page.getByRole('button',{name:'MIDI connection'}).click();
+  await expect(page.locator('.status-pill')).toContainText('MIDIWeb Kit · connected');
+  await page.evaluate(()=>(window as unknown as {__rudimentMidiWebInput:{dispatch(data:number[]):void}}).__rudimentMidiWebInput.dispatch([0x99,38,96]));
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().fallbackHits)).toBeGreaterThan(0);
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {__midiWebVoiceStarts:number}).__midiWebVoiceStarts)).toBeGreaterThan(0);
+  const diagnostics=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
+  expect(diagnostics.contextState).toBe('running');
+  expect(diagnostics.sampleLayers).toBe(0);
+  expect(diagnostics.snareGain).toBeGreaterThan(0);
+  expect(diagnostics.snareStarts).toBeGreaterThan(0);
+  expect(diagnostics.lastSnareError).toBeNull();
 });
 
 test('multiple MIDI inputs remain silent until one device is selected', async ({ page }) => {
@@ -1090,6 +1149,26 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   await expect(marker).toHaveCount(0);
 });
 
+test('unmatched marker positions preserve millisecond offsets without rhythmic snapping',async({page})=>{
+  await page.goto('/');
+  const offsets=[0,7,20,43,80,-35,-91];
+  await page.evaluate(values=>{
+    const baseBeat=1.5;
+    (window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(2,values.map((offset,index)=>({
+      expected_beat:null,actual_beat:baseBeat+offset/1000,judgement:'extra',error_ms:0,excellent:false,event_id:`precision-${index}`
+    })));
+  },offsets);
+  const markers=await page.locator('.unmatched-hit-marker').evaluateAll(elements=>elements.map(element=>({
+    beat:Number((element as SVGCircleElement).dataset.beat),x:Number(element.getAttribute('cx'))
+  })));
+  expect(markers).toHaveLength(offsets.length);
+  expect(new Set(markers.map(marker=>marker.x)).size).toBe(offsets.length);
+  for(let index=0;index<offsets.length;index++)expect(markers[index].beat).toBeCloseTo(1.5+offsets[index]/1000,10);
+  const scale=(markers[4].x-markers[0].x)/.08;
+  expect(scale).toBeGreaterThan(0);
+  for(let index=0;index<offsets.length;index++)expect(markers[index].x).toBeCloseTo(markers[0].x+offsets[index]/1000*scale,5);
+});
+
 test('restarting practice clears the previous session note colours',async({page})=>{
   await page.goto('/');
   const hit=page.locator('.score-note[data-beat="1"]');
@@ -1157,6 +1236,7 @@ test('rapid repeated monitored strikes allocate an audio voice for every hit', a
   await page.goto('/');
   await page.evaluate(() => { const prototype=AudioBufferSourceNode.prototype,original=prototype.start;(window as unknown as {__voiceStarts:number}).__voiceStarts=0;prototype.start=function(...args){(window as unknown as {__voiceStarts:number}).__voiceStarts++;return original.apply(this,args as [number]);}; });
   await page.evaluate(()=>(window as unknown as {rudiment:{ensureAudio():Promise<void>}}).rudiment.ensureAudio());
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().sampleLayers)).toBe(4);
   const levels=await page.evaluate(()=>(window as unknown as {rudiment:{audioDiagnostics():{layerPeaks:number[],layerGains:number[],velocityGains:number[],velocityLayers:Array<Array<{index:number,weight:number}>>},playSnare(velocity:number):boolean}}).rudiment.audioDiagnostics());
   expect(levels.layerPeaks).toHaveLength(4);
   expect(levels.layerGains).toHaveLength(4);
