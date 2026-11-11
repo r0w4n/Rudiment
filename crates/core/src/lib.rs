@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
-pub const SCORING_VERSION: &str = "v2";
+pub const SCORING_VERSION: &str = "v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -716,12 +716,16 @@ pub struct ScoringConfig {
     pub perfect_ms: f64,
     pub good_ms: f64,
     pub match_ms: f64,
+    /// Retained for source compatibility with scoring v2. Scoring v3 uses
+    /// fixed, judgement-level points rather than an interpolated curve.
     pub good_floor_score: f64,
+    /// Retained for source compatibility with scoring v2. Scoring v3 uses
+    /// fixed, judgement-level points rather than an interpolated curve.
     pub match_edge_score: f64,
 }
-pub const DEFAULT_PERFECT_MS: f64 = 15.0;
-pub const DEFAULT_GOOD_MS: f64 = 30.0;
-pub const DEFAULT_MATCH_MS: f64 = 90.0;
+pub const DEFAULT_PERFECT_MS: f64 = 20.0;
+pub const DEFAULT_GOOD_MS: f64 = 60.0;
+pub const DEFAULT_MATCH_MS: f64 = 100.0;
 
 impl Default for ScoringConfig {
     fn default() -> Self {
@@ -729,8 +733,8 @@ impl Default for ScoringConfig {
             perfect_ms: DEFAULT_PERFECT_MS,
             good_ms: DEFAULT_GOOD_MS,
             match_ms: DEFAULT_MATCH_MS,
-            good_floor_score: 80.0,
-            match_edge_score: 1.0,
+            good_floor_score: 95.0,
+            match_edge_score: 60.0,
         }
     }
 }
@@ -760,38 +764,14 @@ impl ScoringConfig {
     }
 
     pub fn note_score(self, timing_error_ms: f64) -> f64 {
-        let (perfect, good, matched) = self.boundaries();
-        let magnitude = timing_error_ms.abs();
-        if magnitude <= perfect {
-            100.0
-        } else if magnitude <= good {
-            interpolate(
-                magnitude,
-                perfect,
-                good,
-                100.0,
-                self.good_floor_score.clamp(0.0, 100.0),
-            )
-        } else if magnitude <= matched {
-            interpolate(
-                magnitude,
-                good,
-                matched,
-                self.good_floor_score.clamp(0.0, 100.0),
-                self.match_edge_score.clamp(0.0, 100.0),
-            )
-        } else {
-            0.0
+        match self.classify(timing_error_ms) {
+            Judgement::Perfect => 100.0,
+            Judgement::Good => 95.0,
+            Judgement::Early | Judgement::Late => 60.0,
+            Judgement::OnTime => 95.0,
+            Judgement::Missed | Judgement::Extra | Judgement::WrongInstrument => 0.0,
         }
     }
-}
-
-fn interpolate(value: f64, start: f64, end: f64, start_score: f64, end_score: f64) -> f64 {
-    if (end - start).abs() < f64::EPSILON {
-        return end_score;
-    }
-    let progress = ((value - start) / (end - start)).clamp(0.0, 1.0);
-    start_score + (end_score - start_score) * progress
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -832,6 +812,91 @@ pub struct SessionSummary {
     pub timing_consistency_ms: Option<f64>,
     pub scoring_version: String,
     pub results: Vec<HitResult>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceAward {
+    None,
+    OneStar,
+    TwoStars,
+    Completed,
+    Mastered,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PerformanceRating {
+    pub stars: u8,
+    pub award: PerformanceAward,
+}
+
+/// Derives the visible achievement tier from a v3 session summary.
+///
+/// Completion is deliberately attainable without absolute perfection, while
+/// gold mastery requires exceptional precision and a clean performance.
+pub fn performance_rating(summary: &SessionSummary) -> PerformanceRating {
+    let score = summary.score.unwrap_or(0.0);
+    let expected = summary.expected;
+    let invalid = summary.extras + summary.wrong_instrument;
+    let perfect = summary
+        .results
+        .iter()
+        .filter(|result| result.expected_id.is_some())
+        .filter(|result| result.judgement == Judgement::Perfect)
+        .count();
+    let ratio = |count: usize| {
+        if expected == 0 {
+            0.0
+        } else {
+            count as f64 / expected as f64
+        }
+    };
+
+    let short_exercise_mastery = expected < 20 && perfect == expected;
+    let long_exercise_mastery = expected >= 20 && ratio(perfect) >= 0.95;
+    let mastered = expected > 0
+        && score >= 99.0
+        && summary.missed == 0
+        && invalid == 0
+        && (short_exercise_mastery || long_exercise_mastery)
+        && summary.mean_abs_error_ms.is_some_and(|value| value <= 25.0)
+        && summary
+            .timing_consistency_ms
+            .is_some_and(|value| value <= 20.0);
+    if mastered {
+        return PerformanceRating {
+            stars: 3,
+            award: PerformanceAward::Mastered,
+        };
+    }
+
+    let completed = expected > 0
+        && score >= 95.0
+        && ratio(summary.matched) >= 0.98
+        && ratio(summary.missed) <= 0.02
+        && ratio(invalid) <= 0.01;
+    if completed {
+        return PerformanceRating {
+            stars: 3,
+            award: PerformanceAward::Completed,
+        };
+    }
+    if score >= 75.0 {
+        PerformanceRating {
+            stars: 2,
+            award: PerformanceAward::TwoStars,
+        }
+    } else if score >= 50.0 {
+        PerformanceRating {
+            stars: 1,
+            award: PerformanceAward::OneStar,
+        }
+    } else {
+        PerformanceRating {
+            stars: 0,
+            award: PerformanceAward::None,
+        }
+    }
 }
 
 pub fn matching_window_ms(hits: &[ExpectedHit], idx: usize, bpm: f64) -> f64 {
@@ -1214,15 +1279,9 @@ pub fn score_session_with_tempo_map(
     let n = expected.len();
     let matched = errors.len();
     let missed = n - matched;
-    let mut score = (score_sum / n as f64 * 10.0).round() / 10.0;
-    if results
-        .iter()
-        .take(n)
-        .any(|result| result.judgement != Judgement::Perfect)
-        && score >= 100.0
-    {
-        score = 99.9;
-    }
+    let invalid_penalty = 50.0 * (extras + wrong) as f64;
+    let score =
+        (((score_sum - invalid_penalty) / n as f64).clamp(0.0, 100.0) * 10.0).round() / 10.0;
     let mean_abs = (!errors.is_empty())
         .then(|| errors.iter().map(|v| v.abs()).sum::<f64>() / errors.len() as f64);
     let signed = (!errors.is_empty()).then(|| errors.iter().sum::<f64>() / errors.len() as f64);
@@ -1275,12 +1334,12 @@ mod tests {
         let b = score_session(&e.hits, &o, 60.0, 0.0, 0.0);
         assert_eq!(a.score, Some(100.0));
         assert_eq!(a, b);
-        assert_eq!(a.scoring_version, "v2");
+        assert_eq!(a.scoring_version, "v3");
     }
     #[test]
     fn early_late_and_missing_extra_classify() {
         let e = paradiddle();
-        let mut o = vec![obs(-60.0, Instrument::Snare), obs(560.0, Instrument::Snare)];
+        let mut o = vec![obs(-61.0, Instrument::Snare), obs(561.0, Instrument::Snare)];
         o.push(obs(9_999.0, Instrument::Snare));
         let s = score_session(&e.hits[..3], &o, 60.0, 0.0, 0.0);
         assert_eq!(s.results[0].judgement, Judgement::Early);
@@ -1903,31 +1962,31 @@ mod tests {
     #[test]
     fn timing_boundaries_are_exact_and_have_no_gaps() {
         let config = ScoringConfig::default();
-        for error in [-15.0, 0.0, 15.0] {
+        for error in [-20.0, 0.0, 20.0] {
             assert_eq!(config.classify(error), Judgement::Perfect);
         }
-        for error in [-30.0, -15.000_001, 15.000_001, 30.0] {
+        for error in [-60.0, -20.000_001, 20.000_001, 60.0] {
             assert_eq!(config.classify(error), Judgement::Good);
         }
-        assert_eq!(config.classify(-30.000_001), Judgement::Early);
-        assert_eq!(config.classify(-90.0), Judgement::Early);
-        assert_eq!(config.classify(30.000_001), Judgement::Late);
-        assert_eq!(config.classify(90.0), Judgement::Late);
-        assert_eq!(config.classify(-90.000_001), Judgement::Missed);
-        assert_eq!(config.classify(90.000_001), Judgement::Missed);
+        assert_eq!(config.classify(-60.000_001), Judgement::Early);
+        assert_eq!(config.classify(-100.0), Judgement::Early);
+        assert_eq!(config.classify(60.000_001), Judgement::Late);
+        assert_eq!(config.classify(100.0), Judgement::Late);
+        assert_eq!(config.classify(-100.000_001), Judgement::Missed);
+        assert_eq!(config.classify(100.000_001), Judgement::Missed);
     }
 
     #[test]
     fn performance_timestamps_keep_subdivision_independent_precision_for_demo_and_midi() {
         let expected = expected_sequence(7, 1.0);
-        let offsets = [0.0, 7.0, 20.0, 43.0, 80.0, -35.0, -91.0];
+        let offsets = [0.0, 7.0, 20.0, 43.0, 80.0, -35.0, -101.0];
         let judgements = [
+            Judgement::Perfect,
             Judgement::Perfect,
             Judgement::Perfect,
             Judgement::Good,
             Judgement::Late,
-            Judgement::Late,
-            Judgement::Early,
+            Judgement::Good,
         ];
         let start_ms = 10_000.0;
 
@@ -2014,17 +2073,16 @@ mod tests {
     }
 
     #[test]
-    fn continuous_note_scores_follow_the_documented_piecewise_curve() {
+    fn note_scores_follow_the_documented_judgement_weights() {
         let config = ScoringConfig::default();
         for (error, expected_score) in [
             (0.0, 100.0),
-            (15.0, 100.0),
-            (22.5, 90.0),
-            (30.0, 80.0),
-            (60.0, 40.5),
-            (80.0, 14.166_666_666_7),
-            (90.0, 1.0),
-            (90.000_001, 0.0),
+            (20.0, 100.0),
+            (20.000_001, 95.0),
+            (60.0, 95.0),
+            (60.000_001, 60.0),
+            (100.0, 60.0),
+            (100.000_001, 0.0),
         ] {
             assert!((config.note_score(error) - expected_score).abs() < 0.000_001);
             assert!((config.note_score(-error) - expected_score).abs() < 0.000_001);
@@ -2058,7 +2116,7 @@ mod tests {
         let mut mostly_perfect = perfect_observed;
         mostly_perfect[99].timestamp_ms = expected[99].beat * 1000.0 + 22.5;
         let summary = score_session(&expected, &mostly_perfect, 60.0, 0.0, 0.0);
-        assert_eq!(summary.score, Some(99.9));
+        assert_eq!(summary.score, Some(100.0));
         assert_eq!(
             summary
                 .results
@@ -2070,15 +2128,62 @@ mod tests {
     }
 
     #[test]
+    fn documented_example_scores_86_and_awards_two_stars() {
+        let expected = expected_sequence(4, 0.5);
+        let observed = expected
+            .iter()
+            .enumerate()
+            .map(|(index, hit)| {
+                let offset = if index == 3 { -61.0 } else { 30.0 };
+                obs(hit.beat * 1000.0 + offset, hit.instrument)
+            })
+            .collect::<Vec<_>>();
+        let summary = score_session(&expected, &observed, 60.0, 0.0, 0.0);
+        assert_eq!(summary.score, Some(86.3));
+        assert_eq!(
+            performance_rating(&summary),
+            PerformanceRating {
+                stars: 2,
+                award: PerformanceAward::TwoStars,
+            }
+        );
+    }
+
+    #[test]
+    fn completion_and_gold_mastery_remain_distinct() {
+        let expected = expected_sequence(4, 0.5);
+        let all_good = expected
+            .iter()
+            .map(|hit| obs(hit.beat * 1000.0 + 30.0, hit.instrument))
+            .collect::<Vec<_>>();
+        let completed = score_session(&expected, &all_good, 60.0, 0.0, 0.0);
+        assert_eq!(completed.score, Some(95.0));
+        assert_eq!(
+            performance_rating(&completed).award,
+            PerformanceAward::Completed
+        );
+
+        let all_perfect = expected
+            .iter()
+            .map(|hit| obs(hit.beat * 1000.0, hit.instrument))
+            .collect::<Vec<_>>();
+        let mastered = score_session(&expected, &all_perfect, 60.0, 0.0, 0.0);
+        assert_eq!(
+            performance_rating(&mastered).award,
+            PerformanceAward::Mastered
+        );
+    }
+
+    #[test]
     fn acceptance_late_missed_and_extra_scenarios() {
         let expected = expected_sequence(100, 0.5);
         let late_observed = expected
             .iter()
-            .map(|hit| obs(hit.beat * 1000.0 + 60.0, hit.instrument))
+            .map(|hit| obs(hit.beat * 1000.0 + 61.0, hit.instrument))
             .collect::<Vec<_>>();
         let late = score_session(&expected, &late_observed, 60.0, 0.0, 0.0);
-        assert_eq!(late.score, Some(40.5));
-        assert_eq!(late.signed_mean_error_ms, Some(60.0));
+        assert_eq!(late.score, Some(60.0));
+        assert_eq!(late.signed_mean_error_ms, Some(61.0));
         assert_eq!(late.timing_consistency_ms, Some(0.0));
         assert!(
             late.results
@@ -2102,7 +2207,7 @@ mod tests {
         with_extras.extend((0..5).map(|index| obs(100_000.0 + index as f64, Instrument::Snare)));
         let extra = score_session(&expected, &with_extras, 60.0, 0.0, 0.0);
         assert_eq!(extra.extras, 5);
-        assert_eq!(extra.score, Some(100.0));
+        assert_eq!(extra.score, Some(97.5));
     }
 
     #[test]
@@ -2122,7 +2227,7 @@ mod tests {
         );
         assert_eq!(duplicate.matched, 1);
         assert_eq!(duplicate.extras, 1);
-        assert_eq!(duplicate.score, Some(100.0));
+        assert_eq!(duplicate.score, Some(50.0));
 
         let mut simultaneous = vec![rapid[0].clone(), rapid[0].clone()];
         simultaneous[1].id = "kick".into();
@@ -2183,7 +2288,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let rounded = score_session(&hundred, &almost_perfect, 60.0, 0.0, 0.0);
-        assert_eq!(rounded.score, Some(99.9));
+        assert_eq!(rounded.score, Some(100.0));
         assert_ne!(rounded.results[0].judgement, Judgement::Perfect);
     }
     fn fixture(ambiguous: bool) -> Vec<u8> {

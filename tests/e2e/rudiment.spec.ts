@@ -71,7 +71,7 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect.poll(() => page.evaluate(() => (window as unknown as {rudiment:{audioDiagnostics():{clickGain:number}}}).rudiment.audioDiagnostics().clickGain)).toBeGreaterThan(1);
   await expect(page.getByRole('button', { name: /Pause/ })).toBeVisible();
   await page.getByRole('button',{name:'Stats'}).click();
-  await expect(page.getByRole('dialog',{name:'Practice statistics'})).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Performance history'})).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
   await page.getByRole('button', { name: /Start practice/ }).click();
@@ -87,12 +87,12 @@ test('first-use workspace renders real notation and lifecycle controls', async (
 test('first-use timing defaults use the stricter practice profile', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await expect(page.getByText('Perfect window · ±15 ms')).toBeVisible();
-  await expect(page.getByText('Good window · ±30 ms')).toBeVisible();
-  await expect(page.getByText(/Matching closes outside ±90 ms/)).toBeVisible();
+  await expect(page.getByText('Perfect window · ±20 ms')).toBeVisible();
+  await expect(page.getByText('Good window · ±60 ms')).toBeVisible();
+  await expect(page.getByText(/Matching closes outside ±100 ms/)).toBeVisible();
   const timingSliders=page.locator('section').filter({hasText:'Timing feedback'}).locator('input[type="range"]');
-  await expect(timingSliders.nth(0)).toHaveValue('15');
-  await expect(timingSliders.nth(1)).toHaveValue('30');
+  await expect(timingSliders.nth(0)).toHaveValue('20');
+  await expect(timingSliders.nth(1)).toHaveValue('60');
 });
 
 test('restarting while audio loads cannot revive the practice transport', async ({ page }) => {
@@ -302,7 +302,7 @@ test('navigation and configuration controls stop an active practice cleanly', as
 test('a keyboard hit dismisses Statistics without starting practice', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
-  const stats = page.getByRole('dialog', { name: 'Practice statistics' });
+  const stats = page.getByRole('dialog', { name: 'Performance history' });
   await expect(stats).toBeVisible();
   await page.keyboard.press('Space');
   await expect(stats).toBeVisible();
@@ -327,7 +327,7 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await page.getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
 
-  await page.getByRole('button', { name: /Start practice/ }).click();
+  await page.getByRole('button', { name: /Start performance/ }).click();
   await page.evaluate(async () => {
     await new Promise(resolve => setTimeout(resolve, 165));
     for (let i = 0; i < 32; i++) {
@@ -335,13 +335,14 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
       await new Promise(resolve => setTimeout(resolve, 125));
     }
   });
-  const resultDialog=page.getByRole('dialog',{name:'Practice complete.'});
+  const resultDialog=page.getByRole('dialog',{name:'Performance complete.'});
   await expect(resultDialog).toBeVisible();
   await expect(resultDialog.getByText('SESSION SAVED · LOCALLY')).toHaveCount(0);
-  await expect(resultDialog.getByRole('heading', { name: 'Practice complete.' })).toBeVisible();
-  await expect(resultDialog.locator('.results-overview .score-ring')).toHaveCSS('width','92px');
-  await expect(resultDialog.locator('.hit-chip')).toContainText(/(?:[1-9]|[12]\d|3[0-2]) \/ 32 notes hit/);
+  await expect(resultDialog.getByRole('heading', { name: 'Performance complete.' })).toBeVisible();
+  await expect(resultDialog.locator('.result-score-pill')).toBeVisible();
   const accuracy=resultDialog.locator('.accuracy-legend article');
+  await expect(accuracy).toHaveCount(5);
+  await expect(accuracy.first()).toContainText('/ 32');
   for(const [index,label] of ['Perfect','Good','Early','Late','Missed'].entries())await expect(accuracy.nth(index).locator('span')).toContainText(label);
   await expect(resultDialog.locator('.timing-cards article')).toHaveCount(3);
   await expect(resultDialog.locator('.timing-focus')).toContainText('Focus for next time:');
@@ -376,9 +377,10 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   expect(landscapeResultLayout.scrollWidth).toBeLessThanOrEqual(landscapeResultLayout.clientWidth);
   await page.setViewportSize({width:1440,height:900});
   const pageUrl=page.url();
+  await page.waitForTimeout(2_050);
   await page.keyboard.press('j');
   await expect(page.locator('.result-backdrop')).toBeHidden();
-  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+  await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
   await expect(page.getByRole('button',{name:/Pause/})).toHaveCount(0);
   expect(page.url()).toBe(pageUrl);
   await page.keyboard.press('j');
@@ -386,7 +388,7 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await expect(page.locator('.workspace')).toBeVisible();
   expect(page.url()).toBe(pageUrl);
   await page.getByRole('button',{name:/Restart/}).click();
-  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+  await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
   await expect(page.getByRole('button',{name:/Pause/})).toHaveCount(0);
   await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
   await page.reload();
@@ -400,7 +402,7 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   expect(resultCloseChrome).toEqual(libraryCloseChrome);
   await library.getByRole('button',{name:'Close MIDI library'}).click();
   await page.getByRole('button',{name:'Stats'}).click();
-  const stats=page.getByRole('dialog',{name:'Practice statistics'});
+  const stats=page.getByRole('dialog',{name:'Performance history'});
   await expect(stats).toBeVisible();
   await expect(stats).toContainText('1');
   const statsMetrics=stats.locator('.stats-overview article');
@@ -411,7 +413,7 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await expect(stats).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Stats'})).toBeFocused();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await expect(page.getByText('1 completed session(s) stored only in this browser.')).toBeVisible();
+  await expect(page.getByText('1 completed performance(s) stored only in this browser.')).toBeVisible();
 });
 
 test('one drum hit dismisses results and a second hit starts the next run',async({page})=>{
@@ -420,7 +422,7 @@ test('one drum hit dismisses results and a second hit starts the next run',async
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
-  await page.getByRole('button',{name:/Start practice/}).click();
+  await page.getByRole('button',{name:/Start performance/}).click();
   await page.evaluate(async () => {
     await new Promise(resolve => setTimeout(resolve, 165));
     for (let i = 0; i < 32; i++) {
@@ -428,10 +430,13 @@ test('one drum hit dismisses results and a second hit starts the next run',async
       await new Promise(resolve => setTimeout(resolve, 125));
     }
   });
-  await expect(page.getByRole('dialog',{name:'Practice complete.'})).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Performance complete.'})).toBeVisible();
+  await page.keyboard.press('j');
+  await expect(page.getByRole('dialog',{name:'Performance complete.'})).toBeVisible();
+  await page.waitForTimeout(2_050);
   await page.keyboard.press('j');
   await expect(page.locator('.result-backdrop')).toBeHidden();
-  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
+  await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
   await expect(page.getByRole('button',{name:/Pause/})).toHaveCount(0);
   await page.keyboard.press('j');
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
@@ -468,13 +473,13 @@ test('a run with no drum input never shows hit circles',async({page})=>{
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
-  await page.getByRole('button',{name:/Start practice/}).click();
+  await page.getByRole('button',{name:/Start performance/}).click();
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
   await expect(page.locator('.judgement-halo')).toHaveCount(0);
   await expect(page.locator('.score-note[data-judgement="missed"]')).toHaveCount(0);
   await expect(page.locator('.missed-note-marker')).toHaveCount(0);
   await expect(page.locator('.judgement-halo')).toHaveCount(0);
-  await expect(page.getByRole('dialog',{name:'Practice complete.'})).toBeVisible({timeout:10000});
+  await expect(page.getByRole('dialog',{name:'Performance complete.'})).toBeVisible({timeout:10000});
   await expect(page.locator('.judgement-halo')).toHaveCount(0);
   await expect(page.locator('.missed-note-marker')).toHaveCount(0);
 });
@@ -597,13 +602,12 @@ test('built-in and personal MIDI import paths remain distinct and broken files e
   await expect(page.locator('#notation')).toContainText('L');
   await expect(page.locator('.warning-row')).toHaveCount(0);
   await expect(page.locator('.score-meta .file-details')).toHaveCount(0);
+  await page.locator('.score-file-info summary').click();
+  await expect(page.locator('.score-file-info-popover')).toContainText('1 playable drum track');
+  await expect(page.getByLabel('Drum track')).toBeHidden();
+  await page.locator('.score-file-info summary').click();
   await libraryTrigger.click();
-  const bundledCard=libraryDialog.locator('.bundled-entry').filter({hasText:'Single Paradiddle'});
-  const bundledInformation=bundledCard.getByRole('button',{name:'File information for Single Paradiddle.mid'});
-  await expect(libraryDialog.getByRole('button',{name:/File information for/})).toHaveCount(1);
-  await bundledInformation.click();
-  await expect(bundledCard.locator('.library-card-info-body')).toContainText('1 playable drum track');
-  await expect(libraryDialog.getByLabel('Drum track')).toBeHidden();
+  await expect(libraryDialog.getByRole('button',{name:/File information/})).toHaveCount(0);
   await libraryDialog.getByRole('button',{name:'Close MIDI library'}).click();
 
   const quarterChooser=page.waitForEvent('filechooser');
@@ -617,15 +621,13 @@ test('built-in and personal MIDI import paths remain distinct and broken files e
   await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
   await expect(page.locator('.warning-row')).toHaveCount(0);
   await expect(page.locator('.score-meta .file-details')).toHaveCount(0);
+  await page.locator('.score-file-info summary').click();
+  await expect(page.locator('.score-file-info-popover')).toContainText('1 playable drum track');
   await expect(page.getByLabel('Drum track')).toBeHidden();
+  await page.locator('.score-file-info summary').click();
   await libraryTrigger.click();
   await libraryDialog.getByRole('tab',{name:/Your imports/}).click();
-  const personalCard=libraryDialog.locator('.personal-library-card').filter({hasText:'quarter-note-reference.mid'});
-  const personalInformation=personalCard.getByRole('button',{name:'File information for quarter-note-reference.mid'});
-  await expect(libraryDialog.getByRole('button',{name:/File information for/})).toHaveCount(1);
-  await personalInformation.click();
-  await expect(personalCard.locator('.library-card-info-body')).toContainText('1 playable drum track');
-  await expect(libraryDialog.getByLabel('Drum track')).toBeHidden();
+  await expect(libraryDialog.getByRole('button',{name:/File information/})).toHaveCount(0);
   await libraryDialog.getByRole('button',{name:'Close MIDI library'}).click();
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve, reject) => {
     const request = indexedDB.open('rudiment');
@@ -679,6 +681,54 @@ test('built-in and personal MIDI import paths remain distinct and broken files e
   await chooser.setFiles({ name: 'broken.mid', mimeType: 'audio/midi', buffer: Buffer.from('not-midi') });
   await expect(libraryDialog).toHaveCount(0);
   await expect(page.locator('.error-row')).toContainText(/malformed|truncated/i);
+});
+
+test('score popovers stay inside the viewport and footer controls remain compact', async ({ page }) => {
+  for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/');
+
+    await page.locator('.score-file-info summary').click();
+    await expect(page.locator('.score-file-info-popover')).toBeVisible();
+    expect(await page.locator('.score-file-info-popover').evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= window.innerWidth && rect.top >= 0 && rect.bottom <= window.innerHeight;
+    })).toBe(true);
+    await page.locator('.score-file-info summary').click();
+
+    await page.getByLabel('Select bars').click();
+    await expect(page.locator('.bar-selection-popover')).toBeVisible();
+    await page.getByLabel('First selected bar').selectOption('1');
+    await page.getByLabel('Last selected bar').selectOption('2');
+    await expect(page.locator('.bar-selection-popover')).toBeVisible();
+    await expect(page.locator('.score-measure-number.selected-bar-number')).toHaveCount(2);
+    expect(await page.locator('.bar-selection-popover').evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= window.innerWidth && rect.top >= 0 && rect.bottom <= window.innerHeight;
+    })).toBe(true);
+    await expect(page.locator('.practice-toolbar')).toHaveCount(0);
+    await expect(page.locator('.mode-segment')).toHaveCount(0);
+
+    await page.getByLabel('Close bar selection').click();
+    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await page.getByLabel('Select bars').click();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await page.getByLabel('Select bars').click();
+    await page.locator('#notation').click({ position: { x: 12, y: 12 } });
+    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await page.getByLabel('Select bars').click();
+    await page.getByLabel('Select bars').click();
+    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await page.getByLabel('Select bars').click();
+    await page.getByRole('button', { name: 'Open settings' }).click();
+    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await page.getByRole('button', { name: 'Close settings' }).first().click();
+    await page.getByLabel('Select bars').click();
+    await page.getByRole('button', { name: 'All bars' }).click();
+    await page.getByLabel('Close bar selection').click();
+    await expect(page.locator('.start-button')).toContainText('Start performance');
+  }
 });
 
 test('a large personal MIDI library paginates without overflowing the modal', async ({ page }) => {
@@ -890,7 +940,8 @@ test('previously authorised sole MIDI input reconnects automatically', async ({ 
   });
   await page.goto('/');
   await expect(page.locator('.status-pill')).toContainText('Returning Kit · connected');
-  await expect(page.locator('.mode-badge')).toHaveText('MIDI INPUT');
+  await expect(page.locator('.mode-segment')).toHaveCount(0);
+  await expect(page.getByLabel('Select bars')).toBeVisible();
 });
 
 test('unplayed notes stay neutral and the playhead interpolates continuously', async ({ page }) => {
@@ -905,7 +956,7 @@ test('unplayed notes stay neutral and the playhead interpolates continuously', a
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
   const first=Number(await page.locator('#playhead').getAttribute('data-x'));
   await expect.poll(async()=>Number(await page.locator('#playhead').getAttribute('data-x')),{timeout:1500}).toBeGreaterThan(first);
-  expect(await page.locator('#playhead').evaluate(element=>(element as SVGElement).style.transform)).toContain('translate3d');
+  expect(Number(await page.locator('#playhead').getAttribute('x1'))).toBeGreaterThan(0);
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element).scrollBehavior)).toBe('auto');
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element).scrollbarWidth)).toBe('none');
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element,'::-webkit-scrollbar').display)).toBe('none');
@@ -918,6 +969,120 @@ test('unplayed notes stay neutral and the playhead interpolates continuously', a
   await page.getByRole('button',{name:/Resume/}).click();
   await expect.poll(()=>page.locator('#playhead').getAttribute('data-x')).not.toBe(paused);
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
+});
+
+test('playhead continues moving after entering bar two', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.evaluate(() => {
+    (window as any).__barTwoMotion = new Promise(resolve => {
+      let sawBarTwo = false;
+      let minimum = Number.POSITIVE_INFINITY;
+      let maximum = Number.NEGATIVE_INFINITY;
+      const sample = () => {
+        const playhead = document.querySelector('#playhead');
+        const bar = playhead?.getAttribute('data-bar');
+        const x = Number(playhead?.getAttribute('x1'));
+        if (bar === '1') {
+          sawBarTwo = true;
+          minimum = Math.min(minimum, x);
+          maximum = Math.max(maximum, x);
+        }
+        if (sawBarTwo && bar !== '1') {
+          resolve({ minimum, maximum });
+          return;
+        }
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+  });
+  await page.getByRole('button', { name: /Start practice/ }).click();
+
+  const motion = await page.evaluate(() => (window as any).__barTwoMotion as Promise<{ minimum: number; maximum: number }>);
+  expect(motion.maximum - motion.minimum).toBeGreaterThan(100);
+  await expect(page.locator('#playhead')).not.toHaveAttribute('style', /transform/);
+  await page.getByRole('button', { name: /Restart/ }).click();
+});
+
+test('count-in for a selected bar never traverses the preceding bar', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByLabel('Select bars').click();
+  await page.getByLabel('First selected bar').selectOption('3');
+  await page.getByLabel('Last selected bar').selectOption('3');
+  await page.getByLabel('Close bar selection').click();
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('1');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await expect(page.getByLabel('Select bars')).toContainText('BAR 4 / 4');
+
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect.poll(() => page.locator('#notation').evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(8.25);
+  expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat)).toBeLessThan(12);
+  await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
+
+  await expect(page.locator('#playhead')).toHaveClass(/visible/, { timeout: 3_000 });
+  await expect(page.locator('#playhead')).toHaveAttribute('data-bar', '3');
+  await expect(page.getByText(/BAR 4 \/ 4/)).toBeVisible();
+  await page.getByRole('button', { name: /Restart/ }).click();
+});
+
+test('early first downbeat and later loop hits stay on the selected bar', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByLabel('Select bars').click();
+  await page.getByLabel('First selected bar').selectOption('1');
+  await page.getByLabel('Last selected bar').selectOption('1');
+  await page.getByLabel('Close bar selection').click();
+  await page.getByLabel('Loops').selectOption('4');
+  await page.getByRole('button', { name: /Start practice/ }).click();
+
+  const firstHit = page.evaluate(() => new Promise<void>(resolve => {
+    const sample = () => {
+      const beat = (window as any).rudiment.audioDiagnostics().currentBeat;
+      if (beat >= 3.82 && beat < 4) {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+        resolve();
+      } else requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }));
+  await firstHit;
+  await expect(page.locator('.score-note[data-beat="4"]')).toHaveAttribute('data-judgement', /perfect|good|early/);
+
+  await page.evaluate(() => new Promise<void>(resolve => {
+    const sample = () => {
+      const beat = (window as any).rudiment.audioDiagnostics().currentBeat;
+      if (beat >= 8.02 && beat < 8.3) {
+        for (let index = 0; index < 6; index++)
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+        resolve();
+      } else requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }));
+  await expect(page.locator('.score-note[data-beat="4"]')).toHaveAttribute('data-judgement', /perfect|good|early|late/);
+  await expect(page.locator('.unmatched-hit-marker').first()).toHaveAttribute('data-system-row', '1');
+  await expect(page.locator('.score-note[data-score-bar="2"][data-judgement]')).toHaveCount(0);
+  await page.evaluate(() => new Promise<void>(resolve => {
+    const sample = () => {
+      const beat = (window as any).rudiment.audioDiagnostics().currentBeat;
+      if (beat >= 12.02 && beat < 12.3) {
+        for (let index = 0; index < 6; index++)
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+        resolve();
+      } else requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }));
+  await expect(page.locator('.unmatched-hit-marker').first()).toHaveAttribute('data-system-row', '1');
+  await page.getByRole('button', { name: /Restart/ }).click();
 });
 
 test('score keeps one bar per system and follows playback vertically without horizontal scrolling',async({page})=>{
@@ -1383,10 +1548,20 @@ test('loop and restart leave practice stopped until started again', async ({ pag
   await page.getByLabel('Tempo in BPM').fill('240');
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByLabel('Count-in').selectOption('0');
-  await page.getByLabel('Loops').selectOption('2');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByLabel('Select bars').click();
+  await page.getByLabel('First selected bar').selectOption('0');
+  await page.getByLabel('Last selected bar').selectOption('0');
+  await page.getByLabel('Close bar selection').click();
+  await page.getByLabel('Loops').selectOption('2');
   await page.getByRole('button', { name: /Start practice/ }).click();
-  await expect(page.getByText('2 / 2 LOOP')).toBeVisible({ timeout: 6_000 });
+  await expect(page.getByLabel('Loops')).toHaveValue('2');
+  await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  await page.keyboard.press('j');
+  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(4.1);
+  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
+  await expect(page.locator('.unmatched-hit-marker')).toHaveCount(0);
   await page.getByRole('button', { name: /Restart/ }).click();
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
   await expect(page.locator('.feedback-strip')).toHaveCount(0);
@@ -1399,6 +1574,10 @@ test('repeat-until-good setting persists and retries a failed bar', async ({ pag
   await page.getByLabel('Count-in').selectOption('0');
   const repeatBar = page.getByLabel('Repeat bar until Good');
   await repeatBar.check();
+  await page.getByLabel('Repeat tolerance').selectOption('strict');
+  await expect(page.getByLabel('Repeat tolerance')).toHaveValue('strict');
+  await page.getByLabel('Repeat tolerance').selectOption('standard');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
   await expect.poll(() => page.evaluate(() => new Promise<boolean | undefined>((resolve, reject) => {
     const request = indexedDB.open('rudiment');
     request.onerror = () => reject(request.error);
@@ -1408,7 +1587,6 @@ test('repeat-until-good setting persists and retries a failed bar', async ({ pag
       get.onsuccess = () => resolve(get.result?.value?.repeatBarUntilGood);
     };
   }))).toBe(true);
-  await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.evaluate(() => {
     let started = false;
     const label = document.querySelector('.position-row span')!;
@@ -1436,6 +1614,48 @@ test('repeat-until-good setting persists and retries a failed bar', async ({ pag
   await page.reload();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await expect(page.getByLabel('Repeat bar until Good')).toBeChecked();
+  await expect(page.getByLabel('Repeat tolerance')).toHaveValue('standard');
+});
+
+test('single-bar repetition preserves the visible score and reuses its SVG', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto('/');
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByLabel('Select bars').click();
+  await page.getByLabel('First selected bar').selectOption('2');
+  await page.getByLabel('Last selected bar').selectOption('2');
+  await page.getByLabel('Close bar selection').click();
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByLabel('Repeat bar until Good').check();
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+
+  await page.evaluate(() => {
+    const notation = document.querySelector<HTMLElement>('#notation')!;
+    const originalSvg = notation.querySelector('svg')!;
+    (window as any).__repeatViewport = { before: -1, after: -1, sameSvg: false, playheadBeat: -1 };
+    const label = document.querySelector('.bar-selection-trigger span')!;
+    new MutationObserver(() => {
+      if (!label.textContent?.includes('TRY 2') || (window as any).__repeatViewport.before >= 0) return;
+      (window as any).__repeatViewport.before = notation.scrollTop;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        (window as any).__repeatViewport.after = notation.scrollTop;
+        (window as any).__repeatViewport.sameSvg = notation.querySelector('svg') === originalSvg;
+        (window as any).__repeatViewport.playheadBeat = (window as any).rudiment.audioDiagnostics().currentBeat;
+      }));
+    }).observe(label, { childList: true, subtree: true, characterData: true });
+  });
+
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect(page.getByText(/BAR 3 \/ 3 · TRY 2/)).toBeVisible({ timeout: 4_000 });
+  await expect.poll(() => page.evaluate(() => (window as any).__repeatViewport.after)).toBeGreaterThanOrEqual(0);
+  const viewport = await page.evaluate(() => (window as any).__repeatViewport as { before: number; after: number; sameSvg: boolean; playheadBeat: number });
+  expect(viewport.before).toBeGreaterThan(0);
+  expect(Math.abs(viewport.after - viewport.before)).toBeLessThan(2);
+  expect(viewport.sameSvg).toBe(true);
+  expect(viewport.playheadBeat).toBeGreaterThanOrEqual(8);
+  expect(viewport.playheadBeat).toBeLessThan(9);
+  await page.getByRole('button', { name: /Restart/ }).click();
 });
 
 test('bar retries stay on tempo and pause/resume preserves position without scoring paused hits', async ({ page }) => {

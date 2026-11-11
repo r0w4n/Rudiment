@@ -237,7 +237,7 @@ const audio = {
     await this.ensure();
     if(generation!==this.generation)return {cancelled:true,state:this.state};
     const transport = Tone.getTransport(), tempoMap=(options.tempoMap||[]).slice().sort((a,b)=>a.beat-b.beat),sourceBpm=options.sourceBpm||options.bpm,tempoScale=options.bpm/sourceBpm,offset = options.offsetBeat || 0,initialBpm=tempoAtBeat(offset,tempoMap,sourceBpm)*tempoScale,countBeats = options.countInBars * options.meter;
-    const remaining = Math.max(0, options.totalBeats - offset), startDelay = options.immediate ? 0 : .16;
+    const remaining = Math.max(0, options.totalBeats - offset), startDelay = 0;
     const countInSeconds=countBeats*60/initialBpm,runAudio = this.raw.currentTime + startDelay + countInSeconds;
     const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
     const referenceNotes=(options.referenceNotes||[]).filter(note=>Number.isFinite(Number(note.beat))&&Number(note.beat)>=offset-.000001&&Number(note.beat)<options.totalBeats-.000001&&Number(note.velocity)>0);
@@ -261,6 +261,9 @@ const audio = {
     let practiceStep=Math.ceil(offset*subdivision);
     const firstPracticeBeat=countBeats+practiceStep/subdivision-offset;
     transport.scheduleRepeat(time=>scheduleClick(time,practiceStep++),interval,transportPositionAtBeat(firstPracticeBeat,options.meter));
+    const initialBeat=offset-countBeats;
+    this.lastBeat=initialBeat;
+    onFrame(initialBeat,performance.now(),runPerformance);
     transport.start(startDelay ? `+${startDelay}` : undefined);
     let lastStateFrame=-Infinity;
     const frame = () => {
@@ -271,8 +274,12 @@ const audio = {
       const now = performance.now(), elapsedBeats=transport.ticks/transport.PPQ;
       const beat = offset + elapsedBeats-countBeats;
       this.lastBeat=beat;
-      const scoreBeat=beat>=0?beat%options.exerciseBeats:beat;
-      updateScore(scoreBeat,undefined);
+      const rangeStart=Number(options.displayRangeStart)||0,rangeBeats=Math.max(.001,Number(options.displayRangeBeats)||options.exerciseBeats);
+      // Count-in beats are transport time, not playable exercise beats. For a
+      // later selected range they numerically overlap the preceding bar, so
+      // keep the playhead hidden until the selected playback offset begins.
+      const scoreBeat=beat>=offset?rangeStart+((beat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats:-1;
+      updateScore(scoreBeat,undefined,true);
       visualMetronome.render(beat,options.meter,subdivision,now);
       // UI counters and scoring state do not need 60 updates per second. Keep
       // the playhead on every display frame, independent of the WASM work.
@@ -293,7 +300,16 @@ const audio = {
 };
 
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
-let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+let selectedBarRange={start:0,end:Number.MAX_SAFE_INTEGER};
+function applySelectedBarRange(){
+  if(!scoreData.svg)return;
+  for(const label of scoreData.svg.querySelectorAll('.score-measure-number[data-score-bar]')){
+    const bar=Number(label.dataset.scoreBar);
+    label.classList.toggle('selected-bar-number',bar>=selectedBarRange.start&&bar<=selectedBarRange.end);
+  }
+}
+function setSelectedBars(start,end){selectedBarRange={start:Number(start)||0,end:Number.isFinite(Number(end))?Number(end):Number.MAX_SAFE_INTEGER};applySelectedBarRange();}
 let scoreResizeObserver=null;
 const handText = hand => hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·';
 const durationTable=[[4,'w',false,false],[3,'h',true,false],[2,'h',false,false],[1.5,'q',true,false],[1,'q',false,false],[.75,'8',true,false],[2/3,'q',false,true],[.5,'8',false,false],[.375,'16',true,false],[1/3,'8',false,true],[.25,'16',false,false],[1/6,'16',false,true],[.125,'32',false,false]];
@@ -506,6 +522,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
     const stave=staves[barLayouts[bar].row],label=document.createElementNS('http://www.w3.org/2000/svg','text');
     const x=bar===0||bar%barsPerLine===0?stave.getX()+6:barLayouts[bar].xStart-8;
     label.setAttribute('class','score-measure-number');label.setAttribute('x',String(x));
+    label.dataset.scoreBar=String(bar);
     label.setAttribute('y',String(stave.getYForLine(0)-12));label.setAttribute('text-anchor',bar===0||bar%barsPerLine===0?'start':'end');
     label.setAttribute('font-family','Inter, sans-serif');label.setAttribute('font-size','10');label.setAttribute('font-weight','600');
     label.setAttribute('fill','#666d68');label.textContent=String(bar+1);svg?.appendChild(label);
@@ -553,7 +570,8 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
     if(meta.hit?.id)noteByExpectedId.set(meta.hit.id,meta);
     noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`,meta);
   }
-  scoreData={notes:notesMeta,noteByExpectedId,noteByBeatInstrument,appliedExpectedJudgements:new Map(),svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:0,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  scoreData={notes:notesMeta,noteByExpectedId,noteByBeatInstrument,appliedExpectedJudgements:new Map(),svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:0,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  applySelectedBarRange();
   applyJudgements(previousJudgements);updateScore(previousBeat,null);
   if(typeof ResizeObserver!=='undefined'){
     scoreResizeObserver??=new ResizeObserver(entries=>{
@@ -582,6 +600,20 @@ function cameraAtBeat(beat,position) {
   const from=Math.min((position.row-1)*scoreData.rowHeight,scoreData.maxScroll);
   const to=Math.min(position.row*scoreData.rowHeight,scoreData.maxScroll);
   return from+(to-from)*eased;
+}
+function scrollScoreToBeat(beat) {
+  const {container,bars,rowHeight,maxScroll}=scoreData;
+  if(!container||!bars.length)return;
+  const position=positionAtBeat(beat);
+  const target=Math.min(position.row*rowHeight,maxScroll);
+  container.scrollTop=target;
+  container.scrollLeft=0;
+  scoreData.cameraY=target;
+  // The run's first score update occurs at the exact bar boundary. Preserve
+  // this deliberate starting viewport through that bar instead of letting the
+  // normal inter-system camera transition move it back one row.
+  scoreData.preserveCameraBar=position.bar;
+  scoreData.preserveViewportOnRewind=false;
 }
 function expectedJudgementKey(result){return result.expected_id?`id:${result.expected_id}`:`beat:${Number(result.expected_beat).toFixed(6)}|${result.instrument??''}`;}
 function noteForJudgement(result){
@@ -632,24 +664,41 @@ function applyJudgements(judgements) {
     const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',String(position.x));circle.setAttribute('cy',String(headY));circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
   }
 }
-function updateScore(beat, judgements) {
+function updateScore(beat, judgements, loopAware=false) {
   const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
   if(Array.isArray(judgements))applyJudgements(judgements);
-  scoreData.lastBeat=beat;
+  const previousBeat=scoreData.lastBeat;
   const position=positionAtBeat(beat),playhead=svg.querySelector('#playhead');
+  const rewound=beat>=0&&previousBeat>=0&&beat<previousBeat-.001;
+  const targetAlreadyVisible=position.y1>=container.scrollTop-1&&position.y2<=container.scrollTop+container.clientHeight+1;
+  const previousBar=previousBeat>=0?Math.floor(Math.max(0,previousBeat-.000001)/scoreData.meter):-1;
+  if(rewound&&(loopAware||scoreData.preserveViewportOnRewind)&&(previousBar===position.bar||targetAlreadyVisible))scoreData.preserveCameraBar=position.bar;
+  if(beat>=0)scoreData.preserveViewportOnRewind=false;
+  scoreData.lastBeat=beat;
   if(playhead){
-    playhead.style.transform=`translate3d(${position.x}px,0,0)`;
+    // Keep the playhead in the SVG coordinate system. A composited CSS 3D
+    // transform can stop repainting in WebKit when y1/y2 change at a system
+    // boundary, leaving the line apparently frozen at the start of bar two.
+    playhead.setAttribute('x1',String(position.x));
+    playhead.setAttribute('x2',String(position.x));
     playhead.dataset.x=String(position.x);
     if(position.row!==scoreData.lastPlayheadRow){playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);scoreData.lastPlayheadRow=position.row;}
     const visible=beat>=0&&beat<=scoreData.totalBeats;
     if(visible!==scoreData.lastPlayheadVisible){playhead.classList.toggle('visible',visible);scoreData.lastPlayheadVisible=visible;}
   }
   if(beat>=0){
-    const cameraY=cameraAtBeat(beat,position);
-    if(Math.abs(cameraY-scoreData.cameraY)>.05){container.scrollTop=cameraY;scoreData.cameraY=cameraY;}
+    const preservedBar=scoreData.preserveCameraBar;
+    const stillPreserving=preservedBar!==null&&(position.bar===preservedBar||beat<=(preservedBar+1)*scoreData.meter+.001);
+    if(stillPreserving){
+      scoreData.cameraY=container.scrollTop;
+    }else{
+      scoreData.preserveCameraBar=null;
+      const cameraY=cameraAtBeat(beat,position);
+      if(Math.abs(cameraY-scoreData.cameraY)>.05){container.scrollTop=cameraY;scoreData.cameraY=cameraY;}
+    }
   }
 }
-function clearScoreFeedback() {
+function clearScoreFeedback(preserveViewport=false) {
   const empty=[];
   for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
@@ -659,11 +708,15 @@ function clearScoreFeedback() {
   }
   scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;
   scoreData.appliedExpectedJudgements=new Map();
-  scoreData.lastBeat=-Infinity;
   scoreData.svg?.querySelector('#unmatched-markers')?.replaceChildren();
+  if(preserveViewport){scoreData.cameraY=scoreData.container.scrollTop;scoreData.preserveViewportOnRewind=true;return;}
+  scoreData.lastBeat=-Infinity;
+  scoreData.preserveCameraBar=null;
+  scoreData.preserveViewportOnRewind=false;
   scoreData.cameraY=0;scoreData.container.scrollTop=0;scoreData.container.scrollLeft=0;
   updateScore(-99,empty);
 }
+function clearScoreFeedbackPreserveViewport(){clearScoreFeedback(true);}
 
 let selectedInput = null, midiCallback = null, midiBound = false;
 const portInfo = input => ({id:input.id,name:input.name||'Unnamed MIDI input',manufacturer:input.manufacturer||'Unknown manufacturer',state:input.state,connection:input.connection});
@@ -722,7 +775,7 @@ function downloadJson(value,name){const anchor=document.createElement('a');ancho
 window.rudiment={
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],fallbackHits:audio.fallbackHits,snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,updateScore,clearScoreFeedback,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,
+  renderScore,setSelectedBars,scrollScoreToBeat,updateScore,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };
