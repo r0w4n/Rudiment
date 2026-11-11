@@ -22,6 +22,13 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(startButton.locator('.start-instruction')).toHaveText('Hit your drum or press J to start');
   await expect(page.getByText('Hit your drum or press J to start',{exact:true})).toHaveCount(1);
   await expect(page.locator('.tempo-control button svg.lucide')).toHaveCount(2);
+  const tempoContentOffset=await page.locator('.tempo-control label').evaluate(label=>{
+    const input=label.querySelector('input')!.getBoundingClientRect();
+    const unit=label.querySelector('span')!.getBoundingClientRect();
+    const bounds=label.getBoundingClientRect();
+    return (input.left+unit.right)/2-(bounds.left+bounds.right)/2;
+  });
+  expect(Math.abs(tempoContentOffset)).toBeLessThan(1);
   const statsButton=page.getByRole('button',{name:'Stats'});
   await expect(statsButton).toBeVisible();
   await expect(statsButton.locator('svg')).toHaveCount(1);
@@ -335,23 +342,24 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
       await new Promise(resolve => setTimeout(resolve, 125));
     }
   });
-  const resultDialog=page.getByRole('dialog',{name:'Performance complete.'});
+  const resultDialog=page.getByRole('dialog',{name:'Session Complete'});
   await expect(resultDialog).toBeVisible();
   await expect(resultDialog.getByText('SESSION SAVED · LOCALLY')).toHaveCount(0);
-  await expect(resultDialog.getByRole('heading', { name: 'Performance complete.' })).toBeVisible();
-  await expect(resultDialog.locator('.result-score-pill')).toBeVisible();
-  const accuracy=resultDialog.locator('.accuracy-legend article');
-  await expect(accuracy).toHaveCount(5);
-  await expect(accuracy.first()).toContainText('/ 32');
-  for(const [index,label] of ['Perfect','Good','Early','Late','Missed'].entries())await expect(accuracy.nth(index).locator('span')).toContainText(label);
-  await expect(resultDialog.locator('.timing-cards article')).toHaveCount(3);
-  await expect(resultDialog.locator('.timing-focus')).toContainText('Focus for next time:');
+  await expect(resultDialog.getByRole('heading', { name: 'Session Complete' })).toBeVisible();
+  await expect(resultDialog.locator('.score-summary-card')).toBeVisible();
+  await expect(resultDialog.locator('.new-high-score')).toBeHidden();
+  const breakdown=resultDialog.locator('.breakdown-row');
+  await expect(breakdown).toHaveCount(5);
+  await expect(breakdown.first()).toContainText('/ 32');
+  for(const [index,label] of ['Perfect','Good','Early','Late','Missed'].entries())await expect(breakdown.nth(index).locator('span')).toContainText(label);
+  await expect(resultDialog.locator('.progress-chart')).toBeVisible();
+  await expect(resultDialog.locator('.progress-point')).toHaveCount(1);
+  await expect(resultDialog.getByText(/Average offset|Mean absolute error|Timing variability|Focus for next time/i)).toHaveCount(0);
   const resultModalLayout=await resultDialog.evaluate(element=>({clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,overflow:getComputedStyle(element).overflow}));
   expect(resultModalLayout.scrollHeight).toBeLessThanOrEqual(resultModalLayout.clientHeight);
   expect(resultModalLayout.overflow).toBe('hidden');
   const resultCloseChrome=await resultDialog.getByRole('button',{name:'Close session results'}).evaluate(element=>{const style=getComputedStyle(element);return {width:style.width,height:style.height,borderRadius:style.borderRadius,background:style.backgroundColor,borderColor:style.borderTopColor};});
-  await expect(resultDialog.getByText('Single Paradiddle', { exact:true })).toBeVisible();
-  await expect(resultDialog.getByText('240 BPM · Demo input')).toBeVisible();
+  await expect(resultDialog.getByText('Single Paradiddle · 240 BPM', { exact:true })).toBeVisible();
   await expect(page.locator('.workspace')).toBeVisible();
   const overlayBounds=await page.evaluate(()=>{
     const overlay=document.querySelector('.result-backdrop')!.getBoundingClientRect();
@@ -363,6 +371,7 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   expect(overlayBounds.overlay.width).toBe(overlayBounds.viewport.width);
   expect(overlayBounds.overlay.height).toBe(overlayBounds.viewport.height);
   expect(overlayBounds.modal.width).toBeLessThan(overlayBounds.viewport.width);
+  expect(overlayBounds.modal.width).toBeLessThanOrEqual(900);
   await page.screenshot({ path: 'artifacts/completed-result.png', fullPage: true });
   await page.setViewportSize({width:412,height:915});
   const narrowResultLayout=await resultDialog.evaluate(element=>({clientWidth:element.clientWidth,scrollWidth:element.scrollWidth,clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,rect:element.getBoundingClientRect().toJSON()}));
@@ -370,7 +379,7 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   expect(narrowResultLayout.scrollHeight).toBeLessThanOrEqual(narrowResultLayout.clientHeight);
   expect(narrowResultLayout.rect.x).toBeGreaterThanOrEqual(5);
   expect(narrowResultLayout.rect.right).toBeLessThanOrEqual(407);
-  await expect(resultDialog.locator('.results-footer')).toBeVisible();
+  await expect(resultDialog.locator('.summary-footer')).toBeVisible();
   await page.setViewportSize({width:915,height:412});
   const landscapeResultLayout=await resultDialog.evaluate(element=>({clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,clientWidth:element.clientWidth,scrollWidth:element.scrollWidth}));
   expect(landscapeResultLayout.scrollHeight).toBeLessThanOrEqual(landscapeResultLayout.clientHeight);
@@ -416,6 +425,43 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await expect(page.getByText('1 completed performance(s) stored only in this browser.')).toBeVisible();
 });
 
+test('progress chart uses persisted scores for the same exercise and tempo',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(async()=>new Promise<void>((resolve,reject)=>{
+    const request=indexedDB.open('rudiment',2);
+    request.onerror=()=>reject(request.error);
+    request.onsuccess=()=>{
+      const db=request.result,transaction=db.transaction('sessions','readwrite'),store=transaction.objectStore('sessions');
+      for(const [index,score] of [42,58,67].entries())store.put({
+        id:`seed-${index}`,endedAt:`2026-11-10T18:0${index}:00Z`,exerciseId:'single-paradiddle',exerciseTitle:'Single Paradiddle',exerciseHash:'builtin-paradiddle-v1',bpm:240,inputMode:'demo',scoringVersion:'v3',toleranceMs:60,latencyMs:0,
+        summary:{score,matched:32,expected:32,missed:0,extras:0,wrong_instrument:0,mean_abs_error_ms:20,signed_mean_error_ms:0,timing_consistency_ms:10,scoring_version:'v3',results:[]},
+        observed:[],schemaVersion:1,mode:'performance'
+      });
+      transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error);
+    };
+  }));
+  await page.reload();
+  await page.getByLabel('Tempo in BPM').fill('240');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start performance/}).click();
+  await page.evaluate(async()=>{
+    await new Promise(resolve=>setTimeout(resolve,165));
+    for(let index=0;index<32;index++){
+      window.dispatchEvent(new KeyboardEvent('keydown',{key:'j',bubbles:true}));
+      await new Promise(resolve=>setTimeout(resolve,125));
+    }
+  });
+  const resultDialog=page.getByRole('dialog',{name:'Session Complete'});
+  await expect(resultDialog.locator('.progress-point')).toHaveCount(4);
+  await expect(resultDialog.locator('.progress-line')).toHaveAttribute('points',/\s/);
+  await expect(resultDialog.locator('.progress-point.latest')).toHaveCount(1);
+  const currentScore=Number(await resultDialog.locator('.summary-score strong').textContent());
+  if(currentScore>67)await expect(resultDialog.locator('.new-high-score')).toBeVisible();
+  else await expect(resultDialog.locator('.new-high-score')).toBeHidden();
+});
+
 test('one drum hit dismisses results and a second hit starts the next run',async({page})=>{
   await page.goto('/');
   await page.getByLabel('Tempo in BPM').fill('240');
@@ -430,9 +476,9 @@ test('one drum hit dismisses results and a second hit starts the next run',async
       await new Promise(resolve => setTimeout(resolve, 125));
     }
   });
-  await expect(page.getByRole('dialog',{name:'Performance complete.'})).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Session Complete'})).toBeVisible();
   await page.keyboard.press('j');
-  await expect(page.getByRole('dialog',{name:'Performance complete.'})).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Session Complete'})).toBeVisible();
   await page.waitForTimeout(2_050);
   await page.keyboard.press('j');
   await expect(page.locator('.result-backdrop')).toBeHidden();
@@ -479,7 +525,7 @@ test('a run with no drum input never shows hit circles',async({page})=>{
   await expect(page.locator('.score-note[data-judgement="missed"]')).toHaveCount(0);
   await expect(page.locator('.missed-note-marker')).toHaveCount(0);
   await expect(page.locator('.judgement-halo')).toHaveCount(0);
-  await expect(page.getByRole('dialog',{name:'Performance complete.'})).toBeVisible({timeout:10000});
+  await expect(page.getByRole('dialog',{name:'Session Complete'})).toBeVisible({timeout:10000});
   await expect(page.locator('.judgement-halo')).toHaveCount(0);
   await expect(page.locator('.missed-note-marker')).toHaveCount(0);
 });

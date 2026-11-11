@@ -1,7 +1,7 @@
 use js_sys::{Array, Date, Function, Promise, Uint8Array};
 use leptos::prelude::*;
 use lucide_leptos::{
-    ArrowLeft, ArrowRight, ChartNoAxesCombined, Clock3, FolderOpen, Info, Minus, Pause, Play, Plus,
+    ArrowLeft, ArrowRight, ChartNoAxesCombined, FolderOpen, Info, Minus, Pause, Play, Plus,
     RotateCcw, Settings as SettingsIcon, Star, X,
 };
 use rudiment_core::{
@@ -365,25 +365,114 @@ fn percentage(count: usize, total: usize) -> f64 {
     }
 }
 
-fn timing_focus(summary: &SessionSummary) -> String {
-    match summary.signed_mean_error_ms {
-        Some(value) if value > 5.0 => format!(
-            "You're averaging {:.0} ms behind the beat. Try to land each stroke with the click rather than after it.",
-            value
-        ),
-        Some(value) if value < -5.0 => format!(
-            "You're averaging {:.0} ms ahead of the beat. Relax into the click and let it arrive with your stroke.",
-            value.abs()
-        ),
-        Some(_) => "Your average timing is centred on the beat. Keep the same relaxed pulse as the tempo rises.".into(),
-        None => "Play the next run with the click to unlock a personalised timing focus.".into(),
-    }
-}
-
 fn display_score(score: Option<f64>) -> String {
     score
         .map(|value| format!("{value:.0}"))
         .unwrap_or_else(|| "—".into())
+}
+
+fn is_new_high_score(current: &SessionRecord, history: &[SessionRecord]) -> bool {
+    let Some(score) = current.summary.score else {
+        return false;
+    };
+    history
+        .iter()
+        .filter(|session| {
+            session.id != current.id
+                && session.exercise_hash == current.exercise_hash
+                && session.scoring_version == current.scoring_version
+        })
+        .filter_map(|session| session.summary.score)
+        .max_by(f64::total_cmp)
+        .is_some_and(|previous_best| score > previous_best)
+}
+
+fn is_white_mastery(summary: &SessionSummary) -> bool {
+    let expected_results = summary
+        .results
+        .iter()
+        .filter(|result| result.expected_id.is_some())
+        .collect::<Vec<_>>();
+    summary.expected > 0
+        && expected_results.len() == summary.expected
+        && summary.missed == 0
+        && summary.extras == 0
+        && summary.wrong_instrument == 0
+        && expected_results.iter().all(|result| {
+            matches!(
+                result.judgement,
+                Judgement::Perfect | Judgement::Good | Judgement::OnTime
+            )
+        })
+}
+
+fn achievement_copy(summary: &SessionSummary) -> (&'static str, &'static str) {
+    if is_white_mastery(summary) {
+        ("Mastered!", "Every expected note landed cleanly.")
+    } else {
+        match performance_rating(summary).stars {
+            3 => (
+                "Exercise complete!",
+                "Strong work — keep refining the details.",
+            ),
+            2 => ("Good job!", "You're on the right track. Keep it up!"),
+            1 => (
+                "Good start!",
+                "Keep building consistency one run at a time.",
+            ),
+            _ => ("Keep going!", "Every focused attempt moves you forward."),
+        }
+    }
+}
+
+fn progress_scores(current: &SessionRecord, history: &[SessionRecord]) -> Vec<f64> {
+    let mut matching = history
+        .iter()
+        .filter(|session| {
+            session.exercise_hash == current.exercise_hash
+                && (session.bpm - current.bpm).abs() < 0.01
+                && session.scoring_version == current.scoring_version
+                && session.summary.score.is_some()
+        })
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| {
+        left.ended_at
+            .cmp(&right.ended_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut scores = matching
+        .into_iter()
+        .filter_map(|session| session.summary.score)
+        .collect::<Vec<_>>();
+    if !history.iter().any(|session| session.id == current.id)
+        && let Some(score) = current.summary.score
+    {
+        scores.push(score);
+    }
+    if scores.len() > 10 {
+        scores.drain(..scores.len() - 10);
+    }
+    scores
+}
+
+fn progress_chart_points(scores: &[f64]) -> Vec<(f64, f64)> {
+    const LEFT: f64 = 48.0;
+    const RIGHT: f64 = 712.0;
+    const TOP: f64 = 14.0;
+    const BOTTOM: f64 = 146.0;
+    scores
+        .iter()
+        .enumerate()
+        .map(|(index, score)| {
+            let x = if scores.len() <= 1 {
+                (LEFT + RIGHT) / 2.0
+            } else {
+                LEFT + (RIGHT - LEFT) * index as f64 / (scores.len() - 1) as f64
+            };
+            let y = BOTTOM - (BOTTOM - TOP) * score.clamp(0.0, 100.0) / 100.0;
+            (x, y)
+        })
+        .collect()
 }
 
 fn exercise_beats(exercise: &Exercise) -> f64 {
@@ -2188,31 +2277,40 @@ fn App() -> impl IntoView {
                     _=>{},
                   }
                 }>
-                <div class="stats-modal-header results-header"><div><span class="eyebrow">"PERFORMANCE SUMMARY"</span><h2 id="result-title">"Performance complete."</h2></div><button id="result-modal-close" aria-label="Close session results" on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);restore_result_focus();}><X size=20/></button></div>
-                <div class="results-overview">
-                  <div class="result-award">
-                    <div class=move || if result.get().is_some_and(|session|performance_rating(&session.summary).award==PerformanceAward::Mastered){"star-rating mastered"}else{"star-rating"} aria-label=move || result.get().map(|session|{let rating=performance_rating(&session.summary);match rating.award{PerformanceAward::Mastered=>"Mastered, three gold stars".into(),PerformanceAward::Completed=>"Completed, three white stars".into(),_=>format!("{} of 3 stars",rating.stars)}}).unwrap_or_default()>{move || {let rating=result.get().map(|session|performance_rating(&session.summary)).unwrap_or(PerformanceRating{stars:0,award:PerformanceAward::None});(0..3).map(|index|view!{<Star size=54 fill=if index<rating.stars{"currentColor"}else{"none"}/>}).collect_view()}}</div>
-                    <span class=move || if result.get().is_some_and(|session|performance_rating(&session.summary).award==PerformanceAward::Mastered){"mastery-badge mastered"}else{"mastery-badge"}>{move || result.get().map(|session|match performance_rating(&session.summary).award{PerformanceAward::Mastered=>"Gold mastery",PerformanceAward::Completed=>"Gold mastery next",PerformanceAward::TwoStars=>"Completion next",PerformanceAward::OneStar=>"Two stars next",PerformanceAward::None=>"One star next"}).unwrap_or("")}</span>
-                  </div>
-                  <div class="result-exercise"><h3>{move || result.get().map(|session|session.exercise_title).unwrap_or_default()}</h3><p>{move || result.get().map(|session|format!("{:.0} BPM · {} input",session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"})).unwrap_or_default()}</p><span class="result-score-pill"><small>"Score"</small><strong>{move || display_score(result.get().and_then(|session|session.summary.score))}</strong></span></div>
-                  <div class="result-comparison"><div><span>"PREVIOUS RUN"</span><strong>{move || comparison.get().map(|delta|if delta > 0.05{format!("+{delta:.1} pts") }else if delta < -0.05{format!("{delta:.1} pts")}else{"No change".into()}).unwrap_or_else(||"First run".into())}</strong></div><div><span>"PERSONAL BEST"</span><strong>{move || result.get().map(|session|{let best=history.get().iter().filter(|item|item.exercise_hash==session.exercise_hash&&(item.bpm-session.bpm).abs()<0.01&&item.input_mode==session.input_mode&&item.scoring_version==session.scoring_version&&(item.tolerance_ms-session.tolerance_ms).abs()<0.01).filter_map(|item|item.summary.score).max_by(|left,right|left.total_cmp(right)).or(session.summary.score);display_score(best)}).unwrap_or_else(||"—".into())}</strong></div></div>
+                <header class="summary-header">
+                  <div class="summary-title-group"><span class="summary-icon" aria-hidden="true">"R"</span><div><h2 id="result-title">"Session Complete"</h2><p>{move || result.get().map(|session|format!("{} · {:.0} BPM",session.exercise_title,session.bpm)).unwrap_or_default()}</p></div></div>
+                  <button id="result-modal-close" aria-label="Close session results" on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);restore_result_focus();}><X size=21/></button>
+                </header>
+                <section class="summary-achievement">
+                  <div class=move || if result.get().is_some_and(|session|is_white_mastery(&session.summary)){"summary-stars mastery"}else{"summary-stars"} aria-label=move || result.get().map(|session|{let rating=performance_rating(&session.summary);if is_white_mastery(&session.summary){"Mastery, three white stars".into()}else{format!("{} of 3 gold stars",rating.stars)}}).unwrap_or_default()>{move || {let rating=result.get().map(|session|performance_rating(&session.summary)).unwrap_or(PerformanceRating{stars:0,award:PerformanceAward::None});(0..3).map(|index|view!{<Star size=38 fill=if index<rating.stars{"currentColor"}else{"none"}/>}).collect_view()}}</div>
+                  <h3>{move || result.get().map(|session|achievement_copy(&session.summary).0).unwrap_or("")}</h3>
+                  <p>{move || result.get().map(|session|achievement_copy(&session.summary).1).unwrap_or("")}</p>
+                </section>
+                <div class="summary-cards">
+                  <section class="summary-card score-summary-card">
+                    <h3>"Session Score"</h3>
+                    <div class="summary-score"><strong>{move || display_score(result.get().and_then(|session|session.summary.score))}</strong><span>"/ 100"</span></div>
+                    <span class=move || if result.get().is_some_and(|session|is_new_high_score(&session,&history.get())){"new-high-score"}else{"new-high-score hidden"}>"↗ New high score"</span>
+                  </section>
+                  <section class="summary-card breakdown-card">
+                    <h3>"Hit Breakdown"</h3>
+                    <div class="breakdown-list">{move || result.get().map(|session|{let (perfect,good,early,late)=timing_hit_counts(&session.summary);[("Perfect","perfect",perfect),("Good","good",good),("Early","early",early),("Late","late",late),("Missed","missed",session.summary.missed)].into_iter().map(|(label,class,count)|{let value=percentage(count,session.summary.expected);view!{<article class=format!("breakdown-row {class}")><span><i></i>{label}</span><strong>{format!("{count} / {}",session.summary.expected)}</strong><em><i style=format!("width:{value:.3}%")></i></em><b>{format!("{value:.0}%")}</b></article>}}).collect_view()}).unwrap_or_default()}</div>
+                  </section>
                 </div>
-                <section class="accuracy-section">
-                  <div class="result-section-heading"><h3>"Note accuracy"</h3></div>
-                  <div class="accuracy-legend">
-                    <article class="perfect"><span><i></i>"Perfect"</span><strong>{move || result.get().map(|session|format!("{} / {}",timing_hit_counts(&session.summary).0,session.summary.expected)).unwrap_or_else(||"—".into())}</strong><b>{move || result.get().map(|session|format!("{:.0}%",percentage(timing_hit_counts(&session.summary).0,session.summary.expected))).unwrap_or_default()}</b><em><i style=move || result.get().map(|session|format!("width:{:.3}%",percentage(timing_hit_counts(&session.summary).0,session.summary.expected))).unwrap_or_default()></i></em></article>
-                    <article class="good"><span><i></i>"Good"</span><strong>{move || result.get().map(|session|format!("{} / {}",timing_hit_counts(&session.summary).1,session.summary.expected)).unwrap_or_else(||"—".into())}</strong><b>{move || result.get().map(|session|format!("{:.0}%",percentage(timing_hit_counts(&session.summary).1,session.summary.expected))).unwrap_or_default()}</b><em><i style=move || result.get().map(|session|format!("width:{:.3}%",percentage(timing_hit_counts(&session.summary).1,session.summary.expected))).unwrap_or_default()></i></em></article>
-                    <article class="early"><span><i></i>"Early"</span><strong>{move || result.get().map(|session|format!("{} / {}",timing_hit_counts(&session.summary).2,session.summary.expected)).unwrap_or_else(||"—".into())}</strong><b>{move || result.get().map(|session|format!("{:.0}%",percentage(timing_hit_counts(&session.summary).2,session.summary.expected))).unwrap_or_default()}</b><em><i style=move || result.get().map(|session|format!("width:{:.3}%",percentage(timing_hit_counts(&session.summary).2,session.summary.expected))).unwrap_or_default()></i></em></article>
-                    <article class="late"><span><i></i>"Late"</span><strong>{move || result.get().map(|session|format!("{} / {}",timing_hit_counts(&session.summary).3,session.summary.expected)).unwrap_or_else(||"—".into())}</strong><b>{move || result.get().map(|session|format!("{:.0}%",percentage(timing_hit_counts(&session.summary).3,session.summary.expected))).unwrap_or_default()}</b><em><i style=move || result.get().map(|session|format!("width:{:.3}%",percentage(timing_hit_counts(&session.summary).3,session.summary.expected))).unwrap_or_default()></i></em></article>
-                    <article class="missed"><span><i></i>"Missed"</span><strong>{move || result.get().map(|session|format!("{} / {}",session.summary.missed,session.summary.expected)).unwrap_or_else(||"—".into())}</strong><b>{move || result.get().map(|session|format!("{:.0}%",percentage(session.summary.missed,session.summary.expected))).unwrap_or_default()}</b><em><i style=move || result.get().map(|session|format!("width:{:.3}%",percentage(session.summary.missed,session.summary.expected))).unwrap_or_default()></i></em></article>
-                  </div>
+                <section class="summary-card progress-card">
+                  <h3>"Your Progress"</h3><p>"Session score over time"</p>
+                  {move || result.get().map(|session|{let scores=progress_scores(&session,&history.get());let points=progress_chart_points(&scores);let line=points.iter().map(|(x,y)|format!("{x:.1},{y:.1}")).collect::<Vec<_>>().join(" ");let latest=points.last().copied().zip(scores.last().copied());view!{
+                    <svg class="progress-chart" viewBox="0 0 760 190" role="img" aria-label=format!("Scores for the last {} sessions",scores.len())>
+                      <title>{format!("Last {} scores for this exercise at {:.0} BPM",scores.len(),session.bpm)}</title>
+                      {[100_u8,75,50,25,0].into_iter().map(|value|{let y=146.0-132.0*value as f64/100.0;view!{<g class="progress-grid"><line x1="48" y1=y.to_string() x2="712" y2=y.to_string()/><text x="36" y=(y+4.0).to_string()>{value}</text></g>}}).collect_view()}
+                      <polyline class="progress-line" points=line/>
+                      {points.iter().enumerate().map(|(index,(x,y))|view!{<g><circle class=if index+1==points.len(){"progress-point latest"}else{"progress-point"} cx=x.to_string() cy=y.to_string() r=if index+1==points.len(){"5"}else{"3"}/><text class="progress-session-label" x=x.to_string() y="170">{index+1}</text></g>}).collect_view()}
+                      {latest.map(|((x,y),score)|{let label_x=(x-22.0).clamp(4.0,712.0);let label_y=(y-31.0).max(1.0);view!{<g class="progress-latest-label"><rect x=label_x.to_string() y=label_y.to_string() width="44" height="22" rx="6"/><text x=(label_x+22.0).to_string() y=(label_y+15.0).to_string()>{format!("{score:.0}")}</text></g>}})}
+                      <text class="progress-axis-label" x="380" y="188">"Session"</text>
+                    </svg>
+                  }.into_any()}).unwrap_or_else(||().into_any())}
                 </section>
-                <section class="timing-section">
-                  <div class="result-section-heading"><h3>"Timing accuracy"</h3><span>"Matched notes only"</span></div>
-                  <div class="timing-cards"><article><span>"AVERAGE OFFSET"</span><strong>{move || result.get().and_then(|session|session.summary.signed_mean_error_ms).map(|value|if value < -0.5{format!("{:.0} ms",value.abs())}else if value > 0.5{format!("{value:.0} ms")}else{"On time".into()}).unwrap_or_else(||"—".into())}</strong><small>{move || result.get().and_then(|session|session.summary.signed_mean_error_ms).map(|value|if value < -0.5{"early"}else if value > 0.5{"late"}else{"centred"}).unwrap_or("")}</small></article><article><span>"MEAN ABSOLUTE ERROR"</span><strong>{move || result.get().and_then(|session|session.summary.mean_abs_error_ms).map(|value|format!("{value:.0} ms")).unwrap_or_else(||"—".into())}</strong></article><article><span>"TIMING VARIABILITY"</span><strong>{move || result.get().and_then(|session|session.summary.timing_consistency_ms).map(|value|format!("{value:.0} ms")).unwrap_or_else(||"—".into())}</strong><small>"SD"</small></article></div>
-                  <p class="timing-focus"><span aria-hidden="true"><Clock3 size=15/></span><strong>"Focus for next time:"</strong>{move || result.get().map(|session|timing_focus(&session.summary)).unwrap_or_default()}</p>
-                </section>
-                <footer class="results-footer"><p>{move || result.get().map(|session|format!("{} extra hit{}    {} wrong drum{}\nHit any drum to close",session.summary.extras,if session.summary.extras==1{""}else{"s"},session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);restore_result_focus();}>"Back to score"</button><button class="primary" on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
+                <footer class="summary-footer"><p>{move || result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);restore_result_focus();}>"Back to score"</button><button class="primary" on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
                 </section>
               </div>
             </section>
@@ -2456,6 +2554,37 @@ mod tests {
                 note: 38,
             },
         ]
+    }
+
+    fn session_record(id: &str, hash: &str, version: &str, score: f64) -> SessionRecord {
+        let expected = two_note_bar();
+        let mut summary = score_session_with_tempo_map(
+            &expected,
+            &[observed_at(0.0), observed_at(1_000.0)],
+            60.0,
+            0.0,
+            0.0,
+            ScoringConfig::default(),
+            &[],
+        );
+        summary.score = Some(score);
+        summary.scoring_version = version.into();
+        SessionRecord {
+            id: id.into(),
+            ended_at: "2026-11-11T18:00:00Z".into(),
+            exercise_id: "exercise".into(),
+            exercise_title: "Exercise".into(),
+            exercise_hash: hash.into(),
+            bpm: 60.0,
+            input_mode: InputSource::Demo,
+            scoring_version: version.into(),
+            tolerance_ms: DEFAULT_GOOD_MS,
+            latency_ms: 0.0,
+            summary,
+            observed: vec![],
+            schema_version: 1,
+            mode: AppMode::Performance,
+        }
     }
 
     fn live_feedback(expected: &[ExpectedHit], timestamps: &[f64]) -> Vec<LiveJudgement> {
@@ -2758,6 +2887,98 @@ mod tests {
             PerformanceAward::Mastered
         );
         assert!(performance_rating(&with_extra).stars < 3);
+    }
+
+    #[test]
+    fn new_high_score_is_strict_and_scoped_to_the_midi_file() {
+        let current = session_record("current", "same-file", SCORING_VERSION, 86.0);
+        assert!(!is_new_high_score(&current, std::slice::from_ref(&current)));
+
+        let lower = session_record("lower", "same-file", SCORING_VERSION, 85.0);
+        assert!(is_new_high_score(
+            &current,
+            &[lower.clone(), current.clone()]
+        ));
+        assert_eq!(lower.summary.score, Some(85.0));
+
+        let tied = session_record("tied", "same-file", SCORING_VERSION, 86.0);
+        assert!(!is_new_high_score(&current, &[tied, current.clone()]));
+
+        let higher = session_record("higher", "same-file", SCORING_VERSION, 90.0);
+        assert!(!is_new_high_score(&current, &[higher, current.clone()]));
+
+        let other_file = session_record("other", "other-file", SCORING_VERSION, 100.0);
+        let old_version = session_record("old", "same-file", "v2", 100.0);
+        assert!(!is_new_high_score(
+            &current,
+            &[other_file, old_version, current.clone()]
+        ));
+    }
+
+    #[test]
+    fn white_mastery_requires_a_clean_perfect_or_good_run() {
+        let expected = two_note_bar();
+        let clean = score_session_with_tempo_map(
+            &expected,
+            &[observed_at(0.0), observed_at(1_025.0)],
+            60.0,
+            0.0,
+            0.0,
+            ScoringConfig::default(),
+            &[],
+        );
+        assert!(is_white_mastery(&clean));
+
+        let early = score_session_with_tempo_map(
+            &expected,
+            &[observed_at(0.0), observed_at(1_061.0)],
+            60.0,
+            0.0,
+            0.0,
+            ScoringConfig::default(),
+            &[],
+        );
+        assert!(!is_white_mastery(&early));
+
+        let extra = score_session_with_tempo_map(
+            &expected,
+            &[observed_at(0.0), observed_at(1_000.0), observed_at(1_500.0)],
+            60.0,
+            0.0,
+            0.0,
+            ScoringConfig::default(),
+            &[],
+        );
+        assert!(!is_white_mastery(&extra));
+    }
+
+    #[test]
+    fn progress_uses_the_latest_ten_scores_for_the_same_file_and_tempo() {
+        let mut history = (0..12)
+            .map(|index| {
+                let mut session = session_record(
+                    &format!("session-{index:02}"),
+                    "same-file",
+                    SCORING_VERSION,
+                    index as f64,
+                );
+                session.ended_at = format!("2026-11-11T18:{index:02}:00Z");
+                session
+            })
+            .collect::<Vec<_>>();
+        let current = history.last().unwrap().clone();
+        let mut other_tempo = session_record("other-tempo", "same-file", SCORING_VERSION, 99.0);
+        other_tempo.bpm = 120.0;
+        history.push(other_tempo);
+        assert_eq!(
+            progress_scores(&current, &history),
+            (2..12).map(|value| value as f64).collect::<Vec<_>>()
+        );
+
+        let lone = session_record("lone", "new-file", SCORING_VERSION, 78.0);
+        assert_eq!(progress_scores(&lone, &[]), vec![78.0]);
+        assert_eq!(progress_chart_points(&[78.0]).len(), 1);
+        assert_eq!(progress_chart_points(&[60.0, 80.0]).len(), 2);
     }
 
     #[test]
