@@ -1,6 +1,6 @@
 # Rudiment
 
-Rudiment is a client-side drum practice app for Chrome. It opens directly on a four-bar single paradiddle at 60 BPM with a one-bar count-in, engraved percussion notation, sampled acoustic snare, keyboard demo input, deterministic scoring, and local practice history. Its MIDI library includes 11 historically rooted, modernised rudiment exercises with reference engravings. USB MIDI, MIDI-file import, MIDI Learn, calibration, looping and score following use the same canonical Rust exercise timeline.
+Rudiment is a client-side drum practice app. It opens directly on a four-bar single paradiddle at 60 BPM with a one-bar count-in, engraved percussion notation, sampled acoustic snare and metronome, keyboard demo input, deterministic scoring, and local practice history. Its MIDI library includes 11 historically rooted, modernised rudiment exercises with reference engravings. USB MIDI, MIDI-file import, MIDI Learn, calibration, looping and score following use the same canonical Rust exercise timeline.
 
 ## Run locally
 
@@ -45,7 +45,7 @@ Dependency security is checked separately by `.github/workflows/security.yml` on
 - `crates/core`: web-independent Rust domain model, SMF normalisation with `midly`, instrument mapping, onset-grid and rhythmic-value inference, configurable per-note timing classification, one-to-one matching and Score v1 aggregation.
 - `web/src`: Leptos state machine and accessible product UI. Rust/JS snapshots cross with `serde-wasm-bindgen`.
 - `web/js/bridge.js`: narrow browser adapter for Tone.js/Web Audio, WEBMIDI.js, VexFlow and IndexedDB (`idb`). Tone.Transport is the sole musical scheduler; scoring and the requestAnimationFrame playhead share its explicitly bridged timeline.
-- `web/public`: source-verified CC0 acoustic snare layers, versioned JSON prescriptions/profiles, and build-time generated MIDI fixtures and browser bundle.
+- `web/public`: source-verified CC0 acoustic snare and metronome layers, versioned JSON prescriptions/profiles, and build-time generated MIDI fixtures and browser bundle.
 
 The built-in MIDI exercises live under `web/public/exercises/rudiments`. Their matching PNG/SVG engravings, manifest and provenance material live under `tests/fixtures/rudiment-reference`; those test-only references are not linked from the app or included in the deployed site. Automated Rust and browser tests decode each supplied PNG, derive its system structure, and compare that with the generated score alongside the manifest's note, sticking, accent, grace-note, tuplet, bar and tempo expectations. On failure, CI retains the reference and generated images together for visual review; no pixel-perfect identity is required.
 

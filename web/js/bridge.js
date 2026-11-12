@@ -34,6 +34,12 @@ const velocityLayers = velocity => {
   return [{index:lower,weight:Math.cos(mix*Math.PI/2)},{index:upper,weight:Math.sin(mix*Math.PI/2)}];
 };
 const audioErrorMessage = error => error instanceof Error ? error.message : String(error ?? 'Unknown audio error');
+const metronomeSampleFiles = {
+  woodblock: { accent:'audio/woodblock-accent.wav', regular:'audio/woodblock-regular.wav' },
+  crisp: { accent:'audio/click-accent.wav', regular:'audio/click-regular.wav' },
+  cowbell: { accent:'audio/cowbell-accent.wav', regular:'audio/cowbell-regular.wav' }
+};
+const metronomeSampleName = path => path.slice('audio/'.length,-'.wav'.length);
 const performanceProfile={
   enabled:globalThis.__RUDIMENT_PERF__===true,
   samples:new Map(),
@@ -97,9 +103,8 @@ const visualMetronome = {
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
-  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], sampleErrors: [], snareStarts: 0, lastSnareError: null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
+  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, metronomeBuffers: {}, metronomeBuffersPromise: null, metronomeSampleErrors: {}, layerGains: [], layerPeaks: [], sampleErrors: [], snareStarts: 0, lastSnareError: null, lastMetronomeError:null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
   preload() {
-    if(this.buffersPromise)return this.buffersPromise;
     this.state = 'loading';
     this.raw ??= Tone.getContext().rawContext;
     if (!this.master) {
@@ -108,6 +113,8 @@ const audio = {
       this.clickGain = this.raw.createGain(); this.clickGain.gain.value = 1.08;
       const limiter = this.raw.createDynamicsCompressor(); limiter.threshold.value = -3; limiter.ratio.value = 12;
       this.snareGain.connect(this.master); this.clickGain.connect(this.master); this.master.connect(limiter); limiter.connect(this.raw.destination);
+    }
+    if(!this.buffersPromise){
       // PCM WAV avoids the optional AAC decoder used by several embedded Web
       // MIDI browsers while preserving the same four acoustic recordings.
       const urls = ['audio/snare-soft.wav','audio/snare-medium.wav','audio/snare-hard.wav','audio/snare-accent.wav'].map(publicAsset);
@@ -136,11 +143,51 @@ const audio = {
         catch(error) { this.sampleErrors[index]=audioErrorMessage(error); return null; }
       })).then(buffers => {
         this.buffers=buffers;
-        this.state=buffers.some(Boolean)?'ready':'unavailable';
+        this.updateSampleState();
         return buffers;
       });
     }
-    return this.buffersPromise;
+    if(!this.metronomeBuffersPromise){
+      const entries=Object.entries(metronomeSampleFiles).flatMap(([,layers])=>
+        Object.values(layers).map(path=>({name:metronomeSampleName(path),url:publicAsset(path)}))
+      );
+      this.metronomeBuffersPromise=Promise.all(entries.map(async({name,url})=>{
+        try{
+          const response=await fetch(url);if(!response.ok)throw new Error(String(response.status));
+          const buffer=await this.raw.decodeAudioData(await response.arrayBuffer());
+          let peak=0;
+          for(let channel=0;channel<buffer.numberOfChannels;channel++){
+            const data=buffer.getChannelData(channel);
+            for(let sample=0;sample<data.length;sample++)peak=Math.max(peak,Math.abs(data[sample]));
+          }
+          if(!Number.isFinite(peak)||peak<.00001)throw new Error('Decoded sample is silent');
+          return {name,buffer};
+        }catch(error){
+          this.metronomeSampleErrors[name]=audioErrorMessage(error);
+          return {name,buffer:null};
+        }
+      })).then(entries=>{
+        this.metronomeBuffers=Object.fromEntries(entries.map(({name,buffer})=>[name,buffer]));
+        this.updateSampleState();
+        return this.metronomeBuffers;
+      });
+    }
+    return Promise.all([this.buffersPromise,this.metronomeBuffersPromise]);
+  },
+  updateSampleState(){
+    const snareReady=this.buffers.some(Boolean),metronomeReady=Object.values(this.metronomeBuffers).some(Boolean);
+    this.state=snareReady||metronomeReady?'ready':'unavailable';
+  },
+  async waitForMetronome(timbre){
+    const layers=metronomeSampleFiles[timbre];
+    if(!layers)throw new Error(`Unknown metronome preset: ${timbre}`);
+    await this.metronomeBuffersPromise;
+    const missing=Object.entries(layers).filter(([,path])=>!this.metronomeBuffers[metronomeSampleName(path)]);
+    if(missing.length){
+      const details=missing.map(([,path])=>`${metronomeSampleName(path)}: ${this.metronomeSampleErrors[metronomeSampleName(path)]||'sample unavailable'}`).join('; ');
+      throw new Error(`Unable to load metronome samples (${details})`);
+    }
+    return true;
   },
   async ensure() {
     // Start/resume the context immediately while the Connect click still has
@@ -150,8 +197,8 @@ const audio = {
     this.preload();
     try { await startPromise; }
     catch(error) { this.state='locked'; this.lastSnareError=audioErrorMessage(error); throw error; }
-    this.state = this.buffers.some(Boolean) ? 'ready' : (this.state==='unavailable' ? 'unavailable' : 'loading');
-    return { state: this.state, sampleLayers: this.buffers.filter(Boolean).length };
+    if(this.buffers.length||Object.keys(this.metronomeBuffers).length)this.updateSampleState();
+    return { state: this.state, sampleLayers: this.buffers.filter(Boolean).length, metronomeSampleCount:Object.values(this.metronomeBuffers).filter(Boolean).length };
   },
   perfAt(audioTime) {
     const direct = performance.now() + (audioTime - this.raw.currentTime) * 1000;
@@ -204,13 +251,24 @@ const audio = {
     return true;
   },
   click(time, accent = false, timbre = 'woodblock') {
-    const osc = this.raw.createOscillator(), gain = this.raw.createGain(), filter = this.raw.createBiquadFilter();
-    const choices = { woodblock:[accent?1450:1080,'sine',.055], crisp:[accent?2400:1850,'square',.022], cowbell:[accent?760:560,'triangle',.09] };
-    const [frequency, wave, duration] = choices[timbre] || choices.woodblock;
-    osc.type = wave; osc.frequency.setValueAtTime(frequency,time); osc.frequency.exponentialRampToValueAtTime(frequency*.72,time+duration);
-    filter.type = 'bandpass'; filter.frequency.value = frequency; filter.Q.value = 2.5;
-    gain.gain.setValueAtTime(accent?.34:.22,time); gain.gain.exponentialRampToValueAtTime(.0001,time+duration);
-    osc.connect(filter); filter.connect(gain); gain.connect(this.clickGain); osc.start(time); osc.stop(time+duration+.01);
+    const profileStart=performanceProfile.enabled?performance.now():0;
+    const samplePath=metronomeSampleFiles[timbre]?.[accent?'accent':'regular'];
+    const sampleName=samplePath?metronomeSampleName(samplePath):`${timbre}-${accent?'accent':'regular'}`;
+    const buffer=this.metronomeBuffers[sampleName];
+    if(!buffer){this.lastMetronomeError=`Missing decoded sample: ${sampleName}`;return false;}
+    try{
+      const source=this.raw.createBufferSource();source.buffer=buffer;source.connect(this.clickGain);
+      source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);source.disconnect();};
+      this.voices.add(source);
+      if(time>this.raw.currentTime+.001)this.scheduledVoices.add(source);
+      source.start(time);
+      performanceProfile.record('metronome_audio_scheduling_ms',performance.now()-profileStart);
+      return true;
+    }catch(error){
+      this.lastMetronomeError=audioErrorMessage(error);
+      performanceProfile.record('metronome_audio_scheduling_ms',performance.now()-profileStart);
+      return false;
+    }
   },
   stop() {
     if(this.activeRun)this.lastBeat=this.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-this.activeRun.countBeats;
@@ -241,31 +299,36 @@ const audio = {
     this.stop(); const generation = this.generation;
     await this.ensure();
     if(generation!==this.generation)return {cancelled:true,state:this.state};
+    if(options.metronome)await this.waitForMetronome(options.timbre||'woodblock');
+    if(generation!==this.generation)return {cancelled:true,state:this.state};
     const transport = Tone.getTransport(), tempoMap=(options.tempoMap||[]).slice().sort((a,b)=>a.beat-b.beat),sourceBpm=options.sourceBpm||options.bpm,tempoScale=options.bpm/sourceBpm,offset = options.offsetBeat || 0,initialBpm=tempoAtBeat(offset,tempoMap,sourceBpm)*tempoScale,countBeats = options.countInBars * options.meter;
     const remaining = Math.max(0, options.totalBeats - offset), startDelay = 0;
     const countInSeconds=countBeats*60/initialBpm,runAudio = this.raw.currentTime + startDelay + countInSeconds;
     const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
     const referenceNotes=(options.referenceNotes||[]).filter(note=>Number.isFinite(Number(note.beat))&&Number(note.beat)>=offset-.000001&&Number(note.beat)<options.totalBeats-.000001&&Number(note.velocity)>0);
-    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,runPerformance,referenceNoteCount:referenceNotes.length};
+    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,runPerformance,referenceNoteCount:referenceNotes.length,metronome:options.metronome,timbre:options.timbre};
     transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
     for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.activeRun&&transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time);},position);}
     for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.playSnare(Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time);},position);}
-    const scheduleClick=(time,step)=>{
+    const scheduleClick=(time,countIn=false)=>{
       if(generation!==this.generation)return;
-      const beat=step/subdivision;
+      const transportBeat=transport.getTicksAtTime(time)/transport.PPQ;
+      const beatStep=Math.round((countIn?transportBeat-countBeats:offset+transportBeat-countBeats)*subdivision);
+      const beat=beatStep/subdivision;
       visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision);
-      if(options.metronome)this.click(time,step%(options.meter*subdivision)===0,options.timbre);
+      const barSteps=options.meter*subdivision;
+      if(options.metronome)this.click(time,((beatStep%barSteps)+barSteps)%barSteps===0,options.timbre);
     };
     // Count-in uses its own grid. Practice resumes on the original exercise
     // grid, so a pause between beats never redefines the downbeat or shifts
     // subsequent clicks away from the written notes.
     for(let step=0;step<countBeats*subdivision;step++){
       const position=transportPositionAtBeat(step/subdivision,options.meter);
-      transport.scheduleOnce(time=>scheduleClick(time,step-countBeats*subdivision),position);
+      transport.scheduleOnce(time=>scheduleClick(time,true),position);
     }
-    let practiceStep=Math.ceil(offset*subdivision);
+    const practiceStep=Math.ceil(offset*subdivision);
     const firstPracticeBeat=countBeats+practiceStep/subdivision-offset;
-    transport.scheduleRepeat(time=>scheduleClick(time,practiceStep++),interval,transportPositionAtBeat(firstPracticeBeat,options.meter));
+    transport.scheduleRepeat(time=>scheduleClick(time),interval,transportPositionAtBeat(firstPracticeBeat,options.meter));
     const initialBeat=offset-countBeats;
     this.lastBeat=initialBeat;
     onFrame(initialBeat,performance.now(),runPerformance);
@@ -300,7 +363,7 @@ const audio = {
     return { runPerformance, runAudio, state: this.state };
   },
   async calibration() {
-    await this.ensure(); const beatSeconds = .75, start = this.raw.currentTime + .3, targets = [];
+    await this.ensure();await this.waitForMetronome('woodblock');const beatSeconds = .75, start = this.raw.currentTime + .3, targets = [];
     for (let i = 0; i < 8; i++) { const time = start + i * beatSeconds; this.click(time, i === 0, 'woodblock'); targets.push(this.perfAt(time)); }
     return targets;
   }
@@ -851,7 +914,7 @@ function trapDialogTab(event,selector){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,setSelectedBars,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},

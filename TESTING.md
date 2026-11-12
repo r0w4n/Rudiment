@@ -29,6 +29,14 @@ Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguit
 8. Open settings: preview all three click timbres, toggle the exercise click and app snare independently, change loops, run eight-tap calibration and Reset it.
 9. Import `web/public/exercises/quarter-note-reference.mid`. Confirm eight quarter notes render even though each raw MIDI gate is only 110 ticks. Open the MIDI library, reload the saved file, reload the browser and verify it restores the last selected import; delete it from the library and confirm the prompt.
 
+## Sampled metronome browser checklist
+
+1. In desktop Chrome, preview Warm woodblock, Crisp click and Cowbell. Confirm each uses its own recorded timbre and that its accent is stronger than its regular beat.
+2. Start a 4/4 exercise with count-in. Confirm the first count-in beat and each bar downbeat are accented; regular beats remain even. Repeat with a non-4/4 exercise and with bar repetition enabled.
+3. Change tempo during practice, pause between beats, resume, stop/restart and switch presets. Confirm accents remain attached to musical downbeats, there are no doubled/stuck clicks, and exercise/MIDI scoring is unchanged.
+4. Repeat on iPad Safari. Start from a user gesture, background/restore Safari or lock/unlock the device, then resume practice from a user gesture. Confirm audio resumes without a second clock or a burst of late clicks. Recheck all three previews and accents.
+5. Treat browser automation as scheduling/decoding evidence only. Physical iPad Safari listening, speaker differences and subjective audio quality require a real device and must not be reported as verified without that check.
+
 ## Physical Chrome + USB drum-kit checklist
 
 These steps require a real kit and must not be reported as passed from browser simulation:

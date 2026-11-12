@@ -1488,6 +1488,7 @@ fn App() -> impl IntoView {
                 if timestamp >= result_dismiss_after_ms.get_untracked() {
                     result_modal_open.set(false);
                     result_dismiss_after_ms.set(f64::INFINITY);
+                    clear_score_feedback();
                     restore_result_focus();
                 }
                 return;
@@ -2084,6 +2085,7 @@ fn App() -> impl IntoView {
                     event.prevent_default();
                     result_modal_open.set(false);
                     result_dismiss_after_ms.set(f64::INFINITY);
+                    clear_score_feedback();
                     restore_result_focus();
                     return;
                 }
@@ -2302,17 +2304,17 @@ fn App() -> impl IntoView {
                 <div class="timeline"><i style=move || format!("width:{:.2}%",(progress.get().max(0.0)/exercise_beats(&exercise.get())*100.0).rem_euclid(100.0).clamp(0.0,100.0))></i></div>
                 <select class="loop-control" aria-label="Loops" title="Choose how many times to play the selected bars" prop:value=move || loops.get().to_string() on:change={let save=save_loops.clone();let stop=stop_for_navigation.clone();move |event|{stop();loops.set(event_target_value(&event).parse().unwrap_or(1));save();}}><option value="1">"1 / 1 LOOP"</option><option value="2">"2 LOOPS"</option><option value="4">"4 LOOPS"</option><option value="0">"∞ LOOP"</option></select>
               </div>
-              <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);restore_result_focus();}>
+              <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);clear_score_feedback();restore_result_focus();}>
               <section id="result-dialog" class="stats-modal results-modal" role="dialog" aria-modal="true" aria-labelledby="result-title" on:click=|event|event.stop_propagation() on:keydown=move |event:web_sys::KeyboardEvent|{
                   match event.key().as_str(){
-                    "Escape"=>{event.prevent_default();result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);restore_result_focus();},
+                    "Escape"=>{event.prevent_default();result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);clear_score_feedback();restore_result_focus();},
                     "Tab"=>trap_dialog_tab(&event,"#result-dialog"),
                     _=>{},
                   }
                 }>
                 <header class="summary-header">
                   <div class="summary-title-group"><span class="summary-icon" aria-hidden="true">"R"</span><div><h2 id="result-title">"Session Complete"</h2><p>{move || result.get().map(|session|format!("{} · {:.0} BPM",session.exercise_title,session.bpm)).unwrap_or_default()}</p></div></div>
-                  <button id="result-modal-close" aria-label="Close session results" on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);restore_result_focus();}><X size=21/></button>
+                  <button id="result-modal-close" aria-label="Close session results" on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);clear_score_feedback();restore_result_focus();}><X size=21/></button>
                 </header>
                 <section class="summary-achievement">
                   <div class=move || if result.get().is_some_and(|session|is_white_mastery(&session.summary)){"summary-stars mastery"}else{"summary-stars"} aria-label=move || result.get().map(|session|{let rating=performance_rating(&session.summary);if is_white_mastery(&session.summary){"Mastery, three white stars".into()}else{format!("{} of 3 gold stars",rating.stars)}}).unwrap_or_default()>{move || {let rating=result.get().map(|session|performance_rating(&session.summary)).unwrap_or(PerformanceRating{stars:0,award:PerformanceAward::None});(0..3).map(|index|view!{<Star size=38 fill=if index<rating.stars{"currentColor"}else{"none"}/>}).collect_view()}}</div>
@@ -2343,7 +2345,7 @@ fn App() -> impl IntoView {
                     </svg>
                   }.into_any()}).unwrap_or_else(||().into_any())}
                 </section>
-                <footer class="summary-footer"><p>{move || result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);restore_result_focus();}>"Back to score"</button><button class="primary" on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
+                <footer class="summary-footer"><p>{move || result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);clear_score_feedback();restore_result_focus();}>"Back to score"</button><button class="primary" on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
                 </section>
               </div>
             </section>

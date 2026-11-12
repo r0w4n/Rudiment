@@ -3,13 +3,15 @@ import { readFile } from 'node:fs/promises';
 
 test('acoustic snare layers preload before the first audio interaction', async ({ page }) => {
   const requested:string[]=[];
-  page.on('request',request=>{if(/\/audio\/snare-.*\.wav$/.test(new URL(request.url()).pathname))requested.push(request.url());});
+  page.on('request',request=>{if(/\/audio\/(?:snare-.*|(?:woodblock|click|cowbell)-(?:accent|regular))\.wav$/.test(new URL(request.url()).pathname))requested.push(request.url());});
   await page.goto('/');
   await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().sampleLayers)).toBe(4);
-  expect(new Set(requested).size).toBe(4);
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().metronomeSampleCount)).toBe(6);
+  expect(new Set(requested).size).toBe(10);
   const diagnostics=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
   expect(diagnostics.snareStarts).toBe(0);
   expect(diagnostics.activeRun).toBe(false);
+  expect(diagnostics.metronomeSampleNames.sort()).toEqual(['click-accent','click-regular','cowbell-accent','cowbell-regular','woodblock-accent','woodblock-regular']);
 });
 
 test('first-use workspace renders real notation and lifecycle controls', async ({ page }) => {
@@ -206,19 +208,33 @@ test('percussion engraving aligns the snare, places sticking below without accen
 });
 
 test('live BPM changes retime the active transport without restarting practice', async ({ page }) => {
+  await page.addInitScript(()=>{
+    const originalStart=AudioBufferSourceNode.prototype.start;
+    (window as any).__metronomeClickTimes=[];
+    AudioBufferSourceNode.prototype.start=function(...args){
+      const name=(window as any).rudiment?.identifyMetronomeBuffer(this.buffer);
+      if(name)(window as any).__metronomeClickTimes.push({name,time:args[0]??0});
+      return originalStart.apply(this,args);
+    };
+  });
   await page.goto('/');
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByRole('button', { name: /Start practice/ }).click();
-  await page.waitForTimeout(350);
+  await expect.poll(()=>page.evaluate(()=>(window as any).__metronomeClickTimes.length)).toBeGreaterThanOrEqual(2);
+  const clickCount=await page.evaluate(()=>(window as any).__metronomeClickTimes.length);
   const before = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
   await page.getByLabel('Tempo in BPM').fill('120');
   await expect(page.getByRole('button', { name: /Pause/ })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().transportBpm)).toBeCloseTo(120, 0);
-  await page.waitForTimeout(250);
+  await expect.poll(()=>page.evaluate(()=>(window as any).__metronomeClickTimes.length)).toBeGreaterThanOrEqual(clickCount+5);
   const after = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
   expect(after.transportTicks).toBeGreaterThan(before.transportTicks);
+  const clickTimes=await page.evaluate(()=>(window as any).__metronomeClickTimes.map((click:{time:number})=>click.time));
+  for(let index=clickTimes.length-3;index<clickTimes.length;index++){
+    expect(clickTimes[index]-clickTimes[index-1]).toBeCloseTo(.5,1);
+  }
   await page.getByRole('button', { name: /Restart/ }).click();
 });
 
@@ -279,13 +295,20 @@ test('visual metronome pulses from the audible transport clock and marks the dow
   await expect(page.locator('.visual-metronome-label')).toHaveText('READY');
 });
 
-test('resuming between beats keeps the metronome accent on bar downbeats', async ({ page }) => {
+test('sampled metronome uses the accented and regular recordings on the transport grid', async ({ page }) => {
   await page.addInitScript(() => {
-    const original = AudioParam.prototype.setValueAtTime;
-    (window as any).__clickFrequencies = [];
-    AudioParam.prototype.setValueAtTime = function(value, time) {
-      if (value === 1450 || value === 1080) (window as any).__clickFrequencies.push(value);
-      return original.call(this, value, time);
+    (window as any).__RUDIMENT_PERF__=true;
+    const originalStart=AudioBufferSourceNode.prototype.start;
+    const originalOscillator=AudioContext.prototype.createOscillator;
+    (window as any).__metronomeSourceEvents=[];
+    (window as any).__oscillatorCreations=0;
+    AudioBufferSourceNode.prototype.start=function(...args) {
+      if(this.buffer)(window as any).__metronomeSourceEvents.push({buffer:this.buffer,time:args[0]??0});
+      return originalStart.apply(this,args);
+    };
+    AudioContext.prototype.createOscillator=function(...args) {
+      (window as any).__oscillatorCreations++;
+      return originalOscillator.apply(this,args);
     };
   });
   await page.goto('/');
@@ -293,17 +316,89 @@ test('resuming between beats keeps the metronome accent on bar downbeats', async
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
+  const oscillatorBaseline=await page.evaluate(()=>(window as any).__oscillatorCreations);
   await page.getByRole('button', { name: /Start practice/ }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).__clickFrequencies.length)).toBeGreaterThanOrEqual(2);
+  await expect.poll(()=>page.evaluate(()=>(window as any).__metronomeSourceEvents.filter((event:any)=>(window as any).rudiment.identifyMetronomeBuffer(event.buffer)).length)).toBeGreaterThanOrEqual(8);
+  const clicks=await page.evaluate(()=>((window as any).__metronomeSourceEvents as Array<{buffer:AudioBuffer,time:number}>)
+    .map(event=>({name:(window as any).rudiment.identifyMetronomeBuffer(event.buffer),time:event.time}))
+    .filter(event=>event.name));
+  expect(clicks.slice(0,8).map(click=>click.name)).toEqual([
+    'woodblock-accent','woodblock-regular','woodblock-regular','woodblock-regular',
+    'woodblock-accent','woodblock-regular','woodblock-regular','woodblock-regular'
+  ]);
+  for(let index=1;index<8;index++)expect(clicks[index].time-clicks[index-1].time).toBeCloseTo(.25,1);
+  expect(await page.evaluate(()=>(window as any).__oscillatorCreations)).toBe(oscillatorBaseline);
+  const scheduling=await page.evaluate(()=>(window as any).rudiment.performanceDiagnostics().metronome_audio_scheduling_ms as number[]);
+  expect(scheduling.length).toBeGreaterThanOrEqual(8);
+  expect(Math.max(...scheduling)).toBeLessThan(2);
   await page.getByRole('button', { name: /Pause/ }).click();
-  await page.evaluate(() => { (window as any).__clickFrequencies = []; });
+  const paused=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
+  expect(paused.scheduledVoices).toBe(0);
+  await page.evaluate(()=>(window as any).__metronomeSourceEvents=[]);
   await page.getByRole('button', { name: /Resume/ }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).__clickFrequencies.length)).toBeGreaterThanOrEqual(10);
-  const clicks = await page.evaluate(() => (window as any).__clickFrequencies as number[]);
-  expect(clicks).toContain(1450);
-  // The oscillator and filter both set the click frequency; each beat appears twice.
-  expect(clicks.slice(0, 10).filter(value => value === 1450)).toHaveLength(2);
-  expect(clicks.slice(0, 10).every((value, index) => index % 2 === 0 || value === clicks[index - 1])).toBe(true);
+  await expect.poll(()=>page.evaluate(()=>(window as any).__metronomeSourceEvents.filter((event:any)=>(window as any).rudiment.identifyMetronomeBuffer(event.buffer)).length)).toBeGreaterThanOrEqual(4);
+  const resumed=await page.evaluate(()=>((window as any).__metronomeSourceEvents as Array<{buffer:AudioBuffer}>)
+    .map(event=>(window as any).rudiment.identifyMetronomeBuffer(event.buffer)).filter(Boolean));
+  const resumedStep=Math.ceil(paused.currentBeat);
+  expect(resumed[0]).toBe(resumedStep%4===0?'woodblock-accent':'woodblock-regular');
+});
+
+test('three-beat count-in and preset changes select the matching VCSL samples', async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalStart=AudioBufferSourceNode.prototype.start;
+    (window as any).__metronomeSourceEvents=[];
+    AudioBufferSourceNode.prototype.start=function(...args) {
+      if(this.buffer)(window as any).__metronomeSourceEvents.push({buffer:this.buffer,time:args[0]??0});
+      return originalStart.apply(this,args);
+    };
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
+  await page.getByRole('button',{name:'Open settings'}).click();
+  for(const [value,accentName] of [['crisp','click-accent'],['cowbell','cowbell-accent']] as const){
+    await page.getByLabel('Click timbre').selectOption(value);
+    await page.evaluate(async(presetValue)=>{
+      await (window as any).rudiment.ensureAudio();
+      await (window as any).rudiment.previewClick(presetValue,true);
+      await (window as any).rudiment.previewClick(presetValue,false);
+    },value);
+    const previews=await page.evaluate(()=>((window as any).__metronomeSourceEvents as Array<{buffer:AudioBuffer}>)
+      .map(event=>(window as any).rudiment.identifyMetronomeBuffer(event.buffer)).filter(Boolean));
+    expect(previews.slice(-2)).toEqual([accentName,accentName.replace('accent','regular')]);
+  }
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.evaluate(()=>{(window as any).rudiment.stopAudio();(window as any).__metronomeSourceEvents=[];});
+  await page.evaluate(async()=>{
+    await (window as any).rudiment.startAudio({
+      bpm:240,sourceBpm:240,tempoMap:[],countInBars:1,meter:3,totalBeats:9,
+      offsetBeat:0,exerciseBeats:9,displayRangeStart:0,displayRangeBeats:9,
+      subdivision:1,metronome:true,timbre:'cowbell',referenceNotes:[]
+    },()=>{},()=>{});
+  });
+  await expect.poll(()=>page.evaluate(()=>(window as any).__metronomeSourceEvents.filter((event:any)=>(window as any).rudiment.identifyMetronomeBuffer(event.buffer)).length)).toBeGreaterThanOrEqual(8);
+  const clicks=await page.evaluate(()=>((window as any).__metronomeSourceEvents as Array<{buffer:AudioBuffer,time:number}>)
+    .map(event=>({name:(window as any).rudiment.identifyMetronomeBuffer(event.buffer),time:event.time}))
+    .filter(event=>event.name));
+  expect(clicks.slice(0,8).map(click=>click.name)).toEqual([
+    'cowbell-accent','cowbell-regular','cowbell-regular','cowbell-accent',
+    'cowbell-regular','cowbell-regular','cowbell-accent','cowbell-regular'
+  ]);
+  for(let index=1;index<8;index++)expect(clicks[index].time-clicks[index-1].time).toBeCloseTo(.25,1);
+  await page.evaluate(()=>(window as any).rudiment.stopAudio());
+  expect((await page.evaluate(()=>(window as any).rudiment.audioDiagnostics())).scheduledVoices).toBe(0);
+});
+
+test('a missing selected metronome recording reports an explicit playback error', async ({page})=>{
+  await page.route('**/audio/cowbell-accent.wav',route=>route.abort());
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Click timbre').selectOption('cowbell');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect(page.locator('.error-row')).toContainText('Unable to load metronome samples');
+  const diagnostics=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
+  expect(diagnostics.metronomeSampleErrors['cowbell-accent']).toContain('Failed to fetch');
 });
 
 test('navigation and configuration controls stop an active practice cleanly', async ({ page }) => {
@@ -358,6 +453,7 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   });
   const resultDialog=page.getByRole('dialog',{name:'Session Complete'});
   await expect(resultDialog).toBeVisible();
+  await expect(page.locator('.score-note[data-judgement]')).not.toHaveCount(0);
   await expect(resultDialog.getByText('SESSION SAVED · LOCALLY')).toHaveCount(0);
   await expect(resultDialog.getByRole('heading', { name: 'Session Complete' })).toBeVisible();
   await expect(resultDialog.locator('.score-summary-card')).toBeVisible();
@@ -412,9 +508,9 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   expect(landscapeResultLayout.scrollWidth).toBeLessThanOrEqual(landscapeResultLayout.clientWidth);
   await page.setViewportSize({width:1440,height:900});
   const pageUrl=page.url();
-  await page.waitForTimeout(2_050);
-  await page.keyboard.press('j');
+  await resultDialog.getByRole('button',{name:'Close session results'}).click();
   await expect(page.locator('.result-backdrop')).toBeHidden();
+  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
   await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
   await expect(page.getByRole('button',{name:/Pause/})).toHaveCount(0);
   expect(page.url()).toBe(pageUrl);
@@ -508,6 +604,7 @@ test('one drum hit dismisses results and a second hit starts the next run',async
   await page.waitForTimeout(2_050);
   await page.keyboard.press('j');
   await expect(page.locator('.result-backdrop')).toBeHidden();
+  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
   await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
   await expect(page.getByRole('button',{name:/Pause/})).toHaveCount(0);
   await page.keyboard.press('j');

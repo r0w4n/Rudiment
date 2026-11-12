@@ -17,6 +17,16 @@ Four velocity layers are derived unchanged from the **Acoustic Snare** instrumen
 
 Vendored files and upstream names are listed in `web/public/audio/ATTRIBUTION.md`. No commercial kit samples are included.
 
+## Metronome recordings
+
+The six bundled metronome WAVs are CC0 1.0 recordings from the **Versilian
+Community Sample Library (VCSL)**, obtained from Carl Testa's
+VCSL-for-Estuary mirror. The collection is created by Versilian Studios LLC
+and community contributors; the mirror was formatted by Carl Testa. The
+recording-level contributor is not identified in the available sample
+metadata. Source files, direct URLs, processing details, and bundled names
+are listed in `web/public/audio/ATTRIBUTION.md`.
+
 ## Historical rudiment reference set
 
 The 11 built-in reference exercises are modern teaching adaptations based on rudiment names in Charles Stewart Ashworth's *A New, Useful and Complete System of Drum Beating* (1812), a public-domain historical work. The supplied MIDI, manifest and reference PNG/SVG engravings are independently generated modern exercises and are not facsimiles or verified note-for-note transcriptions. Their full provenance and limitations are preserved in `tests/fixtures/rudiment-reference/README.md`.
