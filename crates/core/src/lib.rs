@@ -596,7 +596,10 @@ pub fn parse_midi(
             "{missing} note(s) have no aligned R/L lyric and show as ·."
         ));
     }
-    let hash = format!("{:x}", Sha256::digest(bytes));
+    let hash: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let title = filename
         .strip_suffix(".midi")
         .or_else(|| filename.strip_suffix(".mid"))
@@ -1369,6 +1372,20 @@ mod tests {
         assert_eq!(e.hits.len(), 2);
         assert_eq!(e.hits[0].hand, Hand::R);
         assert_eq!(e.hits[1].hand, Hand::L);
+    }
+    #[test]
+    fn imported_midi_preserves_sha256_hash_and_id() {
+        let bytes = include_bytes!("../../../web/public/exercises/quarter-note-reference.mid");
+        let exercise = parse_midi(bytes, "reference.mid", None).unwrap();
+        let renamed = parse_midi(bytes, "renamed.mid", Some(exercise.selected_track)).unwrap();
+
+        assert_eq!(
+            exercise.content_hash,
+            "dd5f576afb6c184e953d9289237d17cb0fcdb66187f7324ae8ece95113a8b384"
+        );
+        assert_eq!(exercise.id, "import-dd5f576afb6c");
+        assert_eq!(renamed.content_hash, exercise.content_hash);
+        assert_eq!(renamed.id, exercise.id);
     }
     #[test]
     fn corrupt_midi_is_rejected() {
