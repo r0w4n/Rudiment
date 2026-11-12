@@ -1709,7 +1709,7 @@ test('repeat-until-good setting persists and retries a failed bar', async ({ pag
   }))).toBe(true);
   await page.evaluate(() => {
     let started = false;
-    const label = document.querySelector('.position-row span')!;
+    const label = document.querySelector('#bar-selection-current')!;
     new MutationObserver(() => {
       if (started || !label.textContent?.includes('TRY 2')) return;
       started = true;
@@ -1754,7 +1754,7 @@ test('single-bar repetition preserves the visible score and reuses its SVG', asy
     const notation = document.querySelector<HTMLElement>('#notation')!;
     const originalSvg = notation.querySelector('svg')!;
     (window as any).__repeatViewport = { before: -1, after: -1, sameSvg: false, playheadBeat: -1 };
-    const label = document.querySelector('.bar-selection-trigger span')!;
+    const label = document.querySelector('#bar-selection-current')!;
     new MutationObserver(() => {
       if (!label.textContent?.includes('TRY 2') || (window as any).__repeatViewport.before >= 0) return;
       (window as any).__repeatViewport.before = notation.scrollTop;
@@ -1788,7 +1788,7 @@ test('bar retries stay on tempo and pause/resume preserves position without scor
 
   await page.evaluate(() => {
     (window as any).__attemptTimes = [];
-    const label = document.querySelector('.position-row span')!;
+    const label = document.querySelector('#bar-selection-current')!;
     new MutationObserver(() => {
       const match = label.textContent?.match(/TRY (\d+)/);
       if (match) (window as any).__attemptTimes.push({ attempt: Number(match[1]), at: performance.now() });
