@@ -1476,6 +1476,42 @@ mod tests {
         ));
     }
     #[test]
+    fn parser_rejects_pathological_event_counts_before_processing_notes() {
+        use midly::{
+            Header, TrackEvent,
+            num::{u4, u7, u15, u28},
+        };
+
+        let mut track = Vec::with_capacity(100_001);
+        for _ in 0..100_000 {
+            track.push(TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(9),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(38),
+                        vel: u7::new(100),
+                    },
+                },
+            });
+        }
+        track.push(TrackEvent {
+            delta: u28::new(0),
+            kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+        });
+        let smf = Smf {
+            header: Header::new(Format::SingleTrack, Timing::Metrical(u15::new(480))),
+            tracks: vec![track],
+        };
+        let mut bytes = Vec::new();
+        smf.write_std(&mut bytes).unwrap();
+
+        assert!(matches!(
+            parse_midi(&bytes, "event-bomb.mid", None),
+            Err(MidiError::TooManyEvents)
+        ));
+    }
+    #[test]
     fn ambiguous_lyrics_are_not_guessed() {
         let e = parse_midi(&fixture(true), "ambiguous.mid", None).unwrap();
         assert!(e.hits.iter().all(|h| h.hand == Hand::Unknown));

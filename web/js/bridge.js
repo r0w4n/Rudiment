@@ -34,6 +34,13 @@ const velocityLayers = velocity => {
   return [{index:lower,weight:Math.cos(mix*Math.PI/2)},{index:upper,weight:Math.sin(mix*Math.PI/2)}];
 };
 const audioErrorMessage = error => error instanceof Error ? error.message : String(error ?? 'Unknown audio error');
+const performanceProfile={
+  enabled:globalThis.__RUDIMENT_PERF__===true,
+  samples:new Map(),
+  record(name,value){if(!this.enabled||!Number.isFinite(value))return;const values=this.samples.get(name)??[];values.push(value);this.samples.set(name,values);},
+  reset(){this.samples.clear();},
+  snapshot(){return Object.fromEntries([...this.samples].map(([name,values])=>[name,[...values]]));}
+};
 function tempoAtBeat(beat,map,initialBpm){let bpm=initialBpm;for(const change of map){if(change.beat>beat)break;bpm=change.bpm;}return bpm;}
 function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),within=beat-bars*meter;return `${bars}:${within}:0`;}
 
@@ -52,6 +59,7 @@ const visualMetronome = {
     const dots=[...root.querySelectorAll('.visual-metronome-beats i')];
     const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
     const dot=dots[index];if(!dot)return;
+    performanceProfile.record('metronome_visual_jitter_ms',performance.now()-event.performanceTime);
     root.dataset.pulse=String(event.step);root.dataset.scheduledAt=String(event.performanceTime);
     dot.animate([
       {transform:'scale(1)',opacity:.72,boxShadow:'0 0 0 transparent'},
@@ -89,13 +97,10 @@ const visualMetronome = {
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
-  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], sampleErrors: [], fallbackHits: 0, snareStarts: 0, lastSnareError: null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
-  async ensure() {
+  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, layerGains: [], layerPeaks: [], sampleErrors: [], snareStarts: 0, lastSnareError: null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
+  preload() {
+    if(this.buffersPromise)return this.buffersPromise;
     this.state = 'loading';
-    // Start/resume the context immediately while the Connect click still has
-    // mobile browser user activation. MIDI permission UI may otherwise consume
-    // that activation before the asynchronous sample decode has completed.
-    const startPromise=Tone.start();
     this.raw ??= Tone.getContext().rawContext;
     if (!this.master) {
       this.master = this.raw.createGain(); this.master.gain.value = .84;
@@ -108,8 +113,8 @@ const audio = {
       const urls = ['audio/snare-soft.wav','audio/snare-medium.wav','audio/snare-hard.wav','audio/snare-accent.wav'].map(publicAsset);
       // Sample loading must never hold the audio context or practice transport
       // hostage. Some Web MIDI wrapper browsers expose Web Audio but leave audio
-      // decodeAudioData pending forever. Hits use the synthesised snare until a
-      // valid layer has decoded, and switch to the acoustic layers as they arrive.
+      // decodeAudioData pending forever. Until an acoustic layer has decoded,
+      // snare monitoring stays silent rather than substituting a generated sound.
       this.buffersPromise = Promise.all(urls.map(async (url,index) => {
         try {
           const response = await fetch(url); if (!response.ok) throw new Error(String(response.status));
@@ -131,13 +136,21 @@ const audio = {
         catch(error) { this.sampleErrors[index]=audioErrorMessage(error); return null; }
       })).then(buffers => {
         this.buffers=buffers;
-        this.state=buffers.some(Boolean)?'ready':'fallback';
+        this.state=buffers.some(Boolean)?'ready':'unavailable';
         return buffers;
       });
     }
+    return this.buffersPromise;
+  },
+  async ensure() {
+    // Start/resume the context immediately while the Connect click still has
+    // mobile browser user activation. MIDI permission UI may otherwise consume
+    // that activation before the asynchronous sample decode has completed.
+    const startPromise=Tone.start();
+    this.preload();
     try { await startPromise; }
     catch(error) { this.state='locked'; this.lastSnareError=audioErrorMessage(error); throw error; }
-    this.state = this.buffers.some(Boolean) ? 'ready' : (this.buffersPromise ? 'loading' : 'fallback');
+    this.state = this.buffers.some(Boolean) ? 'ready' : (this.state==='unavailable' ? 'unavailable' : 'loading');
     return { state: this.state, sampleLayers: this.buffers.filter(Boolean).length };
   },
   perfAt(audioTime) {
@@ -151,6 +164,7 @@ const audio = {
     return direct;
   },
   playSnare(velocity = 105, when = null) {
+    const profileStart=performanceProfile.enabled?performance.now():0;
     if (!this.raw || this.raw.state !== 'running') { this.state='locked'; return false; }
     if(Number(velocity)<=0)return false;
     const time = when ?? this.raw.currentTime, scheduled=time>this.raw.currentTime+.001, response=velocityGain(velocity);
@@ -169,34 +183,25 @@ const audio = {
         } catch(error) { this.lastSnareError=audioErrorMessage(error); }
       }
     }
-    if(!started){
-      try { this.syntheticSnare(time, velocity, scheduled);this.fallbackHits++;started=1; }
-      catch(error) { this.lastSnareError=audioErrorMessage(error); }
-    }
     this.snareStarts+=started;
+    performanceProfile.record('audio_scheduling_ms',performance.now()-profileStart);
     return started>0;
   },
   monitorSnare(velocity = 105) {
     if(Number(velocity)<=0)return false;
     if(this.playSnare(velocity))return true;
+    // The context is already available, so a false result here only means the
+    // acoustic layer is still loading or unavailable. Do not ask Tone to unlock
+    // again for every hit while preloading is in flight.
+    if(this.raw?.state==='running')return true;
     // A permission sheet, screen rotation or mobile power policy can suspend a
     // previously unlocked context. The Connect gesture has already authorised
-    // audio, so resume it and preserve this first physical strike.
+    // audio, so make the sample graph ready for the next physical strike.
     // Auto-reconnected MIDI devices can deliver a hit before the user has
-    // opened the connection panel. Create/resume the graph and replay that
-    // first strike as soon as the browser permits audio.
+    // opened the connection panel. Create/resume the graph without replacing
+    // that first strike with a generated sound.
     this.ensure().then(()=>this.playSnare(velocity)).catch(error=>{this.lastSnareError=audioErrorMessage(error);});
     return true;
-  },
-  syntheticSnare(time, velocity, scheduled = false) {
-    const length = Math.floor(this.raw.sampleRate * .2), buffer = this.raw.createBuffer(1, length, this.raw.sampleRate), data = buffer.getChannelData(0);
-    for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (this.raw.sampleRate * .05));
-    const source = this.raw.createBufferSource(), filter = this.raw.createBiquadFilter(), gain = this.raw.createGain();
-    source.buffer = buffer; filter.type = 'highpass'; filter.frequency.value = 850; gain.gain.value = .6 * velocityGain(velocity);
-    source.connect(filter); filter.connect(gain); gain.connect(this.snareGain);this.voices.add(source);
-    source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);source.disconnect();filter.disconnect();gain.disconnect();};
-    if(scheduled)this.scheduledVoices.add(source);
-    source.start(time);
   },
   click(time, accent = false, timbre = 'woodblock') {
     const osc = this.raw.createOscillator(), gain = this.raw.createGain(), filter = this.raw.createBiquadFilter();
@@ -266,12 +271,14 @@ const audio = {
     onFrame(initialBeat,performance.now(),runPerformance);
     transport.start(startDelay ? `+${startDelay}` : undefined);
     let lastStateFrame=-Infinity;
+    let lastAnimationFrame=performance.now();
     const frame = () => {
       if (generation !== this.generation) return;
       // Keep the score at the exact paused position during the short audio
       // scheduling lead-in. Without the clamp, resuming visibly jumps the
       // playhead backwards before the Tone transport starts.
       const now = performance.now(), elapsedBeats=transport.ticks/transport.PPQ;
+      performanceProfile.record('animation_frame_interval_ms',now-lastAnimationFrame);lastAnimationFrame=now;
       const beat = offset + elapsedBeats-countBeats;
       this.lastBeat=beat;
       const rangeStart=Number(options.displayRangeStart)||0,rangeBeats=Math.max(.001,Number(options.displayRangeBeats)||options.exerciseBeats);
@@ -299,8 +306,15 @@ const audio = {
   }
 };
 
+// Fetch and decode the acoustic layers as soon as the app loads. Creating and
+// filling AudioBuffers is safe before the browser grants playback; Tone.start()
+// remains inside ensure() so autoplay rules are still respected.
+try { audio.preload(); }
+catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(error); }
+
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
 let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+let pendingScoreFeedback=[],pendingScoreFeedbackBeat=-1,pendingScoreFeedbackFrame=0;
 let selectedBarRange={start:0,end:Number.MAX_SAFE_INTEGER};
 function applySelectedBarRange(){
   if(!scoreData.svg)return;
@@ -316,7 +330,7 @@ const durationTable=[[4,'w',false,false],[3,'h',true,false],[2,'h',false,false],
 const durationSpec = beats => durationTable.find(([value])=>Math.abs(value-beats)<.001)??durationTable.at(-1);
 const writtenDuration = beats => {const [,duration,,tuplet]=durationSpec(beats);return tuplet?`${duration}t`:duration;};
 function noteWithDuration(keys,beats,rest=false) {
-  const [value,duration,dotted,tuplet]=durationSpec(beats),note=new StaveNote({keys,duration:`${duration}${rest?'r':''}`,clef:'percussion',stemDirection:1});
+  const [,duration,dotted,tuplet]=durationSpec(beats),note=new StaveNote({keys,duration:`${duration}${rest?'r':''}`,clef:'percussion',stemDirection:1});
   if(dotted){Dot.buildAndAttach([note],{all:!rest});note.applyTickMultiplier(3,2);}
   if(tuplet)note.rudimentTuplet=true;
   return note;
@@ -357,6 +371,7 @@ function instrumentForHit(hit) {
   return 'snare';
 }
 function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
+  const profileStart=performanceProfile.enabled&&layoutPass===0?performance.now():0;
   const element = document.getElementById('notation'); if (!element) return; element.innerHTML = '';
   const isResize=scoreData.exercise===exercise;
   const previousBeat=isResize&&Number.isFinite(scoreData.lastBeat)?scoreData.lastBeat:-99;
@@ -553,24 +568,36 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
       const matrix=text.getCTM(),x=Number(text.getAttribute('x'))||0,y=Number(text.getAttribute('y'))||0;
       return matrix?matrix.b*x+matrix.d*y+matrix.f:y;
     };
-    const stickingBaselines=Array.from({length:lineCount},(_,row)=>[...svg.querySelectorAll(`.score-note[data-system-row="${row}"] .vf-annotation > text`)].map(textBaseline));
-    const accentBaselines=Array.from({length:lineCount},(_,row)=>[...svg.querySelectorAll(`.score-note[data-system-row="${row}"][data-accent="true"]`)].flatMap(note=>[...note.querySelectorAll(':scope > .vf-notehead > text')].slice(1)).map(textBaseline));
+    // Index the SVG once. Querying the complete score separately for every
+    // system made this clearance check quadratic on long exercises (625 full
+    // DOM scans for the 10,000-note benchmark).
+    const stickingBaselines=Array.from({length:lineCount},()=>[]),accentBaselines=Array.from({length:lineCount},()=>[]);
+    for(const text of svg.querySelectorAll('.score-note .vf-annotation > text')){
+      const row=Number(text.closest('.score-note')?.dataset.systemRow);
+      if(Number.isInteger(row)&&stickingBaselines[row])stickingBaselines[row].push(textBaseline(text));
+    }
+    for(const note of svg.querySelectorAll('.score-note[data-accent="true"]')){
+      const row=Number(note.dataset.systemRow);if(!Number.isInteger(row)||!accentBaselines[row])continue;
+      for(const text of [...note.querySelectorAll(':scope > .vf-notehead > text')].slice(1))accentBaselines[row].push(textBaseline(text));
+    }
     const clearances=stickingBaselines.slice(0,-1).map((baselines,row)=>baselines.length&&accentBaselines[row+1].length?Math.min(...accentBaselines[row+1])-Math.max(...baselines):null);
     svg.dataset.systemMarkClearances=JSON.stringify(clearances);
     const shortfall=Math.max(0,...clearances.filter(Number.isFinite).map(clearance=>SYSTEM_MARK_BASELINE_CLEARANCE-clearance));
     if(shortfall>.5&&layoutPass<2){
       renderScore(exercise,Math.ceil(scoreRowHeight+shortfall),layoutPass+1);
+      if(layoutPass===0)performanceProfile.record('notation_render_ms',performance.now()-profileStart);
       return;
     }
   }
-  const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
+  const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('role','group');markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
   const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
-  const noteByExpectedId=new Map(),noteByBeatInstrument=new Map();
+  const noteByExpectedId=new Map(),noteByBeatInstrument=new Map(),notesByRow=Array.from({length:lineCount},()=>[]);
   for(const meta of notesMeta){
     if(meta.hit?.id)noteByExpectedId.set(meta.hit.id,meta);
     noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`,meta);
+    notesByRow[meta.row]?.push(meta);
   }
-  scoreData={notes:notesMeta,noteByExpectedId,noteByBeatInstrument,appliedExpectedJudgements:new Map(),svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:0,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:0,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
   applySelectedBarRange();
   applyJudgements(previousJudgements);updateScore(previousBeat,null);
   if(typeof ResizeObserver!=='undefined'){
@@ -580,6 +607,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
     });
     scoreResizeObserver.observe(element);
   }
+  if(layoutPass===0)performanceProfile.record('notation_render_ms',performance.now()-profileStart);
 }
 function positionAtBeat(beat) {
   const bars=scoreData.bars;if(!bars.length)return {x:0,y:0,row:0,bar:0};
@@ -644,7 +672,22 @@ function paintExpectedJudgement(result,touchedGroups){
   }
   touchedGroups.add(group);
 }
+function nearestNoteInRow(row,beat){
+  const notes=scoreData.notesByRow?.[row]??[];if(!notes.length)return null;
+  let low=0,high=notes.length;
+  while(low<high){const middle=(low+high)>>1;if(notes[middle].beat<beat)low=middle+1;else high=middle;}
+  const after=notes[Math.min(low,notes.length-1)],before=notes[Math.max(0,low-1)];
+  return Math.abs(before.beat-beat)<=Math.abs(after.beat-beat)?before:after;
+}
+function noteHeadY(meta,fallback){
+  const head=meta?.note.getSVGElement?.()?.querySelectorAll('.vf-notehead > text')[meta?.headIndex??0];
+  if(!head)return fallback;
+  const cached=scoreData.headYCache?.get(head);if(Number.isFinite(cached))return cached;
+  const bounds=head.getBBox(),matrix=head.getCTM(),value=matrix?matrix.b*(bounds.x+bounds.width/2)+matrix.d*(bounds.y+bounds.height/2)+matrix.f:fallback;
+  scoreData.headYCache?.set(head,value);return value;
+}
 function applyJudgements(judgements) {
+  const profileStart=performanceProfile.enabled?performance.now():0;
   const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
   scoreData.lastJudgements=judgements;
   const previous=scoreData.appliedExpectedJudgements??new Map(),next=new Map(),touchedGroups=new Set();
@@ -658,13 +701,14 @@ function applyJudgements(judgements) {
   scoreData.appliedExpectedJudgements=next;
   const markers=scoreData.svg.querySelector('#unmatched-markers');markers?.replaceChildren();
   for(const result of judgements.filter(item=>!Number.isFinite(item.expected_beat)&&Number.isFinite(item.actual_beat)&&(item.judgement==='extra'||item.judgement==='wrong_instrument'))){
-    const position=positionAtBeat(result.actual_beat),nearest=scoreData.notes.reduce((best,note)=>note.row===position.row&&(!best||Math.abs(note.beat-result.actual_beat)<Math.abs(best.beat-result.actual_beat))?note:best,null);
-    const head=nearest?.note.getSVGElement?.()?.querySelector('.vf-notehead > text'),bounds=head?.getBBox(),matrix=head?.getCTM();
-    const headY=bounds&&matrix?matrix.b*(bounds.x+bounds.width/2)+matrix.d*(bounds.y+bounds.height/2)+matrix.f:(position.y1+position.y2)/2;
-    const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',String(position.x));circle.setAttribute('cy',String(headY));circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
+    const position=positionAtBeat(result.actual_beat),nearest=nearestNoteInRow(position.row,result.actual_beat);
+    const y=noteHeadY(nearest,(position.y1+position.y2)/2);
+    const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',String(position.x));circle.setAttribute('cy',String(y));circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
   }
+  performanceProfile.record('feedback_paint_work_ms',performance.now()-profileStart);
 }
 function updateScore(beat, judgements, loopAware=false) {
+  const profileStart=performanceProfile.enabled?performance.now():0;
   const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
   if(Array.isArray(judgements))applyJudgements(judgements);
   const previousBeat=scoreData.lastBeat;
@@ -697,8 +741,21 @@ function updateScore(beat, judgements, loopAware=false) {
       if(Math.abs(cameraY-scoreData.cameraY)>.05){container.scrollTop=cameraY;scoreData.cameraY=cameraY;}
     }
   }
+  performanceProfile.record('score_update_ms',performance.now()-profileStart);
+}
+function appendScoreJudgement(beat,judgement){
+  pendingScoreFeedback.push(judgement);pendingScoreFeedbackBeat=beat;
+  if(pendingScoreFeedbackFrame)return;
+  pendingScoreFeedbackFrame=requestAnimationFrame(()=>{
+    pendingScoreFeedbackFrame=0;
+    const known=new Set(scoreData.lastJudgements.map(item=>item.event_id).filter(Boolean));
+    const appended=pendingScoreFeedback.filter(item=>!item.event_id||!known.has(item.event_id));pendingScoreFeedback=[];
+    if(appended.length)updateScore(pendingScoreFeedbackBeat,[...scoreData.lastJudgements,...appended]);
+  });
 }
 function clearScoreFeedback(preserveViewport=false) {
+  if(pendingScoreFeedbackFrame)cancelAnimationFrame(pendingScoreFeedbackFrame);
+  pendingScoreFeedbackFrame=0;pendingScoreFeedback=[];pendingScoreFeedbackBeat=-1;
   const empty=[];
   for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
@@ -718,21 +775,42 @@ function clearScoreFeedback(preserveViewport=false) {
 }
 function clearScoreFeedbackPreserveViewport(){clearScoreFeedback(true);}
 
+const MIDI_INPUT_ID_KEY='rudiment-midi-input',MIDI_INPUT_IDENTITY_KEY='rudiment-midi-input-identity';
 let selectedInput = null, midiCallback = null, midiBound = false;
 const portInfo = input => ({id:input.id,name:input.name||'Unnamed MIDI input',manufacturer:input.manufacturer||'Unknown manufacturer',state:input.state,connection:input.connection});
+function rememberMidiInput(input){
+  if(!input)return;
+  localStorage.setItem(MIDI_INPUT_ID_KEY,input.id);
+  localStorage.setItem(MIDI_INPUT_IDENTITY_KEY,JSON.stringify({name:input.name||'',manufacturer:input.manufacturer||''}));
+}
+function rememberedMidiIdentity(){
+  try{return JSON.parse(localStorage.getItem(MIDI_INPUT_IDENTITY_KEY)||'null');}
+  catch{return null;}
+}
 function sendMidiState(extra={}) { midiCallback?.({kind:'state',ports:WebMidi.enabled?WebMidi.inputs.map(portInfo):[],selectedId:selectedInput?.id||null,...extra}); }
 function bindMidiInputs() {
   if(!WebMidi.enabled)return;
   for(const input of WebMidi.inputs){input.removeListener('midimessage');input.addListener('midimessage',event=>{
+    const profileStart=performanceProfile.enabled?performance.now():0;
     // Never merge multiple kits implicitly. With no selected port, input is
     // deliberately silent until the user chooses one.
     if(!selectedInput||selectedInput.id!==input.id)return;
     const raw=Array.from(event.rawData||[]),status=raw[0]||0,data1=raw[1]||0,data2=raw[2]||0,command=status&0xf0,channel=(status&0x0f)+1;
     const type=command===0x90?(data2===0?'note_off':'note_on'):command===0x80?'note_off':command===0xb0?'cc':'other';
     midiCallback?.({kind:'message',type,note:data1,velocity:data2,channel,timestamp:event.timestamp,rawBytes:raw,inputId:input.id,inputName:input.name||'MIDI input'});
+    performanceProfile.record('midi_callback_ms',performance.now()-profileStart);
   });}
 }
-function choosePreferredInput(){const saved=localStorage.getItem('rudiment-midi-input');selectedInput=WebMidi.inputs.find(input=>input.id===saved)||((WebMidi.inputs.length===1)?WebMidi.inputs[0]:selectedInput&&WebMidi.inputs.find(input=>input.id===selectedInput.id))||null;if(selectedInput)localStorage.setItem('rudiment-midi-input',selectedInput.id);}
+function choosePreferredInput(){
+  const savedId=localStorage.getItem(MIDI_INPUT_ID_KEY),savedIdentity=rememberedMidiIdentity();
+  const identityMatches=savedIdentity?WebMidi.inputs.filter(input=>(input.name||'')===savedIdentity.name&&(input.manufacturer||'')===savedIdentity.manufacturer):[];
+  selectedInput=WebMidi.inputs.find(input=>input.id===savedId)
+    ||(identityMatches.length===1?identityMatches[0]:null)
+    ||(selectedInput&&WebMidi.inputs.find(input=>input.id===selectedInput.id))
+    ||(!savedIdentity&&WebMidi.inputs.length===1?WebMidi.inputs[0]:null)
+    ||null;
+  rememberMidiInput(selectedInput);
+}
 function bindMidiLifecycle(){if(midiBound)return;WebMidi.addListener('connected',()=>{bindMidiInputs();choosePreferredInput();sendMidiState({permission:'granted',reconnected:true});});WebMidi.addListener('disconnected',event=>{if(event.port?.id===selectedInput?.id)selectedInput=null;bindMidiInputs();sendMidiState({disconnectedId:event.port?.id,permission:'granted'});});midiBound=true;}
 async function connectMidi(callback) {
   midiCallback=callback;
@@ -742,7 +820,7 @@ async function connectMidi(callback) {
   } catch(error) { sendMidiState({error:error?.message||'MIDI permission was denied.',permission:'denied'}); }
 }
 async function autoConnectMidi(callback){midiCallback=callback;if(!navigator.requestMIDIAccess){sendMidiState({error:'Web MIDI is not available in this browser.',permission:'unsupported'});return;}try{if(!navigator.permissions?.query){sendMidiState({permission:'prompt'});return;}const status=await navigator.permissions.query({name:'midi',sysex:false});if(status.state==='granted')await connectMidi(callback);else sendMidiState({permission:status.state});status.onchange=()=>{if(status.state==='granted')connectMidi(callback);else sendMidiState({permission:status.state});};}catch{sendMidiState({permission:'prompt'});}}
-function selectMidi(id){selectedInput=WebMidi.inputs.find(input=>input.id===id)||null;if(selectedInput)localStorage.setItem('rudiment-midi-input',id);sendMidiState({permission:'granted'});}
+function selectMidi(id){selectedInput=WebMidi.inputs.find(input=>input.id===id)||null;rememberMidiInput(selectedInput);sendMidiState({permission:'granted'});}
 
 async function readFile(file,callback){if(!file)return;if(file.size>8*1024*1024){callback(new Uint8Array(),file.name,'Files larger than 8 MB are not supported.');return;}try{callback(new Uint8Array(await file.arrayBuffer()),file.name,'');}catch(error){callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
 function chooseMidi(callback){midiFileCallback=callback;const input=document.createElement('input');input.type='file';input.accept='.mid,.midi,audio/midi';input.onchange=()=>readFile(input.files?.[0],callback);input.click();}
@@ -773,9 +851,9 @@ function trapDialogTab(event,selector){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],fallbackHits:audio.fallbackHits,snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async timbre=>{await audio.ensure();audio.click(audio.raw.currentTime+.03,true,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,setSelectedBars,scrollScoreToBeat,updateScore,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,
-  saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem('rudiment-midi-input');},
+  renderScore,setSelectedBars,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
+  saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };

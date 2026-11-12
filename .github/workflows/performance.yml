@@ -1,0 +1,50 @@
+name: Performance regression checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      extended:
+        description: Run full and 15-minute endurance tiers
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: '23 3 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rudiment
+      - run: npm run qa:performance
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rudiment-performance-fast
+          path: performance-results
+          if-no-files-found: error
+          retention-days: 14
+
+  extended:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rudiment
+      - run: npm run build
+      - run: node scripts/performance/run.mjs --tier full --trace --output performance-results/full.json
+      - run: node scripts/performance/run.mjs --tier endurance --duration-ms 900000 --output performance-results/endurance.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rudiment-performance-extended
+          path: performance-results
+          if-no-files-found: error
+          retention-days: 30

@@ -5,6 +5,8 @@ repository_root=$(git rev-parse --show-toplevel)
 cd "$repository_root"
 
 echo "Running Rudiment pre-push checks..."
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --locked
-npm run build
+npm run qa:pre-push
+
+if [ "${RUDIMENT_PRE_PUSH_PERF:-0}" = "1" ]; then
+  echo "Fast performance checks were enabled for this push."
+fi

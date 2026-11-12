@@ -3,18 +3,18 @@ name: Dependency security
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 6 * * 1"
+    - cron: '17 6 * * 1'
   push:
     branches: [main]
     paths:
-      - "**/Cargo.toml"
+      - '**/Cargo.toml'
       - Cargo.lock
       - package.json
       - package-lock.json
       - .github/workflows/security.yml
   pull_request:
     paths:
-      - "**/Cargo.toml"
+      - '**/Cargo.toml'
       - Cargo.lock
       - package.json
       - package-lock.json
@@ -22,26 +22,24 @@ on:
 
 permissions:
   contents: read
-  checks: write
-  issues: write
 
 jobs:
-  rustsec:
-    name: RustSec advisory audit
-    runs-on: ubuntu-latest
+  dependencies:
+    name: npm and RustSec advisory audits
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: ./.github/actions/setup-rudiment
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  npm:
-    name: npm advisory audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+          trunk: 'false'
+          cargo-audit: 'true'
+      - run: npm run qa:security
+      - name: Upload security diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          node-version: 22
-          cache: npm
-      - run: npm audit --audit-level=high
+          name: qa-dependency-security
+          path: quality-results
+          if-no-files-found: error
+          retention-days: 30

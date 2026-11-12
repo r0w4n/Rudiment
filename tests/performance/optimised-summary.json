@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "label": "optimised-final",
+  "environment": {
+    "platform": "darwin",
+    "release": "25.6.0",
+    "arch": "arm64",
+    "logicalCpus": 10,
+    "node": "v22.23.1",
+    "browser": { "channel": "chrome", "version": "157.0.8103.51" },
+    "commit": "0c61d0129bcf411720e47567f15b5ffce5684411",
+    "dirty": true
+  },
+  "methodology": {
+    "observed": "Browser Performance API, Long Tasks API, requestAnimationFrame, synchronous callback timings, DOM mutation latency and Chromium precise heap size.",
+    "estimated": "Dropped frames are inferred from frame intervals above 16.7 ms. Acoustic output and physical USB-MIDI latency are not measured."
+  },
+  "fullMatrix": {
+    "metrics": {
+      "importToRenderMs": { "samples": 5, "p50": 451.2, "p95": 1929.4, "p99": 2221.88, "max": 2295.0 },
+      "notationRenderMs": { "samples": 5, "p50": 387.1, "p95": 1747.1, "p99": 2016.94, "max": 2084.4 },
+      "midiEventToPaintMs": { "samples": 36, "p50": 9.65, "p95": 14.13, "p99": 16.10, "max": 16.80 },
+      "keyboardEventToPaintMs": { "samples": 36, "p50": 10.30, "p95": 13.72, "p99": 13.99, "max": 14.10 },
+      "midiCallbackMs": { "samples": 786, "p50": 0.20, "p95": 0.70, "p99": 0.80, "max": 1.70 },
+      "scoreUpdateMs": { "samples": 186, "p50": 0.60, "p95": 2.67, "p99": 2.92, "max": 11.0 },
+      "feedbackPaintWorkMs": { "samples": 75, "p50": 0.40, "p95": 1.69, "p99": 4.63, "max": 10.40 },
+      "audioSchedulingMs": { "samples": 822, "p50": 0.0, "p95": 0.20, "p99": 0.20, "max": 0.80 }
+    },
+    "scenarios": {
+      "small": { "bars": 4, "notes": 64, "bpm": 60, "importToRenderMs": 60.1, "notationRenderMs": 13.1 },
+      "medium": { "bars": 30, "notes": 480, "bpm": 120, "importToRenderMs": 155.5, "notationRenderMs": 103.6 },
+      "large": { "bars": 125, "notes": 2000, "bpm": 180, "importToRenderMs": 451.2, "notationRenderMs": 387.1 },
+      "extreme": { "bars": 625, "notes": 10000, "bpm": 240, "importToRenderMs": 2295.0, "notationRenderMs": 2084.4 },
+      "dense": { "bars": 64, "notes": 2560, "bpm": 240, "importToRenderMs": 467.0, "notationRenderMs": 397.9 }
+    }
+  },
+  "endurance": {
+    "durationMs": 900000,
+    "samples": 437,
+    "exerciseLoopsObserved": 15,
+    "heapBytes": { "minimum": 18007989, "maximum": 50496799, "first": 25955222, "lastActive": 31221652, "afterStop": 39642258 },
+    "maximumMarkersWithinLoop": 1644,
+    "afterStop": { "markers": 0, "activeRun": false, "activeVoices": 0, "scheduledVoices": 0 }
+  }
+}

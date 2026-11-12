@@ -19,41 +19,16 @@ jobs:
     # Pin the image: Ubuntu 24.04 includes Rust and Google Chrome. Playwright is
     # configured to use that Chrome installation, so no browser image is needed.
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-rudiment
         with:
-          node-version: 22
-          cache: npm
-      - name: Cache Cargo registry and builds
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-      - name: Add the Rust WASM target
-        run: rustup target add wasm32-unknown-unknown
-      - name: Install prebuilt Trunk
-        env:
-          TRUNK_VERSION: 0.22.1
-          TRUNK_SHA256: 2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1
-        run: |
-          archive="$RUNNER_TEMP/trunk.tar.gz"
-          bin_dir="$RUNNER_TEMP/trunk-bin"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
-            --output "$archive"
-          echo "${TRUNK_SHA256}  ${archive}" | sha256sum --check --status
-          mkdir --parents "$bin_dir"
-          tar --extract --gzip --file "$archive" --directory "$bin_dir"
-          echo "$bin_dir" >> "$GITHUB_PATH"
-      - run: npm ci
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --locked
+          cargo-audit: 'true'
+      - run: npm run qa:quick
+      - run: npm run qa:unit
+      - run: npm run qa:security
       - name: Generate browser assets
         run: |
           npm run fixtures
@@ -62,7 +37,11 @@ jobs:
         working-directory: web
         run: trunk build index.html --release --locked=true --skip-version-check --dist ../dist --public-url "./"
       - name: Run browser tests with runner Chrome
-        run: npm run test:e2e
+        run: npm run qa:browser -- --skip-build
+      - name: Run accessibility gates with runner Chrome
+        run: npm run qa:a11y -- --skip-build
+      - name: Run release performance gates
+        run: npm run qa:performance -- --skip-build
       - name: Upload browser failure comparisons
         if: failure()
         uses: actions/upload-artifact@v4
@@ -71,6 +50,14 @@ jobs:
           path: test-results
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rudiment-release-quality
+          path: quality-results
+          if-no-files-found: error
+          retention-days: 14
       - name: Verify deployable asset graph
         run: |
           test -s dist/index.html

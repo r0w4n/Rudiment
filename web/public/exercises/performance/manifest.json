@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "deterministic",
+  "fixtures": {
+    "small": {
+      "name": "Performance Small",
+      "bars": 4,
+      "bpm": 60,
+      "subdivision": 4,
+      "noteCount": 64
+    },
+    "medium": {
+      "name": "Performance Medium",
+      "bars": 30,
+      "bpm": 120,
+      "subdivision": 4,
+      "noteCount": 480
+    },
+    "large": {
+      "name": "Performance Large",
+      "bars": 125,
+      "bpm": 180,
+      "subdivision": 4,
+      "noteCount": 2000
+    },
+    "extreme": {
+      "name": "Performance Extreme",
+      "bars": 625,
+      "bpm": 240,
+      "subdivision": 4,
+      "noteCount": 10000
+    },
+    "dense": {
+      "name": "Performance Dense",
+      "bars": 64,
+      "bpm": 240,
+      "subdivision": 8,
+      "simultaneousEvery": 4,
+      "noteCount": 2560
+    }
+  }
+}

@@ -5,9 +5,12 @@
 /web/dist/
 /web/public/bridge.js
 /web/public/exercises/*.mid
+/web/public/exercises/performance/*.mid
 /spikes/alphatab-dist/
 /.DS_Store
 *.log
 /test-results/
+/performance-results/
+/quality-results/
 
 artifacts/*

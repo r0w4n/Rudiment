@@ -1,6 +1,17 @@
 import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
+test('acoustic snare layers preload before the first audio interaction', async ({ page }) => {
+  const requested:string[]=[];
+  page.on('request',request=>{if(/\/audio\/snare-.*\.wav$/.test(new URL(request.url()).pathname))requested.push(request.url());});
+  await page.goto('/');
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().sampleLayers)).toBe(4);
+  expect(new Set(requested).size).toBe(4);
+  const diagnostics=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
+  expect(diagnostics.snareStarts).toBe(0);
+  expect(diagnostics.activeRun).toBe(false);
+});
+
 test('first-use workspace renders real notation and lifecycle controls', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Single Paradiddle').first()).toBeVisible();
@@ -36,7 +47,7 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   const settingsButton=page.getByRole('button',{name:'Open settings'});
   await expect(settingsButton.locator('svg.lucide')).toHaveCount(1);
   await expect(settingsButton).toHaveText('');
-  const libraryButton=page.getByRole('button',{name:'MIDI library'});
+  const libraryButton=page.getByRole('button',{name:/MIDI library/});
   await expect(libraryButton.locator('svg.lucide')).toHaveCount(1);
   await expect(libraryButton.locator('.library-count')).toHaveText('11');
   await expect(page.locator('.score-meta #midi-library-trigger')).toHaveCount(0);
@@ -121,6 +132,9 @@ test('restarting while audio loads cannot revive the practice transport', async 
 
 test('Restart clears painted note feedback', async ({ page }) => {
   await page.goto('/');
+  // Keep the automation round trip comfortably inside the first note's match
+  // window; this test is about clearing feedback, not 60 BPM boundary timing.
+  await page.getByLabel('Tempo in BPM').fill('240');
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
@@ -380,6 +394,18 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   expect(narrowResultLayout.rect.x).toBeGreaterThanOrEqual(5);
   expect(narrowResultLayout.rect.right).toBeLessThanOrEqual(407);
   await expect(resultDialog.locator('.summary-footer')).toBeVisible();
+  await page.setViewportSize({width:2168,height:522});
+  const shallowResultLayout=await resultDialog.evaluate(element=>{
+    const modal=element.getBoundingClientRect();
+    const actions=element.querySelector<HTMLElement>('.result-actions')!.getBoundingClientRect();
+    return {
+      clientHeight:element.clientHeight,
+      scrollHeight:element.scrollHeight,
+      actionsFit:actions.top>=modal.top&&actions.bottom<=modal.bottom,
+    };
+  });
+  expect(shallowResultLayout.scrollHeight).toBeLessThanOrEqual(shallowResultLayout.clientHeight);
+  expect(shallowResultLayout.actionsFit).toBe(true);
   await page.setViewportSize({width:915,height:412});
   const landscapeResultLayout=await resultDialog.evaluate(element=>({clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,clientWidth:element.clientWidth,scrollWidth:element.scrollWidth}));
   expect(landscapeResultLayout.scrollHeight).toBeLessThanOrEqual(landscapeResultLayout.clientHeight);
@@ -906,7 +932,7 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await expect(page.getByText('Current snare: note 40, channel 10')).toBeVisible();
 });
 
-test('MIDI monitoring falls back immediately when sample decoding stalls', async ({ page }) => {
+test('MIDI monitoring does not generate a substitute snare when sample decoding stalls', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(BaseAudioContext.prototype,'decodeAudioData',{
       configurable:true,
@@ -923,21 +949,17 @@ test('MIDI monitoring falls back immediately when sample decoding stalls', async
     Object.assign(window,{__rudimentMidiWebInput:input});
   });
   await page.goto('/');
-  await page.evaluate(() => {
-    const prototype=AudioBufferSourceNode.prototype,original=prototype.start;
-    (window as unknown as {__midiWebVoiceStarts:number}).__midiWebVoiceStarts=0;
-    prototype.start=function(...args){(window as unknown as {__midiWebVoiceStarts:number}).__midiWebVoiceStarts++;return original.apply(this,args as [number]);};
-  });
   await page.getByRole('button',{name:'MIDI connection'}).click();
   await expect(page.locator('.status-pill')).toContainText('MIDIWeb Kit · connected');
   await page.evaluate(()=>(window as unknown as {__rudimentMidiWebInput:{dispatch(data:number[]):void}}).__rudimentMidiWebInput.dispatch([0x99,38,96]));
-  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().fallbackHits)).toBeGreaterThan(0);
-  await expect.poll(()=>page.evaluate(()=>(window as unknown as {__midiWebVoiceStarts:number}).__midiWebVoiceStarts)).toBeGreaterThan(0);
+  await page.waitForTimeout(100);
   const diagnostics=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
   expect(diagnostics.contextState).toBe('running');
   expect(diagnostics.sampleLayers).toBe(0);
   expect(diagnostics.snareGain).toBeGreaterThan(0);
-  expect(diagnostics.snareStarts).toBeGreaterThan(0);
+  expect(diagnostics.snareStarts).toBe(0);
+  expect(diagnostics.activeVoices).toBe(0);
+  expect(diagnostics.scheduledVoices).toBe(0);
   expect(diagnostics.lastSnareError).toBeNull();
 });
 
@@ -988,6 +1010,58 @@ test('previously authorised sole MIDI input reconnects automatically', async ({ 
   await expect(page.locator('.status-pill')).toContainText('Returning Kit · connected');
   await expect(page.locator('.mode-segment')).toHaveCount(0);
   await expect(page.getByLabel('Select bars')).toBeVisible();
+});
+
+test('last selected MIDI input reconnects automatically when several inputs are available', async ({ page }) => {
+  await page.addInitScript(() => {
+    const makeInput=(id:string,name:string)=>{
+      const input={id,name,manufacturer:'Rudiment Test',type:'input',state:'connected',connection:'open',onmidimessage:null,onstatechange:null,open:async()=>input,close:async()=>input};
+      return input;
+    };
+    const first=makeInput('kit-a','Kit A'),second=makeInput('kit-b','Kit B');
+    const access={inputs:new Map([[first.id,first],[second.id,second]]),outputs:new Map(),sysexEnabled:false,onstatechange:null};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
+  });
+  await page.goto('/');
+  await expect(page.locator('.status-pill')).toContainText('No MIDI drums detected');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Input device').selectOption('kit-b');
+  await expect(page.locator('.midi-state')).toContainText('Kit B · connected');
+  await page.reload();
+  await expect(page.locator('.status-pill')).toContainText('Kit B · connected');
+});
+
+test('remembered MIDI input reconnects when the browser changes its port id', async ({ page }) => {
+  await page.addInitScript(() => {
+    const makeInput=(id:string,name:string,manufacturer:string)=>{
+      const input={id,name,manufacturer,type:'input',state:'connected',connection:'open',onmidimessage:null,onstatechange:null,open:async()=>input,close:async()=>input};
+      return input;
+    };
+    const remembered=makeInput('new-browser-id','Stage Drums','Acme'),other=makeInput('other-kit','Other Kit','Acme');
+    const access={inputs:new Map([[remembered.id,remembered],[other.id,other]]),outputs:new Map(),sysexEnabled:false,onstatechange:null};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
+    localStorage.setItem('rudiment-midi-input','old-browser-id');
+    localStorage.setItem('rudiment-midi-input-identity',JSON.stringify({name:'Stage Drums',manufacturer:'Acme'}));
+  });
+  await page.goto('/');
+  await expect(page.locator('.status-pill')).toContainText('Stage Drums · connected');
+  expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('new-browser-id');
+});
+
+test('auto-connect waits for the remembered MIDI input when a different input is present', async ({ page }) => {
+  await page.addInitScript(() => {
+    const input={id:'other-kit',name:'Other Kit',manufacturer:'Acme',type:'input',state:'connected',connection:'open',onmidimessage:null,onstatechange:null,open:async()=>input,close:async()=>input};
+    const access={inputs:new Map([[input.id,input]]),outputs:new Map(),sysexEnabled:false,onstatechange:null};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
+    localStorage.setItem('rudiment-midi-input','remembered-kit');
+    localStorage.setItem('rudiment-midi-input-identity',JSON.stringify({name:'Stage Drums',manufacturer:'Acme'}));
+  });
+  await page.goto('/');
+  await expect(page.locator('.status-pill')).toContainText('No MIDI drums detected');
+  expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('remembered-kit');
 });
 
 test('unplayed notes stay neutral and the playhead interpolates continuously', async ({ page }) => {
@@ -1389,7 +1463,7 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
   expect(await halo.evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(22, 132, 95)');
   await expect.poll(async()=>Number(await halo.evaluate(element=>getComputedStyle(element).opacity))).toBeGreaterThan(.6);
   const haloSize=await halo.evaluate(element=>{
-    const head=element.parentElement!.querySelector(':scope > text')!,bounds=head.getBBox();
+    const head=element.parentElement!.querySelector(':scope > text') as SVGGraphicsElement,bounds=head.getBBox();
     return {radius:Number(element.getAttribute('r')),headWidth:bounds.width};
   });
   expect(haloSize.radius).toBeCloseTo(haloSize.headWidth*.84,5);
@@ -1747,6 +1821,55 @@ test('bar retries stay on tempo and pause/resume preserves position without scor
   await expect.poll(() => diagnostics().then(value => value.currentBeat)).toBeGreaterThan(pausedBeat + 0.15);
   await page.getByRole('button', { name: /Restart/ }).click();
   expect((await diagnostics()).scheduledVoices).toBe(0);
+});
+
+test('top toolbar fits and preserves control order at mobile and desktop widths', async ({ page }) => {
+  const widths=[320,360,375,390,430,520,1440];
+  await page.goto('/');
+
+  for(const width of widths){
+    await page.setViewportSize({width,height:900});
+    const layout=await page.locator('.topbar').evaluate((topbar,width)=>{
+      const controls=[
+        topbar.querySelector<HTMLElement>('#midi-library-trigger')!,
+        topbar.querySelector<HTMLElement>('#stats-trigger')!,
+        topbar.querySelector<HTMLElement>('.brand')!,
+        topbar.querySelector<HTMLElement>('.tempo-control')!,
+        topbar.querySelector<HTMLElement>('.settings-trigger')!,
+      ].map(element=>element.getBoundingClientRect());
+      const status=topbar.querySelector<HTMLElement>('.status-pill')!.getBoundingClientRect();
+      const toolbar=topbar.getBoundingClientRect();
+      const overlaps=(a:DOMRect,b:DOMRect)=>a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top;
+      return {
+        horizontalOverflow:document.documentElement.scrollWidth>width||document.body.scrollWidth>width,
+        controlsFit:controls.every(box=>box.left>=toolbar.left&&box.right<=toolbar.right&&box.top>=toolbar.top&&box.bottom<=toolbar.bottom),
+        controlsOverlap:controls.some((box,index)=>controls.slice(index+1).some(other=>overlaps(box,other))),
+        statusFits:status.left>=toolbar.left&&status.right<=toolbar.right&&status.top>=toolbar.top&&status.bottom<=toolbar.bottom,
+        order:controls.map(box=>({left:box.left,top:box.top,centerY:(box.top+box.bottom)/2})),
+        sourceOrder:[...topbar.children]
+          .filter(element=>element.matches('#midi-library-trigger,#stats-trigger,.settings-trigger,.brand,.tempo-control'))
+          .map(element=>element.getAttribute('aria-label')||'Tempo'),
+        tempoWidth:controls[3].width,
+      };
+    },width);
+
+    expect(layout.horizontalOverflow,`${width}px has horizontal overflow`).toBe(false);
+    expect(layout.controlsFit,`${width}px clips a toolbar control`).toBe(true);
+    expect(layout.controlsOverlap,`${width}px overlaps toolbar controls`).toBe(false);
+    expect(layout.statusFits,`${width}px clips the MIDI status bar`).toBe(true);
+    expect(layout.tempoWidth,`${width}px compresses the BPM control`).toBeGreaterThanOrEqual(149);
+    expect(layout.sourceOrder).toEqual(['MIDI library · 11 exercises','Stats','Rudiment','Tempo','Open settings']);
+
+    if(width<=360){
+      const [library,stats,brand,tempo,settings]=layout.order;
+      expect([library.top,stats.top,brand.top,settings.top],`${width}px primary controls do not share row one`).toEqual([library.top,library.top,library.top,library.top]);
+      expect([library.left,stats.left,brand.left,settings.left],`${width}px changes primary control order`).toEqual([...([library.left,stats.left,brand.left,settings.left] as number[])].sort((a,b)=>a-b));
+      expect(tempo.top,`${width}px does not place BPM on row two`).toBeGreaterThan(settings.top);
+    }else if(width<=700){
+      expect(layout.order.map(control=>control.left),`${width}px changes toolbar control order`).toEqual([...layout.order.map(control=>control.left)].sort((a,b)=>a-b));
+      expect(Math.max(...layout.order.map(control=>control.centerY))-Math.min(...layout.order.map(control=>control.centerY)),`${width}px unnecessarily wraps toolbar controls`).toBeLessThanOrEqual(1);
+    }
+  }
 });
 
 test('permission denial and narrow layout remain usable', async ({ page }) => {

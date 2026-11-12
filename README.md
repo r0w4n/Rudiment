@@ -25,20 +25,20 @@ The development server writes its disposable hot-reload build to `web/dist/`; re
 
 ```bash
 source "$HOME/.cargo/env"
-npm run check
-npm run test:e2e
-npm run security
+npm run qa:quick
+npm run qa:unit
+npm run qa:browser
 ```
 
 The static release is written to `dist/`. `npm run build` and `npm run dev` deterministically regenerate the ignored bundled SMF files. `npm run spike:alphatab` rebuilds the ignored renderer-selection spike.
 
-`npm run hooks:install` opts this checkout into the tracked hooks under `.githooks/`. The pre-commit hook performs formatting, JavaScript syntax and Rust compilation checks; the pre-push hook runs Clippy, Rust tests and the production build. The full browser suite remains in CI so routine pushes do not incur an extra minute locally. `npm run check` runs the complete non-browser quality gate on demand.
+`npm run hooks:install` opts this checkout into the tracked hooks under `.githooks/`. Pre-commit selects fast shared checks from staged file types; pre-push runs the broader mandatory gate, with performance opt-in through `RUDIMENT_PRE_PUSH_PERF=1`. CI invokes the same `qa:*` entry points. See [QA.md](QA.md) for the full command matrix, prerequisites, reports, security model, accessibility limits, and performance-baseline policy.
 
 ## GitHub Pages
 
 `.github/workflows/pages.yml` tests the application, builds one relocatable release for both Playwright and GitHub Pages, verifies the deployable app asset graph, and deploys through the official Pages actions after every push to `main` (or a manual workflow dispatch). The workflow uses the hosted runner's bundled Chrome and an integrity-checked prebuilt Trunk binary, avoiding a custom browser image and a source build of the deployment tool. Before the first deployment, set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**; repository settings cannot be changed by the workflow's restricted `GITHUB_TOKEN`. No custom secrets are required. The deployed URL is shown on the workflow's `github-pages` environment after a successful run.
 
-Dependency security is checked separately by `.github/workflows/security.yml` on lockfile changes and every Monday. RustSec audits Cargo dependencies and npm audits the JavaScript lockfile; Dependabot monitors Cargo, npm and GitHub Actions weekly with grouped updates.
+Dependency security is checked separately by `.github/workflows/security.yml` on lockfile changes and every Monday. RustSec audits Cargo dependencies and npm audits the JavaScript lockfile; CodeQL scans JavaScript/TypeScript and Rust; Dependabot monitors Cargo, npm and GitHub Actions weekly with grouped updates.
 
 ## Architecture
 
@@ -62,5 +62,7 @@ All imports, settings, mappings and sessions remain in IndexedDB on the current 
 Desktop Chrome is the hardware target because Web MIDI support varies by browser. Demo mode works in modern Chromium browsers without permission. Once MIDI permission has been granted, Rudiment restores the saved input automatically, selects a sole available input, and listens for reconnects; the explicit Connect control remains the first-use permission gesture and recovery path. The MIDI importer supports PPQ SMF 0/1, tempo/time-signature metadata, ordinary percussion tracks, onset-derived quarter/eighth/sixteenth and triplet values, R/L lyric events and short practice files. Raw note-gate duration is preserved as metadata but never mistaken for written rhythm. MIDI tempo maps drive playback and scoring, and imported files are saved in a browser-local IndexedDB library with the most recently selected import restored on startup. SMPTE timebases, dense polyphony and arbitrary notation remain outside this PoC.
 
 Only the standards-based General MIDI fallback is bundled. No Alesis mapping is claimed without a physical verification; MIDI Learn is authoritative for unknown kits. See [TESTING.md](TESTING.md), [DEPENDENCY_DECISIONS.md](DEPENDENCY_DECISIONS.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Real-browser profiling, workload tiers, regression policy, current findings and hardware limitations are documented in [PERFORMANCE.md](PERFORMANCE.md). The fast suite is `npm run perf:fast`; release profiling is `npm run perf:full`.
 
 The original MVP scope and acceptance baseline are retained in [RUDIMENT_CODEX_POC_SPEC_V3.md](RUDIMENT_CODEX_POC_SPEC_V3.md). Where later implementation requirements differ—particularly scoring v2—the current behaviour documented in this README and the automated tests takes precedence.

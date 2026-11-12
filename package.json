@@ -10,19 +10,45 @@
     "build": "npm run fixtures && npm run bundle && cd web && trunk build index.html --release --dist ../dist --skip-version-check --locked=true",
     "test": "cargo test --workspace",
     "test:e2e": "playwright test",
+    "lint": "eslint . && npm run typecheck",
+    "typecheck": "tsc",
+    "format:check": "prettier --check eslint.config.mjs playwright.config.ts tsconfig.json scripts/qa/*.mjs tests/e2e/accessibility.spec.ts package.json QA.md AGENTS.md TESTING.md PERFORMANCE.md .github/workflows/*.yml .github/actions/setup-rudiment/action.yml",
+    "perf:fast": "npm run build && npm run perf:fast:measure",
+    "perf:fast:measure": "node scripts/performance/run.mjs --tier fast --output performance-results/fast.json && node scripts/performance/compare.mjs tests/performance/baseline.json performance-results/fast.json --enforce && node scripts/performance/report.mjs --current performance-results/fast.json --baseline tests/performance/baseline.json --output performance-results/fast.md",
+    "perf:full": "npm run build && node scripts/performance/run.mjs --tier full --output performance-results/full.json && node scripts/performance/report.mjs --current performance-results/full.json --baseline tests/performance/baseline.json --output performance-results/full.md",
+    "perf:endurance": "npm run build && node scripts/performance/run.mjs --tier endurance --output performance-results/endurance.json",
+    "perf:report": "node scripts/performance/report.mjs --current performance-results/fast.json --baseline tests/performance/baseline.json --output performance-results/fast.md",
+    "perf:compare": "node scripts/performance/compare.mjs tests/performance/baseline.json performance-results/fast.json",
+    "perf:trace": "npm run build && node scripts/performance/run.mjs --tier full --trace --output performance-results/full-trace.json",
     "check": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --locked && npm run build",
     "security": "npm audit --audit-level=high",
+    "qa:quick": "node scripts/qa/run.mjs quick",
+    "qa:unit": "node scripts/qa/run.mjs unit",
+    "qa:security": "node scripts/qa/run.mjs security",
+    "qa:a11y": "node scripts/qa/run.mjs a11y",
+    "qa:browser": "node scripts/qa/run.mjs browser",
+    "qa:performance": "node scripts/qa/run.mjs performance",
+    "qa:pre-push": "node scripts/qa/run.mjs pre-push",
+    "qa:full": "node scripts/qa/run.mjs full",
+    "qa:report": "node scripts/qa/report.mjs",
     "hooks:install": "sh scripts/install-hooks.sh"
   },
   "dependencies": {
     "idb": "8.0.4",
     "tone": "15.1.22",
-    "webmidi": "3.3.1",
-    "vexflow": "5.0.0"
+    "vexflow": "5.0.0",
+    "webmidi": "3.3.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
     "@coderline/alphatab": "1.9.0",
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "1.56.1",
+    "@types/node": "^26.6.6",
     "esbuild": "0.25.11",
-    "@playwright/test": "1.56.1"
+    "eslint": "9.39.5",
+    "globals": "^17.14.0",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3"
   }
 }

@@ -18,7 +18,5 @@ export default defineConfig({
     reuseExistingServer: true,
     timeout: 15_000,
   },
-  projects: [
-    { name: 'desktop-chrome', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
-  ],
+  projects: [{ name: 'desktop-chrome', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } }],
 });

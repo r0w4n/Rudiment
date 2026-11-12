@@ -1,0 +1,55 @@
+name: Set up Rudiment toolchain
+description: Install the pinned Node, Rust/WASM, Trunk, and npm dependencies used by QA jobs.
+inputs:
+  trunk:
+    description: Install Trunk and the wasm32 target for build/browser jobs.
+    required: false
+    default: 'true'
+  cargo-audit:
+    description: Install cargo-audit for the local security entry point.
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+    - name: Cache Cargo registry and builds
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-cargo-
+    - name: Add Rust WASM target
+      if: inputs.trunk == 'true'
+      shell: bash
+      run: rustup target add wasm32-unknown-unknown
+    - name: Install pinned Trunk binary
+      if: inputs.trunk == 'true'
+      shell: bash
+      env:
+        TRUNK_VERSION: 0.22.1
+        TRUNK_SHA256: 2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1
+      run: |
+        archive="$RUNNER_TEMP/trunk.tar.gz"
+        bin_dir="$RUNNER_TEMP/trunk-bin"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+          "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+          --output "$archive"
+        echo "${TRUNK_SHA256}  ${archive}" | sha256sum --check --status
+        mkdir --parents "$bin_dir"
+        tar --extract --gzip --file "$archive" --directory "$bin_dir"
+        echo "$bin_dir" >> "$GITHUB_PATH"
+    - name: Install npm dependencies
+      shell: bash
+      run: npm ci
+    - name: Install cargo-audit
+      if: inputs.cargo-audit == 'true'
+      shell: bash
+      run: cargo install cargo-audit --locked

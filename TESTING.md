@@ -1,5 +1,7 @@
 # Rudiment test guide
 
+The reusable QA entry points, prerequisites, reporting format, hooks, CI mapping, and manual accessibility limitations are documented in [`QA.md`](QA.md). For normal development, start with `npm run qa:quick` and select the affected unit, browser, accessibility, security, or performance command; use `npm run qa:full` for cross-cutting/release-facing work.
+
 ## Automated checks
 
 Run from the repository root after `npm ci` and loading Cargo into `PATH`:
@@ -9,6 +11,8 @@ npm run check
 npm run test:e2e
 npm run security
 ```
+
+The legacy commands above remain available. New automation and hooks use the `qa:*` commands so failures, skips, durations, and artifact paths are reported consistently.
 
 Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguity, Note On velocity zero, instrument mapping, onset-derived quarter/eighth/sixteenth/triplet values, mixed subdivisions and rests, short-gate quarter-note imports, deterministic optimal one-to-one matching, exact timing boundaries, continuous piecewise scores, input offsets, score rounding, aggregate timing statistics, simultaneous and rapid hits, misses, duplicates, extras and wrong instruments. Browser tests cover the first-run workspace, bundled and file import, saved MIDI library restoration/deletion, readable non-scrolling results, two-hit result dismissal/start behavior, hit-to-start and statistics dialog behavior and persisted Perfect/Good/Early/Late/Miss totals, removed snare demo controls, score-integrated timing feedback, continuous playhead/pause/resume, rapid independent audio voices, keyboard lifecycle, local persistence, responsive layout (including Pixel 8 Pro portrait and landscape viewports), looping and simulated MIDI permission/device/message/reconnect states.
 

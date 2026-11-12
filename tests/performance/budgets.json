@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "metrics": {
+    "midi_callback_ms": {
+      "absoluteP95Ms": 2,
+      "regressionPercent": 25,
+      "minimumAbsoluteRegressionMs": 0.25,
+      "minimumSamples": 20
+    },
+    "score_update_ms": {
+      "absoluteP95Ms": 16.7,
+      "regressionPercent": 25,
+      "minimumAbsoluteRegressionMs": 1,
+      "minimumSamples": 10
+    },
+    "notation_render_ms": {
+      "regressionPercent": 30,
+      "minimumAbsoluteRegressionMs": 20,
+      "minimumSamples": 3
+    },
+    "midi_event_to_paint_ms": {
+      "regressionPercent": 30,
+      "minimumAbsoluteRegressionMs": 4,
+      "minimumSamples": 10
+    }
+  }
+}
