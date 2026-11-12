@@ -15,14 +15,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rudiment
       - run: npm run qa:quick
       - run: npm run qa:unit
       - run: npm run build
       - name: Upload QA diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qa-code-and-unit
           path: quality-results
@@ -34,13 +34,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rudiment
       - run: npm run qa:browser
       - run: npm run qa:a11y -- --skip-build
       - name: Upload browser and QA diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qa-browser-accessibility
           path: |

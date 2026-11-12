@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rudiment
       - run: npm run qa:performance
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: rudiment-performance-fast
@@ -36,12 +36,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rudiment
       - run: npm run build
       - run: node scripts/performance/run.mjs --tier full --trace --output performance-results/full.json
       - run: node scripts/performance/run.mjs --tier endurance --duration-ms 900000 --output performance-results/endurance.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: rudiment-performance-extended

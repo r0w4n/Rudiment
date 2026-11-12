@@ -21,8 +21,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v6
       - uses: ./.github/actions/setup-rudiment
         with:
           cargo-audit: 'true'
@@ -44,7 +44,7 @@ jobs:
         run: npm run qa:performance -- --skip-build
       - name: Upload browser failure comparisons
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rudiment-browser-failures
           path: test-results
@@ -52,7 +52,7 @@ jobs:
           retention-days: 7
       - name: Upload quality reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rudiment-release-quality
           path: quality-results
@@ -69,7 +69,7 @@ jobs:
           grep -q 'href="./' dist/index.html
           grep -q "from './" dist/index.html
           ! grep -Eq '(src|href)="/' dist/index.html
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
@@ -82,4 +82,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
