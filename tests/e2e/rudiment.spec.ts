@@ -984,9 +984,13 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
     Object.assign(window, { __rudimentFakeInput: input, __rudimentFakeAccess: access });
   });
   await page.goto('/');
-  await page.evaluate(() => { const prototype=AudioBufferSourceNode.prototype,original=prototype.start;(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts=0;prototype.start=function(...args){(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts++;return original.apply(this,args as [number]);}; });
+  const audioDiagnostics = () => page.evaluate(() =>
+    (window as unknown as { rudiment: { audioDiagnostics(): { contextState: string; sampleLayers: number; snareStarts: number } } }).rudiment.audioDiagnostics()
+  );
   await page.getByRole('button', { name: 'MIDI connection' }).click();
   await expect(page.locator('.status-pill')).toContainText('Acceptance Kit · connected');
+  await expect.poll(async () => (await audioDiagnostics()).contextState).toBe('running');
+  await expect.poll(async () => (await audioDiagnostics()).sampleLayers).toBe(4);
   await page.getByRole('button', { name: 'Stats' }).click();
   await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99, 38, 100]));
   await expect(page.getByRole('dialog', { name: 'Practice statistics' })).toHaveCount(0);
@@ -995,21 +999,22 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await expect(page.getByRole('button', { name: /Pause/ })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByText('MIDI diagnostics').click();
+  const startsBeforeLow = (await audioDiagnostics()).snareStarts;
   await page.evaluate(() => {
     const input = (window as unknown as { __rudimentFakeInput: { dispatch(data: number[],timestamp?:number): void } }).__rudimentFakeInput;
     input.dispatch([0x99, 38, 1],1234.567);
   });
   await expect(page.locator('.diagnostics')).toContainText('1234.567 ms');
   await expect(page.locator('.diagnostics')).toContainText('velocity 1');
-  await expect.poll(()=>page.evaluate(()=>(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts)).toBeGreaterThanOrEqual(1);
-  const startsAfterLow=await page.evaluate(()=>(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts);
+  await expect.poll(async () => (await audioDiagnostics()).snareStarts).toBe(startsBeforeLow + 1);
+  const startsAfterLow = startsBeforeLow + 1;
   await page.evaluate(() => {
     const input = (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput;
     input.dispatch([0x99, 38, 0]);
     input.dispatch([0xb9, 4, 90]);
   });
   await page.waitForTimeout(60);
-  expect(await page.evaluate(()=>(window as unknown as {__midiVoiceStarts:number}).__midiVoiceStarts)).toBe(startsAfterLow);
+  expect((await audioDiagnostics()).snareStarts).toBe(startsAfterLow);
   await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99,38,100]));
   await expect(page.locator('.diagnostics')).toContainText('note_on');
   await expect(page.locator('.diagnostics')).toContainText('note_off');
