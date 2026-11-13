@@ -1375,15 +1375,15 @@ mod tests {
     }
     #[test]
     fn imported_midi_preserves_sha256_hash_and_id() {
-        let bytes = include_bytes!("../../../web/public/exercises/quarter-note-reference.mid");
+        let bytes = include_bytes!("../../../web/public/exercises/rudiments/01_roll.mid");
         let exercise = parse_midi(bytes, "reference.mid", None).unwrap();
         let renamed = parse_midi(bytes, "renamed.mid", Some(exercise.selected_track)).unwrap();
 
         assert_eq!(
             exercise.content_hash,
-            "dd5f576afb6c184e953d9289237d17cb0fcdb66187f7324ae8ece95113a8b384"
+            "eed470e0d21d9d73bd083dd30d6178aa9a5bb1a6bc0f70d3585e71ceaa5ba417"
         );
-        assert_eq!(exercise.id, "import-dd5f576afb6c");
+        assert_eq!(exercise.id, "import-eed470e0d21d");
         assert_eq!(renamed.content_hash, exercise.content_hash);
         assert_eq!(renamed.id, exercise.id);
     }
