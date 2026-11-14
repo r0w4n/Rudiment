@@ -464,6 +464,10 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await expect(breakdown).toHaveCount(5);
   await expect(breakdown.first()).toContainText('/ 32');
   for(const [index,label] of ['Perfect','Good','Early','Late','Missed'].entries())await expect(breakdown.nth(index).locator('span')).toContainText(label);
+  const legendColours=await page.locator('.timing-key i').evaluateAll(elements=>elements.map(element=>getComputedStyle(element).backgroundColor));
+  const resultColours=await breakdown.locator('span i').evaluateAll(elements=>elements.map(element=>getComputedStyle(element).backgroundColor));
+  expect(resultColours.slice(0,4)).toEqual(legendColours.slice(0,4));
+  expect(resultColours[4]).toBe('rgb(255, 112, 104)'); // Contrast-adjusted red on the chart track.
   await expect(resultDialog.locator('.progress-chart')).toBeVisible();
   await expect(resultDialog.locator('.progress-point')).toHaveCount(1);
   await expect(resultDialog.getByText(/Average offset|Mean absolute error|Timing variability|Focus for next time/i)).toHaveCount(0);
