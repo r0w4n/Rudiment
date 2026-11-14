@@ -33,7 +33,13 @@ const checks = {
   browser: {
     label: 'Browser correctness tests',
     command: 'npx',
-    args: ['playwright', 'test', 'tests/e2e/rudiment.spec.ts', 'tests/e2e/performance-correctness.spec.ts'],
+    args: [
+      'playwright',
+      'test',
+      'tests/e2e/server.spec.ts',
+      'tests/e2e/rudiment.spec.ts',
+      'tests/e2e/performance-correctness.spec.ts',
+    ],
     dependsOn: ['build'],
   },
   a11y: {

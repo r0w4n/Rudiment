@@ -12,7 +12,7 @@
     "test:e2e": "playwright test",
     "lint": "eslint . && npm run typecheck",
     "typecheck": "tsc",
-    "format:check": "prettier --check eslint.config.mjs playwright.config.ts tsconfig.json scripts/qa/*.mjs tests/e2e/accessibility.spec.ts package.json QA.md AGENTS.md TESTING.md PERFORMANCE.md .github/workflows/*.yml .github/actions/setup-rudiment/action.yml",
+    "format:check": "prettier --check eslint.config.mjs playwright.config.ts tsconfig.json scripts/qa/*.mjs tests/e2e/accessibility.spec.ts tests/e2e/server-setup.ts tests/e2e/server.spec.ts package.json QA.md AGENTS.md TESTING.md PERFORMANCE.md .github/workflows/*.yml .github/actions/setup-rudiment/action.yml",
     "perf:fast": "npm run build && npm run perf:fast:measure",
     "perf:fast:measure": "node scripts/performance/run.mjs --tier fast --output performance-results/fast.json && node scripts/performance/compare.mjs tests/performance/baseline.json performance-results/fast.json --enforce && node scripts/performance/report.mjs --current performance-results/fast.json --baseline tests/performance/baseline.json --output performance-results/fast.md",
     "perf:full": "npm run build && node scripts/performance/run.mjs --tier full --output performance-results/full.json && node scripts/performance/report.mjs --current performance-results/full.json --baseline tests/performance/baseline.json --output performance-results/full.md",

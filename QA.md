@@ -28,6 +28,8 @@ npm ci
 
 Each command is unattended and returns non-zero when a mandatory check fails, a required metric is missing, a dependent check is skipped, or a required executable is unavailable. The runner continues independent checks so one invocation yields a useful consolidated report. `--skip-build` may be passed after `--` only when the caller has already produced the current `dist/` in the same job.
 
+Browser and accessibility tests start their own production-build server on an OS-assigned loopback port. They do not reuse an existing server, so a development server or stale process cannot cause a port conflict or make the checks exercise the wrong build.
+
 Prettier initially covers the QA/configuration surface and new accessibility suite. Existing condensed application and long browser-test sources remain linted but are not mechanically reformatted, avoiding a high-risk, unrelated rewrite of timing-sensitive code. New files should join the formatter scope when practical.
 
 ## Hooks
