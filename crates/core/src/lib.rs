@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 pub const SCORING_VERSION: &str = "v3";
+/// Maximum MIDI file size accepted by the parser and browser import preflight.
+pub const MAX_MIDI_FILE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -304,7 +306,7 @@ pub struct PlayableTrack {
 pub enum MidiError {
     #[error("The MIDI file is malformed or truncated: {0}")]
     Parse(String),
-    #[error("MIDI files larger than 8 MB are not supported")]
+    #[error("MIDI files larger than {} MB are not supported", MAX_MIDI_FILE_BYTES / (1024 * 1024))]
     FileTooLarge,
     #[error("SMPTE timing is not supported; use a PPQ MIDI file")]
     Smpte,
@@ -325,7 +327,7 @@ pub fn parse_midi(
     filename: &str,
     selected_track: Option<usize>,
 ) -> Result<Exercise, MidiError> {
-    if bytes.len() > 8 * 1024 * 1024 {
+    if bytes.len() > MAX_MIDI_FILE_BYTES {
         return Err(MidiError::FileTooLarge);
     }
     let smf = Smf::parse(bytes).map_err(|e| MidiError::Parse(e.to_string()))?;
@@ -1448,7 +1450,11 @@ mod tests {
         use midly::num::{u15, u24};
 
         assert!(matches!(
-            parse_midi(&vec![0; 8 * 1024 * 1024 + 1], "large.mid", None),
+            parse_midi(&vec![0; MAX_MIDI_FILE_BYTES], "limit.mid", None),
+            Err(MidiError::Parse(_))
+        ));
+        assert!(matches!(
+            parse_midi(&vec![0; MAX_MIDI_FILE_BYTES + 1], "large.mid", None),
             Err(MidiError::FileTooLarge)
         ));
         assert!(matches!(

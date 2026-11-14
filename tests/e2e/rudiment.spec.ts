@@ -858,6 +858,38 @@ test('built-in and personal MIDI import paths remain distinct and broken files e
   await expect(page.locator('.error-row')).toContainText(/malformed|truncated/i);
 });
 
+test('MIDI file picker and drop preflight use the parser size boundary before reading', async ({ page }) => {
+  await page.addInitScript(() => {
+    const read = File.prototype.arrayBuffer;
+    (window as any).__midiFileReads = [];
+    File.prototype.arrayBuffer = function () {
+      (window as any).__midiFileReads.push(this.name);
+      return read.call(this);
+    };
+  });
+  await page.goto('/');
+  await expect(page.locator('.score-note')).toHaveCount(32);
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: /MIDI library/ }).click();
+  await page.getByRole('dialog', { name: 'MIDI library' }).getByRole('button', { name: 'Import MIDI' }).click();
+  await (await chooserPromise).setFiles({ name: 'large-picker.mid', mimeType: 'audio/midi', buffer: Buffer.alloc(8 * 1024 * 1024 + 1) });
+  await expect(page.locator('.error-row')).toContainText('Files larger than 8 MB are not supported.');
+  expect(await page.evaluate(() => (window as any).__midiFileReads)).toEqual([]);
+
+  const dropFile = async (size: number, name: string) => page.locator('#score-card').evaluate((element, file) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([new Uint8Array(file.size)], file.name, { type: 'audio/midi' }));
+    element.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }, { size, name });
+  await dropFile(8 * 1024 * 1024, 'at-limit.mid');
+  await expect(page.locator('.error-row')).toContainText(/malformed|truncated/i);
+  expect(await page.evaluate(() => (window as any).__midiFileReads)).toEqual(['at-limit.mid']);
+  await dropFile(8 * 1024 * 1024 + 1, 'large-drop.mid');
+  await expect(page.locator('.error-row')).toContainText('Files larger than 8 MB are not supported.');
+  expect(await page.evaluate(() => (window as any).__midiFileReads)).toEqual(['at-limit.mid']);
+  await expect(page.locator('.score-note')).toHaveCount(32);
+});
+
 test('score popovers stay inside the viewport and footer controls remain compact', async ({ page }) => {
   for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);

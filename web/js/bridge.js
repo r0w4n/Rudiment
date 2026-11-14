@@ -907,13 +907,13 @@ async function connectMidi(callback) {
 async function autoConnectMidi(callback){midiCallback=callback;if(!navigator.requestMIDIAccess){sendMidiState({error:'Web MIDI is not available in this browser.',permission:'unsupported'});return;}try{if(!navigator.permissions?.query){sendMidiState({permission:'prompt'});return;}const status=await navigator.permissions.query({name:'midi',sysex:false});if(status.state==='granted')await connectMidi(callback);else sendMidiState({permission:status.state});status.onchange=()=>{if(status.state==='granted')connectMidi(callback);else sendMidiState({permission:status.state});};}catch{sendMidiState({permission:'prompt'});}}
 function selectMidi(id){selectedInput=WebMidi.inputs.find(input=>input.id===id)||null;rememberMidiInput(selectedInput);sendMidiState({permission:'granted'});}
 
-async function readFile(file,callback){if(!file)return;if(file.size>8*1024*1024){callback(new Uint8Array(),file.name,'Files larger than 8 MB are not supported.');return;}try{callback(new Uint8Array(await file.arrayBuffer()),file.name,'');}catch(error){callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
-function chooseMidi(callback){midiFileCallback=callback;const input=document.createElement('input');input.type='file';input.accept='.mid,.midi,audio/midi';input.onchange=()=>readFile(input.files?.[0],callback);input.click();}
+async function readFile(file,callback,maxFileBytes){if(!file)return;if(file.size>maxFileBytes){callback(new Uint8Array(),file.name,`Files larger than ${maxFileBytes/1024/1024} MB are not supported.`);return;}try{callback(new Uint8Array(await file.arrayBuffer()),file.name,'');}catch(error){callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
+function chooseMidi(callback,maxFileBytes){midiFileCallback=callback;const input=document.createElement('input');input.type='file';input.accept='.mid,.midi,audio/midi';input.onchange=()=>readFile(input.files?.[0],callback,maxFileBytes);input.click();}
 async function loadBundled(url,callback,saveToLibrary=false,displayName=''){try{const response=await fetch(url);if(!response.ok)throw new Error(`HTTP ${response.status}`);callback(new Uint8Array(await response.arrayBuffer()),displayName||url.split('/').pop(),'',saveToLibrary);}catch(error){callback(new Uint8Array(),displayName||url,error?.message||'Could not load bundled exercise.');}}
 async function loadBundledFromLibrary(url,displayName=''){if(!midiFileCallback)return;return loadBundled(url,midiFileCallback,false,displayName);}
 let dropController;
 let midiFileCallback;
-function bindDrop(callback){
+function bindDrop(callback,maxFileBytes){
   midiFileCallback=callback;
   dropController?.abort();
   dropController = new AbortController();
@@ -922,7 +922,7 @@ function bindDrop(callback){
   const over=event=>{event.preventDefault();element.classList.add('dragging');};
   element.addEventListener('dragover',over,options);
   element.addEventListener('dragleave',()=>element.classList.remove('dragging'),options);
-  element.addEventListener('drop',event=>{event.preventDefault();element.classList.remove('dragging');readFile(event.dataTransfer?.files?.[0],callback);},options);
+  element.addEventListener('drop',event=>{event.preventDefault();element.classList.remove('dragging');readFile(event.dataTransfer?.files?.[0],callback,maxFileBytes);},options);
 }
 function trapDialogTab(event,selector){
   if(event.key!=='Tab')return;

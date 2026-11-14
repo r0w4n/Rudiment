@@ -6,9 +6,10 @@ use lucide_leptos::{
 };
 use rudiment_core::{
     DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit, HitResult,
-    InputSource, Instrument, Judgement, ObservedHit, PerformanceAward, PerformanceRating,
-    SCORING_VERSION, ScoringConfig, SessionSummary, TempoChange, beat_at_elapsed_ms,
-    elapsed_ms_at_beat, paradiddle, parse_midi, performance_rating, score_session_with_tempo_map,
+    InputSource, Instrument, Judgement, MAX_MIDI_FILE_BYTES, ObservedHit, PerformanceAward,
+    PerformanceRating, SCORING_VERSION, ScoringConfig, SessionSummary, TempoChange,
+    beat_at_elapsed_ms, elapsed_ms_at_beat, paradiddle, parse_midi, performance_rating,
+    score_session_with_tempo_map,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -153,13 +154,13 @@ extern "C" {
     #[wasm_bindgen(js_namespace = rudiment, js_name = selectMidi)]
     fn select_midi(id: &str);
     #[wasm_bindgen(js_namespace = rudiment, js_name = chooseMidi)]
-    fn choose_midi(callback: &Function);
+    fn choose_midi(callback: &Function, max_file_bytes: usize);
     #[wasm_bindgen(js_namespace = rudiment, js_name = loadBundled)]
     fn load_bundled(url: &str, callback: &Function, save_to_library: bool, display_name: &str);
     #[wasm_bindgen(js_namespace = rudiment, js_name = loadBundledFromLibrary)]
     fn load_bundled_from_library(url: &str, display_name: &str);
     #[wasm_bindgen(js_namespace = rudiment, js_name = bindDrop)]
-    fn bind_drop(callback: &Function);
+    fn bind_drop(callback: &Function, max_file_bytes: usize);
     #[wasm_bindgen(js_namespace = rudiment, js_name = trapDialogTab)]
     fn trap_dialog_tab(event: &web_sys::KeyboardEvent, selector: &str);
     #[wasm_bindgen(js_namespace = rudiment, js_name = saveSession)]
@@ -1939,7 +1940,7 @@ fn App() -> impl IntoView {
                 render_score(value);
             }
             let callback = file_callback.as_ref().as_ref().unchecked_ref::<Function>();
-            bind_drop(callback);
+            bind_drop(callback, MAX_MIDI_FILE_BYTES);
         });
     }
     Effect::new(move |_| {
@@ -2499,7 +2500,7 @@ fn App() -> impl IntoView {
                 <div class="library-actions">
                   <button class="primary" on:click={let callback=choose_cb.clone();let stop=stop_for_import.clone();move |_|{
                     stop();
-                    choose_midi(callback.as_ref().as_ref().unchecked_ref());
+                    choose_midi(callback.as_ref().as_ref().unchecked_ref(), MAX_MIDI_FILE_BYTES);
                   }}>"Import MIDI"</button>
                 </div>
                 <div class="library-tabs" role="tablist" aria-label="MIDI library sections">
