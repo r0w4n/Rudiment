@@ -30,6 +30,8 @@ Each command is unattended and returns non-zero when a mandatory check fails, a 
 
 Browser and accessibility tests start their own production-build server on an OS-assigned loopback port. They do not reuse an existing server, so a development server or stale process cannot cause a port conflict or make the checks exercise the wrong build.
 
+The QA runner keeps Playwright failure artifacts in `test-results/browser/` and `test-results/a11y/` respectively, so the accessibility run does not erase browser failure traces in a combined gate. A later run of the same suite replaces its previous artifacts.
+
 Prettier initially covers the QA/configuration surface and new accessibility suite. Existing condensed application and long browser-test sources remain linted but are not mechanically reformatted, avoiding a high-risk, unrelated rewrite of timing-sensitive code. New files should join the formatter scope when practical.
 
 ## Hooks

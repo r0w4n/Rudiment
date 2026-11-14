@@ -1502,45 +1502,41 @@ test('early first downbeat and later loop hits stay on the selected bar', async 
   await page.getByLabel('Loops').selectOption('4');
   await page.getByRole('button', { name: /Start practice/ }).click();
 
-  const firstHit = page.evaluate(() => new Promise<void>(resolve => {
-    const sample = () => {
-      const beat = (window as any).rudiment.audioDiagnostics().currentBeat;
-      if (beat >= 3.82 && beat < 4) {
+  // Capture feedback in the page while its loop is still visible. A Playwright
+  // round trip can otherwise miss it when the next loop clears the score.
+  const feedback = await page.evaluate(async () => {
+    const beat = () => (window as any).rudiment.audioDiagnostics().currentBeat as number;
+    const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    const strike = async (start: number, end: number, count: number, feedbackDeadline: number, needsMarker: boolean) => {
+      while (beat() < start) await nextFrame();
+      const hitBeat = beat();
+      if (hitBeat >= end) throw new Error(`Missed strike window ${start}–${end}; beat was ${hitBeat}`);
+      for (let index = 0; index < count; index++)
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
-        resolve();
-      } else requestAnimationFrame(sample);
+      let judgement: string | null = null, markerRow: string | null = null;
+      while (beat() < feedbackDeadline) {
+        await nextFrame();
+        judgement = document.querySelector('.score-note[data-beat="4"]')?.getAttribute('data-judgement') ?? null;
+        markerRow = document.querySelector('.unmatched-hit-marker')?.getAttribute('data-system-row') ?? null;
+        if (judgement && (!needsMarker || markerRow)) break;
+      }
+      return {
+        hitBeat, feedbackBeat: beat(), judgement, markerRow,
+        wrongBarNotes: document.querySelectorAll('.score-note[data-score-bar="2"][data-judgement]').length,
+      };
     };
-    requestAnimationFrame(sample);
-  }));
-  await firstHit;
-  await expect(page.locator('.score-note[data-beat="4"]')).toHaveAttribute('data-judgement', /perfect|good|early/);
-
-  await page.evaluate(() => new Promise<void>(resolve => {
-    const sample = () => {
-      const beat = (window as any).rudiment.audioDiagnostics().currentBeat;
-      if (beat >= 8.02 && beat < 8.3) {
-        for (let index = 0; index < 6; index++)
-          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
-        resolve();
-      } else requestAnimationFrame(sample);
-    };
-    requestAnimationFrame(sample);
-  }));
-  await expect(page.locator('.score-note[data-beat="4"]')).toHaveAttribute('data-judgement', /perfect|good|early|late/);
-  await expect(page.locator('.unmatched-hit-marker').first()).toHaveAttribute('data-system-row', '1');
-  await expect(page.locator('.score-note[data-score-bar="2"][data-judgement]')).toHaveCount(0);
-  await page.evaluate(() => new Promise<void>(resolve => {
-    const sample = () => {
-      const beat = (window as any).rudiment.audioDiagnostics().currentBeat;
-      if (beat >= 12.02 && beat < 12.3) {
-        for (let index = 0; index < 6; index++)
-          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
-        resolve();
-      } else requestAnimationFrame(sample);
-    };
-    requestAnimationFrame(sample);
-  }));
-  await expect(page.locator('.unmatched-hit-marker').first()).toHaveAttribute('data-system-row', '1');
+    return [
+      await strike(3.82, 4, 1, 7.9, false),
+      await strike(8.02, 8.3, 6, 11.9, true),
+      await strike(12.02, 12.3, 6, 15.9, true),
+    ];
+  });
+  expect(feedback[0].judgement, JSON.stringify(feedback[0])).toMatch(/perfect|good|early/);
+  for (const loop of feedback.slice(1)) {
+    expect(loop.judgement, JSON.stringify(loop)).toMatch(/perfect|good|early|late/);
+    expect(loop.markerRow, JSON.stringify(loop)).toBe('1');
+    expect(loop.wrongBarNotes, JSON.stringify(loop)).toBe(0);
+  }
   await page.getByRole('button', { name: /Restart/ }).click();
 });
 

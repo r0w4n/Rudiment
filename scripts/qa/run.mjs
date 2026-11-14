@@ -39,13 +39,14 @@ const checks = {
       'tests/e2e/server.spec.ts',
       'tests/e2e/rudiment.spec.ts',
       'tests/e2e/performance-correctness.spec.ts',
+      '--output=test-results/browser',
     ],
     dependsOn: ['build'],
   },
   a11y: {
     label: 'WCAG accessibility automation',
     command: 'npx',
-    args: ['playwright', 'test', 'tests/e2e/accessibility.spec.ts'],
+    args: ['playwright', 'test', 'tests/e2e/accessibility.spec.ts', '--output=test-results/a11y'],
     dependsOn: ['build'],
   },
   performance: {
