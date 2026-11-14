@@ -53,3 +53,58 @@ Do not create empty commits, force-push, bypass Git hooks or push to an unexpect
 If a push fails, report the failure and preserve the local commit.
 
 When multiple agents are working concurrently, do not commit or push another agent's changes.
+
+## Automatic Git Commit and Push Workflow
+
+After completing any task that modifies project files, automatically commit and push the changes.
+
+### 1. Commit phase
+
+1. Review the changes and stage only files relevant to the task.
+2. Create a descriptive Conventional Commit.
+3. Allow all existing Git commit hooks to execute normally.
+4. If a hook fails:
+   - Investigate the failure and identify its root cause.
+   - Fix the underlying issue.
+   - Re-run the commit, allowing the hooks to execute again.
+   - Repeat until validation succeeds or the issue cannot be resolved safely.
+
+### 2. Push phase
+
+1. Once the commit succeeds, push to the current branch's configured upstream.
+2. Allow all existing Git pre-push hooks to execute normally.
+3. If a pre-push hook fails:
+   - Investigate the failure and identify its root cause.
+   - Fix the underlying issue.
+   - Commit the corrections, allowing commit hooks to execute again.
+   - Retry the push, allowing pre-push hooks to execute again.
+   - Repeat until successful or the issue cannot be resolved safely.
+
+### 3. Rules
+
+- Do not bypass, disable or modify Git hooks.
+- Do not duplicate validation already performed by Git hooks unless necessary for debugging.
+- Do not force-push or rewrite published history.
+- Do not commit unrelated changes.
+- Do not push if any required validation fails.
+- Do not repeatedly retry an unchanged failing operation.
+- If a failure cannot be resolved safely, stop and explain the blocker.
+- Never claim success unless the remote push has completed successfully.
+
+### 4. Completion
+
+Report:
+
+- Summary of changes.
+- Any hook failures encountered and how they were resolved.
+- Final commit hash.
+- Branch pushed.
+- Confirmation that the push succeeded.
+
+### 5. Initial verification
+
+Before applying these instructions, inspect the existing Git hook configuration and verify that commit and pre-push hooks are installed and active.
+
+Do not assume that hooks are executing merely because hook configuration files exist.
+
+Preserve the existing validation infrastructure.
