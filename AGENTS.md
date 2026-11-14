@@ -35,3 +35,21 @@ Review failures, fix regressions introduced by the change, and rerun affected ch
 - Run relevant Rust and browser correctness tests and `npm run perf:fast` when input, playback, scoring or rendering changes (`qa:performance` runs the same fast measurement). Investigate repeatable regressions. Run `npm run perf:full` for significant architecture changes and before releases; run or schedule `npm run perf:endurance` for lifecycle, memory, timer or long-session changes.
 - Base performance refactoring on measurements, keep profiling opt-in, and avoid workers, AudioWorklets, canvas or virtualisation without a real-browser trace demonstrating the need. Update deterministic benchmarks when exercise functionality, rhythms, instruments or import behaviour expands; maintain `scripts/performance`, `tests/performance`, baselines, budgets, CI and `PERFORMANCE.md` together.
 - Compare on matching browser/OS/architecture and workload where possible, with adequate samples and both relative and absolute regression margins. Do not weaken accessibility/performance gates or treat an incompatible baseline as relative-regression evidence. Simulated Web MIDI does not validate USB, driver, device, speaker or subjective audio latency.
+
+## Automatic Git commits and pushes
+
+After completing any task that modifies project files:
+
+1. Run the relevant tests, linting, type checks and build validation.
+2. If validation fails, attempt to fix the issues. Do not commit or push while checks are failing.
+3. Check `git status` and review the diff.
+4. Stage only files belonging to the completed task. Never include unrelated changes or secrets.
+5. Create a commit using a descriptive Conventional Commit message (`feat:`, `fix:`, `refactor:`, etc.).
+6. Push the commit to the current branch's configured remote.
+7. Report the commit hash, branch and push result.
+
+Do not create empty commits, force-push, bypass Git hooks or push to an unexpected branch.
+
+If a push fails, report the failure and preserve the local commit.
+
+When multiple agents are working concurrently, do not commit or push another agent's changes.
