@@ -142,7 +142,7 @@ extern "C" {
     #[wasm_bindgen(js_namespace = rudiment, js_name = updateScore)]
     fn update_score(beat: f64, judgements: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = appendScoreJudgement)]
-    fn append_score_judgement(beat: f64, judgement: JsValue);
+    fn append_score_judgement(judgement: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedback)]
     fn clear_score_feedback();
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedbackPreserveViewport)]
@@ -1726,10 +1726,7 @@ fn App() -> impl IntoView {
             feedback_dirty.set(true);
             live_matched_expected.set(matched_expected);
             if let Ok(value) = json_compatible(&judgement) {
-                let display_beat = range_start
-                    + (progress.get_untracked() - range_start)
-                        .rem_euclid((range_end - range_start).max(0.001));
-                append_score_judgement(display_beat, value);
+                append_score_judgement(value);
             }
             live.update(|judgements| judgements.push(judgement));
         },

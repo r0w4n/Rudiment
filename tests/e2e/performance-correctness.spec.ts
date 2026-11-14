@@ -39,3 +39,32 @@ test('high-rate MIDI feedback paints by the next frame and Restart clears it',as
   await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
   await expect(page.locator('.unmatched-hit-marker')).toHaveCount(0);
 });
+
+test('live hit feedback never rewinds the playhead within a bar',async({page})=>{
+  await page.goto('/');
+  await page.locator('#visual-metronome').click();
+  await page.locator('#metronome-popover').getByLabel('Tempo in BPM').fill('120');
+  await page.getByLabel('Close metronome settings').click();
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  const movement=await page.evaluate(()=>new Promise<{deltas:number[],feedbackCount:number}>(resolve=>{
+    const playhead=document.querySelector('#playhead')!;
+    const deltas:number[]=[];
+    const observer=new MutationObserver(records=>{
+      const current=Number(playhead.getAttribute('x1'));
+      for(const record of records)if(record.oldValue!==null)deltas.push(current-Number(record.oldValue));
+    });
+    observer.observe(playhead,{attributes:true,attributeFilter:['x1'],attributeOldValue:true});
+    const hits=setInterval(()=>window.dispatchEvent(new KeyboardEvent('keydown',{key:'j',code:'KeyJ',bubbles:true})),50);
+    setTimeout(()=>{
+      clearInterval(hits);observer.disconnect();
+      resolve({deltas,feedbackCount:document.querySelectorAll('.score-note[data-judgement],.unmatched-hit-marker').length});
+    },650);
+  }));
+  expect(movement.deltas.length).toBeGreaterThan(10);
+  expect(movement.feedbackCount).toBeGreaterThan(0);
+  expect(Math.min(...movement.deltas)).toBeGreaterThanOrEqual(-0.01);
+});

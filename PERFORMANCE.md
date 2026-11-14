@@ -40,6 +40,8 @@ The baseline identified notation layout as the dominant long task. The 10,000-no
 
 Input processing was fast but note colour feedback waited for a 32 ms application-state tick. Feedback is now coalesced onto the next animation frame; UI counters remain throttled and Tone.Transport remains independent of rendering.
 
+A Chrome regression test also exposed backward playhead jumps during hits: the feedback frame reused the slower UI progress value. Feedback now paints without repositioning the playhead, leaving position and scrolling to the transport-driven frame. The test observes SVG position mutations during repeated keyboard hits; it does not measure subjective smoothness or physical MIDI latency.
+
 See `PERFORMANCE_REPORT.md` for the measured comparison. Large score import still causes an isolated main-thread task, especially at 10,000 notes. It occurs before practice, not recurrently during musical playback; renderer virtualisation should only be considered with further evidence and correctness coverage.
 
 ## Regression policy

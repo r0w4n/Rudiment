@@ -399,7 +399,7 @@ catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(
 
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
 let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
-let pendingScoreFeedback=[],pendingScoreFeedbackBeat=-1,pendingScoreFeedbackFrame=0;
+let pendingScoreFeedback=[],pendingScoreFeedbackFrame=0;
 let selectedBarRange={start:0,end:Number.MAX_SAFE_INTEGER};
 function applySelectedBarRange(){
   if(!scoreData.svg)return;
@@ -828,19 +828,21 @@ function updateScore(beat, judgements, loopAware=false) {
   }
   performanceProfile.record('score_update_ms',performance.now()-profileStart);
 }
-function appendScoreJudgement(beat,judgement){
-  pendingScoreFeedback.push(judgement);pendingScoreFeedbackBeat=beat;
+function appendScoreJudgement(judgement){
+  pendingScoreFeedback.push(judgement);
   if(pendingScoreFeedbackFrame)return;
   pendingScoreFeedbackFrame=requestAnimationFrame(()=>{
     pendingScoreFeedbackFrame=0;
     const known=new Set(scoreData.lastJudgements.map(item=>item.event_id).filter(Boolean));
     const appended=pendingScoreFeedback.filter(item=>!item.event_id||!known.has(item.event_id));pendingScoreFeedback=[];
-    if(appended.length)updateScore(pendingScoreFeedbackBeat,[...scoreData.lastJudgements,...appended]);
+    // Feedback may arrive between transport frames with an older Rust UI
+    // progress value. Paint it without moving the transport-owned playhead.
+    if(appended.length&&scoreData.svg&&scoreData.notes.length)applyJudgements([...scoreData.lastJudgements,...appended]);
   });
 }
 function clearScoreFeedback(preserveViewport=false) {
   if(pendingScoreFeedbackFrame)cancelAnimationFrame(pendingScoreFeedbackFrame);
-  pendingScoreFeedbackFrame=0;pendingScoreFeedback=[];pendingScoreFeedbackBeat=-1;
+  pendingScoreFeedbackFrame=0;pendingScoreFeedback=[];
   const empty=[];
   for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
