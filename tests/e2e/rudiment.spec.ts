@@ -1,5 +1,11 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+
+async function setTempo(page: Page, value: string) {
+  await page.locator('#visual-metronome').click();
+  await page.locator('#metronome-popover').getByLabel('Tempo in BPM').fill(value);
+  await page.getByLabel('Close metronome settings').click();
+}
 
 test('acoustic snare layers preload before the first audio interaction', async ({ page }) => {
   const requested:string[]=[];
@@ -17,7 +23,8 @@ test('acoustic snare layers preload before the first audio interaction', async (
 test('first-use workspace renders real notation and lifecycle controls', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Single Paradiddle').first()).toBeVisible();
-  await expect(page.getByLabel('Tempo in BPM')).toHaveValue('60');
+  await expect(page.locator('#metronome-popover').getByLabel('Tempo in BPM')).toHaveValue('60');
+  await expect(page.locator('.topbar .tempo-control')).toHaveCount(0);
   await expect(page.getByText('Audio unlocks on first tap', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Ready when you are', { exact: true })).toHaveCount(0);
   await expect(page.getByText('DEMO INPUT', { exact: true })).toHaveCount(0);
@@ -34,14 +41,6 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   const startButton=page.getByRole('button',{name:/Start practice/});
   await expect(startButton.locator('.start-instruction')).toHaveText('Hit your drum or press J to start');
   await expect(page.getByText('Hit your drum or press J to start',{exact:true})).toHaveCount(1);
-  await expect(page.locator('.tempo-control button svg.lucide')).toHaveCount(2);
-  const tempoContentOffset=await page.locator('.tempo-control label').evaluate(label=>{
-    const input=label.querySelector('input')!.getBoundingClientRect();
-    const unit=label.querySelector('span')!.getBoundingClientRect();
-    const bounds=label.getBoundingClientRect();
-    return (input.left+unit.right)/2-(bounds.left+bounds.right)/2;
-  });
-  expect(Math.abs(tempoContentOffset)).toBeLessThan(1);
   const statsButton=page.getByRole('button',{name:'Stats'});
   await expect(statsButton).toBeVisible();
   await expect(statsButton.locator('svg')).toHaveCount(1);
@@ -136,9 +135,9 @@ test('Restart clears painted note feedback', async ({ page }) => {
   await page.goto('/');
   // Keep the automation round trip comfortably inside the first note's match
   // window; this test is about clearing feedback, not 60 BPM boundary timing.
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByRole('button', { name: /Start practice/ }).click();
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
@@ -219,13 +218,13 @@ test('live BPM changes retime the active transport without restarting practice',
   });
   await page.goto('/');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByRole('button', { name: /Start practice/ }).click();
   await expect.poll(()=>page.evaluate(()=>(window as any).__metronomeClickTimes.length)).toBeGreaterThanOrEqual(2);
   const clickCount=await page.evaluate(()=>(window as any).__metronomeClickTimes.length);
   const before = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
-  await page.getByLabel('Tempo in BPM').fill('120');
+  await setTempo(page, '120');
   await expect(page.getByRole('button', { name: /Pause/ })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().transportBpm)).toBeCloseTo(120, 0);
   await expect.poll(()=>page.evaluate(()=>(window as any).__metronomeClickTimes.length)).toBeGreaterThanOrEqual(clickCount+5);
@@ -240,24 +239,25 @@ test('live BPM changes retime the active transport without restarting practice',
 
 test('BPM can be replaced directly without partial values being clamped mid-entry',async({page})=>{
   await page.goto('/');
-  const tempo=page.getByLabel('Tempo in BPM');
+  await page.locator('#visual-metronome').click();
+  const tempo=page.locator('#metronome-popover').getByLabel('Tempo in BPM');
 
   await tempo.click();
   await page.keyboard.type('120');
   await expect(tempo).toHaveValue('120');
 
-  await page.locator('.score-card').click({position:{x:10,y:10}});
+  await page.locator('#metronome-popover strong').click();
   await tempo.click();
   await page.keyboard.type('12');
   await expect(tempo).toHaveValue('12');
   await page.keyboard.type('0');
   await expect(tempo).toHaveValue('120');
 
-  await page.locator('.score-card').click({position:{x:10,y:10}});
+  await page.locator('#metronome-popover strong').click();
   await tempo.click();
   await page.keyboard.type('999');
   await expect(tempo).toHaveValue('999');
-  await page.locator('.score-card').click({position:{x:10,y:10}});
+  await page.locator('#metronome-popover strong').click();
   await expect(tempo).toHaveValue('240');
 
   await tempo.click();
@@ -270,7 +270,7 @@ test('BPM can be replaced directly without partial values being clamped mid-entr
 test('visual metronome pulses from the audible transport clock and marks the downbeat', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.evaluate(() => {
     const root = document.querySelector('#visual-metronome')!;
@@ -312,9 +312,9 @@ test('sampled metronome uses the accented and regular recordings on the transpor
     };
   });
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   const oscillatorBaseline=await page.evaluate(()=>(window as any).__oscillatorCreations);
   await page.getByRole('button', { name: /Start practice/ }).click();
@@ -357,7 +357,7 @@ test('three-beat count-in and preset changes select the matching VCSL samples', 
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
   await page.getByRole('button',{name:'Open settings'}).click();
   for(const [value,accentName] of [['crisp','click-accent'],['cowbell','cowbell-accent']] as const){
-    await page.getByLabel('Click timbre').selectOption(value);
+    await page.locator('#settings-dialog').getByLabel('Click timbre').selectOption(value);
     await page.evaluate(async(presetValue)=>{
       await (window as any).rudiment.ensureAudio();
       await (window as any).rudiment.previewClick(presetValue,true);
@@ -393,7 +393,9 @@ test('a missing selected metronome recording reports an explicit playback error'
   await page.route('**/audio/cowbell-accent.wav',route=>route.abort());
   await page.goto('/');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Click timbre').selectOption('cowbell');
+  await page.locator('#settings-dialog').getByLabel('Click timbre').selectOption('cowbell');
+  await page.locator('#settings-dialog').getByRole('button', { name: 'Preview' }).click();
+  await expect(page.locator('#settings-dialog .metronome-preview-error')).toContainText('Metronome preview failed');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.locator('.error-row')).toContainText('Unable to load metronome samples');
@@ -437,10 +439,10 @@ test('a keyboard hit dismisses Statistics without starting practice', async ({ p
 
 test('demo hits complete through scoring and persist locally', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
-  await expect(page.getByLabel('Tempo in BPM')).toHaveValue('240');
+  await setTempo(page, '240');
+  await expect(page.locator('#metronome-popover').getByLabel('Tempo in BPM')).toHaveValue('240');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
 
   await page.getByRole('button', { name: /Start performance/ }).click();
@@ -563,9 +565,9 @@ test('progress chart uses persisted scores for the same exercise and tempo',asyn
     };
   }));
   await page.reload();
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start performance/}).click();
   await page.evaluate(async()=>{
@@ -586,9 +588,9 @@ test('progress chart uses persisted scores for the same exercise and tempo',asyn
 
 test('one drum hit dismisses results and a second hit starts the next run',async({page})=>{
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start performance/}).click();
   await page.evaluate(async () => {
@@ -615,7 +617,7 @@ test('one drum hit dismisses results and a second hit starts the next run',async
 test('a drum hit starts practice from idle',async({page})=>{
   await page.goto('/');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.keyboard.press('j');
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
@@ -638,9 +640,9 @@ test('held keyboard auto-repeat is not recorded as evenly spaced drum strikes',a
 
 test('a run with no drum input never shows hit circles',async({page})=>{
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start performance/}).click();
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
@@ -736,7 +738,7 @@ test('all built-in rudiments match the supplied timing and engraving reference',
       await expect(entry.locator('strong')).toHaveText(piece.title);
       await entry.locator('.library-load').click();
       await expect(page.locator('.exercise-heading strong')).toHaveText(piece.title);
-      await expect(page.getByLabel('Tempo in BPM')).toHaveValue(String(piece.tempo_bpm));
+      await expect(page.locator('#metronome-popover').getByLabel('Tempo in BPM')).toHaveValue(String(piece.tempo_bpm));
       await expect(page.locator('.score-note')).toHaveCount(piece.midi_notes);
       await expect(page.locator('.score-note[data-grace="true"]')).toHaveCount(piece.events.filter(event => event.grace).length);
       await expect(page.locator('.score-note[data-accent="true"]')).toHaveCount(piece.events.filter(event => event.accent).length);
@@ -866,12 +868,12 @@ test('score popovers stay inside the viewport and footer controls remain compact
     await page.locator('.score-file-info summary').click();
 
     await page.getByLabel('Select bars').click();
-    await expect(page.locator('.bar-selection-popover')).toBeVisible();
+    await expect(page.locator('#bar-selection-popover')).toBeVisible();
     await page.getByLabel('First selected bar').selectOption('1');
     await page.getByLabel('Last selected bar').selectOption('2');
-    await expect(page.locator('.bar-selection-popover')).toBeVisible();
+    await expect(page.locator('#bar-selection-popover')).toBeVisible();
     await expect(page.locator('.score-measure-number.selected-bar-number')).toHaveCount(2);
-    expect(await page.locator('.bar-selection-popover').evaluate(element => {
+    expect(await page.locator('#bar-selection-popover').evaluate(element => {
       const rect = element.getBoundingClientRect();
       return rect.left >= 0 && rect.right <= window.innerWidth && rect.top >= 0 && rect.bottom <= window.innerHeight;
     })).toBe(true);
@@ -879,25 +881,158 @@ test('score popovers stay inside the viewport and footer controls remain compact
     await expect(page.locator('.mode-segment')).toHaveCount(0);
 
     await page.getByLabel('Close bar selection').click();
-    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await expect(page.locator('#bar-selection-popover')).toBeHidden();
     await page.getByLabel('Select bars').click();
     await page.keyboard.press('Escape');
-    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await expect(page.locator('#bar-selection-popover')).toBeHidden();
     await page.getByLabel('Select bars').click();
     await page.locator('#notation').click({ position: { x: 12, y: 12 } });
-    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await expect(page.locator('#bar-selection-popover')).toBeHidden();
     await page.getByLabel('Select bars').click();
     await page.getByLabel('Select bars').click();
-    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await expect(page.locator('#bar-selection-popover')).toBeHidden();
     await page.getByLabel('Select bars').click();
     await page.getByRole('button', { name: 'Open settings' }).click();
-    await expect(page.locator('.bar-selection-popover')).toBeHidden();
+    await expect(page.locator('#bar-selection-popover')).toBeHidden();
     await page.getByRole('button', { name: 'Close settings' }).first().click();
     await page.getByLabel('Select bars').click();
     await page.getByRole('button', { name: 'All bars' }).click();
     await page.getByLabel('Close bar selection').click();
     await expect(page.locator('.start-button')).toContainText('Start performance');
   }
+});
+
+test('metronome and bar popovers share dismissal and persisted settings', async ({ page }) => {
+  for (const viewport of [{ width: 1280, height: 720 }, { width: 320, height: 568 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/');
+    const trigger = page.locator('#visual-metronome');
+    const popup = page.locator('#metronome-popover');
+    const settings = page.locator('#settings-dialog');
+    await trigger.click();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    await expect(popup).toBeVisible();
+    expect(await popup.evaluate(element => ({
+      overflow: element.scrollHeight - element.clientHeight,
+      horizontalOverflow: element.scrollWidth - element.clientWidth,
+    }))).toEqual({ overflow: 0, horizontalOverflow: 0 });
+    for (const control of ['Tempo in BPM', 'Count-in', 'Subdivision', 'Click timbre', 'Metronome volume']) {
+      expect(await popup.getByLabel(control).evaluate(element => {
+        const bounds = element.getBoundingClientRect();
+        const panel = element.closest('#metronome-popover')!.getBoundingClientRect();
+        return bounds.top >= panel.top && bounds.bottom <= panel.bottom && bounds.left >= panel.left && bounds.right <= panel.right;
+      }), `${control} is clipped at ${viewport.width}x${viewport.height}`).toBe(true);
+    }
+    const bounds = await popup.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+    });
+    expect(bounds.left, JSON.stringify({ viewport, bounds })).toBeGreaterThanOrEqual(0);
+    expect(bounds.right, JSON.stringify({ viewport, bounds })).toBeLessThanOrEqual(viewport.width);
+    expect(bounds.top, JSON.stringify({ viewport, bounds })).toBeGreaterThanOrEqual(0);
+    expect(bounds.bottom, JSON.stringify({ viewport, bounds })).toBeLessThanOrEqual(viewport.height);
+    await popup.getByLabel('Tempo in BPM').fill('135');
+    await popup.getByLabel('Increase tempo').click();
+    await popup.getByLabel('Count-in').selectOption('2');
+    await popup.getByLabel('Subdivision').selectOption('2');
+    await popup.getByLabel('Click timbre').selectOption('cowbell');
+    await expect(popup).toBeVisible();
+    await page.getByLabel('Select bars').click();
+    await expect(popup).toBeHidden();
+    await expect(page.locator('#bar-selection-popover')).toBeVisible();
+    await trigger.click();
+    await expect(page.locator('#bar-selection-popover')).toBeHidden();
+    await page.keyboard.press('Escape');
+    await expect(popup).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await trigger.click();
+    await trigger.click();
+    await expect(popup).toBeHidden();
+    await trigger.click();
+    await page.getByRole('button', { name: 'Open settings' }).click();
+    await expect(popup).toBeHidden();
+    await expect(settings.getByLabel('Tempo in BPM')).toHaveValue('136');
+    await expect(settings.getByLabel('Count-in')).toHaveValue('2');
+    await expect(settings.getByLabel('Subdivision')).toHaveValue('2');
+    await expect(settings.getByLabel('Click timbre')).toHaveValue('cowbell');
+    await settings.getByLabel('Tempo in BPM').fill('147');
+    await settings.getByLabel('Count-in').selectOption('0');
+    await settings.getByLabel('Subdivision').selectOption('4');
+    await settings.getByLabel('Click timbre').selectOption('crisp');
+    await page.getByRole('button', { name: 'Close settings' }).first().click();
+    await trigger.click();
+    await expect(popup.getByLabel('Tempo in BPM')).toHaveValue('147');
+    await expect(popup.getByLabel('Count-in')).toHaveValue('0');
+    await expect(popup.getByLabel('Subdivision')).toHaveValue('4');
+    await expect(popup.getByLabel('Click timbre')).toHaveValue('crisp');
+    await page.getByLabel('Close metronome settings').click();
+    await expect(trigger).toBeFocused();
+    await page.locator('.score-file-info summary').click();
+    await expect(page.locator('.score-file-info-popover')).toBeVisible();
+    await trigger.click();
+    await expect(page.locator('.score-file-info-popover')).toBeHidden();
+    await page.locator('.score-file-info summary').click();
+    await expect(popup).toBeHidden();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.score-file-info-popover')).toBeHidden();
+    await expect(page.locator('.score-file-info summary')).toBeFocused();
+    await expect.poll(() => page.evaluate(() => new Promise<number | undefined>((resolve, reject) => {
+      const request = indexedDB.open('rudiment');
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const get = request.result.transaction('settings').objectStore('settings').get('app');
+        get.onerror = () => reject(get.error);
+        get.onsuccess = () => resolve(get.result?.value?.bpm);
+      };
+    }))).toBe(147);
+    await page.reload();
+    await trigger.click();
+    await expect(popup.getByLabel('Tempo in BPM')).toHaveValue('147');
+    await expect(popup.getByLabel('Count-in')).toHaveValue('0');
+    await expect(popup.getByLabel('Subdivision')).toHaveValue('4');
+    await expect(popup.getByLabel('Click timbre')).toHaveValue('crisp');
+  }
+});
+
+test('metronome controls remain visible without scrolling at 200% zoom', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto('/');
+  await page.evaluate(() => { document.documentElement.style.zoom = '200%'; });
+  await page.locator('#visual-metronome').click();
+  const popup = page.locator('#metronome-popover');
+  await expect.poll(() => popup.evaluate(element => element.getBoundingClientRect().bottom)).toBeLessThanOrEqual(720);
+  const geometry = await popup.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    return {
+      left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
+      overflow: element.scrollHeight - element.clientHeight,
+      horizontalOverflow: element.scrollWidth - element.clientWidth,
+    };
+  });
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(1280);
+  expect(geometry.top).toBeGreaterThanOrEqual(0);
+  expect(geometry.bottom).toBeLessThanOrEqual(720);
+  expect(geometry.overflow).toBe(0);
+  expect(geometry.horizontalOverflow).toBe(0);
+  for (const control of ['Tempo in BPM', 'Count-in', 'Subdivision', 'Click timbre', 'Metronome volume']) {
+    await expect(popup.getByLabel(control)).toBeInViewport();
+  }
+});
+
+test('metronome preview errors remain visible without scrolling', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await page.route('**/audio/cowbell-accent.wav', route => route.abort());
+  await page.goto('/');
+  await page.locator('#visual-metronome').click();
+  const popup = page.locator('#metronome-popover');
+  await popup.getByLabel('Click timbre').selectOption('cowbell');
+  await popup.getByRole('button', { name: 'Preview' }).click();
+  await expect(popup.locator('.metronome-preview-error')).toContainText('Metronome preview failed');
+  await expect.poll(() => popup.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    return rect.top >= 0 && rect.bottom <= innerHeight && element.scrollHeight === element.clientHeight;
+  })).toBe(true);
 });
 
 test('a large personal MIDI library paginates without overflowing the modal', async ({ page }) => {
@@ -945,7 +1080,7 @@ test('restoring the last MIDI exercise preserves the saved practice tempo', asyn
   await (await chooserPromise).setFiles('web/public/exercises/quarter-note-reference.mid');
   await expect(libraryDialog).toHaveCount(0);
   await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
-  await page.getByLabel('Tempo in BPM').fill('137');
+  await setTempo(page, '137');
   await expect.poll(() => page.evaluate(() => new Promise<number | undefined>((resolve, reject) => {
     const request = indexedDB.open('rudiment');
     request.onerror = () => reject(request.error);
@@ -957,7 +1092,7 @@ test('restoring the last MIDI exercise preserves the saved practice tempo', asyn
   }))).toBe(137);
   await page.reload();
   await expect(page.locator('.score-note[data-written-duration="q"]')).toHaveCount(8);
-  await expect(page.getByLabel('Tempo in BPM')).toHaveValue('137');
+  await expect(page.locator('#metronome-popover').getByLabel('Tempo in BPM')).toHaveValue('137');
 });
 
 test('simulated Web MIDI preserves message details and filters non-attacks', async ({ page }) => {
@@ -1132,6 +1267,10 @@ test('last selected MIDI input reconnects automatically when several inputs are 
   await expect(page.locator('.midi-state')).toContainText('Kit B · connected');
   await page.reload();
   await expect(page.locator('.status-pill')).toContainText('Kit B · connected');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Input device').selectOption('kit-a');
+  await page.reload();
+  await expect(page.locator('.status-pill')).toContainText('Kit A · connected');
 });
 
 test('remembered MIDI input reconnects when the browser changes its port id', async ({ page }) => {
@@ -1152,10 +1291,30 @@ test('remembered MIDI input reconnects when the browser changes its port id', as
   expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('new-browser-id');
 });
 
-test('auto-connect waits for the remembered MIDI input when a different input is present', async ({ page }) => {
+test('auto-connect selects a sole MIDI input even when a different input was remembered', async ({ page }) => {
   await page.addInitScript(() => {
     const input={id:'other-kit',name:'Other Kit',manufacturer:'Acme',type:'input',state:'connected',connection:'open',onmidimessage:null,onstatechange:null,open:async()=>input,close:async()=>input};
     const access={inputs:new Map([[input.id,input]]),outputs:new Map(),sysexEnabled:false,onstatechange:null};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
+    localStorage.setItem('rudiment-midi-input','remembered-kit');
+    localStorage.setItem('rudiment-midi-input-identity',JSON.stringify({name:'Stage Drums',manufacturer:'Acme'}));
+  });
+  await page.goto('/');
+  await expect(page.locator('.status-pill')).toContainText('Other Kit · connected');
+  expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('other-kit');
+  await page.reload();
+  await expect(page.locator('.status-pill')).toContainText('Other Kit · connected');
+});
+
+test('multiple MIDI inputs wait for a selection when the remembered input is unavailable', async ({ page }) => {
+  await page.addInitScript(() => {
+    const makeInput=(id:string,name:string)=>{
+      const input={id,name,manufacturer:'Acme',type:'input',state:'connected',connection:'open',onmidimessage:null,onstatechange:null,open:async()=>input,close:async()=>input};
+      return input;
+    };
+    const first=makeInput('kit-a','Kit A'),second=makeInput('kit-b','Kit B');
+    const access={inputs:new Map([[first.id,first],[second.id,second]]),outputs:new Map(),sysexEnabled:false,onstatechange:null};
     Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
     Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
     localStorage.setItem('rudiment-midi-input','remembered-kit');
@@ -1166,11 +1325,53 @@ test('auto-connect waits for the remembered MIDI input when a different input is
   expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('remembered-kit');
 });
 
+test('MIDI hotplug selects the remaining input and pauses only when the selected input disconnects', async ({ page }) => {
+  await page.addInitScript(() => {
+    const makeInput=(id:string,name:string)=>{
+      const input={id,name,manufacturer:'Test',type:'input',state:'connected',connection:'open',onmidimessage:null as null|((event:unknown)=>void),onstatechange:null,open:async()=>input,close:async()=>input,
+        dispatch:(data:number[])=>input.onmidimessage?.({data:new Uint8Array(data),timeStamp:performance.now()})};
+      return input;
+    };
+    const first=makeInput('kit-a','Kit A'),second=makeInput('kit-b','Kit B');
+    const listeners:Array<(event:unknown)=>void>=[];
+    const access={inputs:new Map([[first.id,first],[second.id,second]]),outputs:new Map(),sysexEnabled:false,onstatechange:null as null|((event:unknown)=>void),
+      addEventListener:(type:string,callback:(event:unknown)=>void)=>{if(type==='statechange')listeners.push(callback);},removeEventListener:()=>{},
+      change:(input:typeof first,connected:boolean)=>{
+        input.state=connected?'connected':'disconnected';input.connection=connected?'open':'pending';
+        if(connected)access.inputs.set(input.id,input);else access.inputs.delete(input.id);
+        const event={port:input,timeStamp:performance.now()};access.onstatechange?.(event);listeners.forEach(callback=>callback(event));
+      }};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
+    Object.assign(window,{__hotplug:{first,second,access}});
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Input device').selectOption('kit-b');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect(page.getByRole('button',{name:'Pause'})).toBeVisible();
+  await page.evaluate(()=>{const {first,access}=(window as any).__hotplug;access.change(first,false);});
+  await expect(page.locator('.status-pill')).toContainText('Kit B · connected');
+  await expect(page.getByRole('button',{name:'Pause'})).toBeVisible();
+  await page.evaluate(()=>{const {first,access}=(window as any).__hotplug;access.change(first,true);});
+  await expect(page.locator('.status-pill')).toContainText('Kit B · connected');
+  await page.evaluate(()=>{const {second,access}=(window as any).__hotplug;access.change(second,false);});
+  await expect(page.locator('.status-pill')).toContainText('Kit A · connected');
+  await expect(page.getByRole('button',{name:'Resume'})).toBeVisible();
+  expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('kit-a');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByText('MIDI diagnostics').click();
+  await page.evaluate(()=>{const {first,second}=(window as any).__hotplug;first.dispatch([0x99,38,77]);second.dispatch([0x99,38,88]);});
+  await expect(page.locator('.diagnostics')).toContainText('velocity 77');
+  await expect(page.locator('.diagnostics')).not.toContainText('velocity 88');
+});
+
 test('unplayed notes stay neutral and the playhead interpolates continuously', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   // SVG lines have a zero-width bounding box, so Playwright correctly reports
@@ -1195,9 +1396,9 @@ test('unplayed notes stay neutral and the playhead interpolates continuously', a
 
 test('playhead continues moving after entering bar two', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.evaluate(() => {
     (window as any).__barTwoMotion = new Promise(resolve => {
@@ -1233,13 +1434,13 @@ test('playhead continues moving after entering bar two', async ({ page }) => {
 test('count-in for a selected bar never traverses the preceding bar', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByLabel('Select bars').click();
   await page.getByLabel('First selected bar').selectOption('3');
   await page.getByLabel('Last selected bar').selectOption('3');
   await page.getByLabel('Close bar selection').click();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('1');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('1');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await expect(page.getByLabel('Select bars')).toContainText('BAR 4 / 4');
 
@@ -1257,7 +1458,7 @@ test('count-in for a selected bar never traverses the preceding bar', async ({ p
 
 test('early first downbeat and later loop hits stay on the selected bar', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByLabel('Select bars').click();
   await page.getByLabel('First selected bar').selectOption('1');
   await page.getByLabel('Last selected bar').selectOption('1');
@@ -1731,9 +1932,9 @@ test('rapid repeated monitored strikes allocate an audio voice for every hit', a
 
 test('reference snare can follow written notes instead of physical hits', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   const playbackMode = page.getByLabel('Reference snare timing');
   await playbackMode.selectOption('notes');
   await expect(playbackMode).toHaveValue('notes');
@@ -1767,9 +1968,9 @@ test('reference snare can follow written notes instead of physical hits', async 
 
 test('loop and restart leave practice stopped until started again', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByLabel('Select bars').click();
   await page.getByLabel('First selected bar').selectOption('0');
@@ -1791,9 +1992,9 @@ test('loop and restart leave practice stopped until started again', async ({ pag
 
 test('repeat-until-good setting persists and retries a failed bar', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   const repeatBar = page.getByLabel('Repeat bar until Good');
   await repeatBar.check();
   await page.getByLabel('Repeat tolerance').selectOption('strict');
@@ -1842,13 +2043,13 @@ test('repeat-until-good setting persists and retries a failed bar', async ({ pag
 test('single-bar repetition preserves the visible score and reuses its SVG', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('240');
+  await setTempo(page, '240');
   await page.getByLabel('Select bars').click();
   await page.getByLabel('First selected bar').selectOption('2');
   await page.getByLabel('Last selected bar').selectOption('2');
   await page.getByLabel('Close bar selection').click();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByLabel('Repeat bar until Good').check();
   await page.getByRole('button', { name: 'Close settings' }).first().click();
 
@@ -1882,9 +2083,9 @@ test('single-bar repetition preserves the visible score and reuses its SVG', asy
 
 test('bar retries stay on tempo and pause/resume preserves position without scoring paused hits', async ({ page }) => {
   await page.goto('/');
-  await page.getByLabel('Tempo in BPM').fill('72');
+  await setTempo(page, '72');
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByLabel('Repeat bar until Good').check();
   await page.getByRole('button', { name: 'Close settings' }).first().click();
 
@@ -1936,7 +2137,6 @@ test('top toolbar fits and preserves control order at mobile and desktop widths'
         topbar.querySelector<HTMLElement>('#midi-library-trigger')!,
         topbar.querySelector<HTMLElement>('#stats-trigger')!,
         topbar.querySelector<HTMLElement>('.brand')!,
-        topbar.querySelector<HTMLElement>('.tempo-control')!,
         topbar.querySelector<HTMLElement>('.settings-trigger')!,
       ].map(element=>element.getBoundingClientRect());
       const status=topbar.querySelector<HTMLElement>('.status-pill')!.getBoundingClientRect();
@@ -1949,9 +2149,8 @@ test('top toolbar fits and preserves control order at mobile and desktop widths'
         statusFits:status.left>=toolbar.left&&status.right<=toolbar.right&&status.top>=toolbar.top&&status.bottom<=toolbar.bottom,
         order:controls.map(box=>({left:box.left,top:box.top,centerY:(box.top+box.bottom)/2})),
         sourceOrder:[...topbar.children]
-          .filter(element=>element.matches('#midi-library-trigger,#stats-trigger,.settings-trigger,.brand,.tempo-control'))
-          .map(element=>element.getAttribute('aria-label')||'Tempo'),
-        tempoWidth:controls[3].width,
+          .filter(element=>element.matches('#midi-library-trigger,#stats-trigger,.settings-trigger,.brand'))
+          .map(element=>element.getAttribute('aria-label')),
       };
     },width);
 
@@ -1959,15 +2158,9 @@ test('top toolbar fits and preserves control order at mobile and desktop widths'
     expect(layout.controlsFit,`${width}px clips a toolbar control`).toBe(true);
     expect(layout.controlsOverlap,`${width}px overlaps toolbar controls`).toBe(false);
     expect(layout.statusFits,`${width}px clips the MIDI status bar`).toBe(true);
-    expect(layout.tempoWidth,`${width}px compresses the BPM control`).toBeGreaterThanOrEqual(149);
-    expect(layout.sourceOrder).toEqual(['MIDI library · 11 exercises','Stats','Rudiment','Tempo','Open settings']);
+    expect(layout.sourceOrder).toEqual(['MIDI library · 11 exercises','Stats','Rudiment','Open settings']);
 
-    if(width<=360){
-      const [library,stats,brand,tempo,settings]=layout.order;
-      expect([library.top,stats.top,brand.top,settings.top],`${width}px primary controls do not share row one`).toEqual([library.top,library.top,library.top,library.top]);
-      expect([library.left,stats.left,brand.left,settings.left],`${width}px changes primary control order`).toEqual([...([library.left,stats.left,brand.left,settings.left] as number[])].sort((a,b)=>a-b));
-      expect(tempo.top,`${width}px does not place BPM on row two`).toBeGreaterThan(settings.top);
-    }else if(width<=700){
+    if(width<=700){
       expect(layout.order.map(control=>control.left),`${width}px changes toolbar control order`).toEqual([...layout.order.map(control=>control.left)].sort((a,b)=>a-b));
       expect(Math.max(...layout.order.map(control=>control.centerY))-Math.min(...layout.order.map(control=>control.centerY)),`${width}px unnecessarily wraps toolbar controls`).toBeLessThanOrEqual(1);
     }

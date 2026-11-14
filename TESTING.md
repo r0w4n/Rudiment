@@ -31,6 +31,12 @@ Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguit
 
 ## Sampled metronome browser checklist
 
+The visual metronome opens a contextual settings panel; its controls share the
+saved values in Settings. Tempo and click volume update during playback.
+Count-in applies on the next start; subdivision, click timbre, and click
+enablement apply on the next start or resume, following the existing transport
+scheduling behavior.
+
 1. In desktop Chrome, preview Warm woodblock, Crisp click and Cowbell. Confirm each uses its own recorded timbre and that its accent is stronger than its regular beat.
 2. Start a 4/4 exercise with count-in. Confirm the first count-in beat and each bar downbeat are accented; regular beats remain even. Repeat with a non-4/4 exercise and with bar repetition enabled.
 3. Change tempo during practice, pause between beats, resume, stop/restart and switch presets. Confirm accents remain attached to musical downbeats, there are no doubled/stuck clicks, and exercise/MIDI scoring is unchanged.
@@ -43,7 +49,7 @@ These steps require a real kit and must not be reported as passed from browser s
 
 1. Connect the module by USB and open desktop Chrome. Choose Connect MIDI drums and grant MIDI permission.
 2. Verify the real manufacturer/name appears, select the intended port, and expand diagnostics. Strike multiple pads and confirm timestamp, Note On/Off, channel, velocity and raw data are credible. CC and velocity-zero Note On traffic must not sound or score hits.
-3. Choose Learn snare, strike the snare, reconnect the module, and verify the learned note/channel persist. Reload with permission already granted and verify the saved/sole input reconnects without pressing Connect. Confirm an unverified device name never silently selects a vendor mapping.
+3. Choose Learn snare, strike the snare, reconnect the module, and verify the learned note/channel persist. Reload with permission already granted and verify the sole input reconnects without pressing Connect, even if a different input was last selected. With multiple inputs, verify the last selected available input reconnects. Confirm an unverified device name never silently selects a vendor mapping.
 4. Start a run. Confirm snare hits score as MIDI input; kick/hat near a snare target show wrong-instrument feedback and never satisfy it.
 5. Play fast single strokes with “Play app snare” enabled and confirm every strike sounds without intermittent gaps; repeat with the module sound disabled to isolate app monitoring. Then turn off “Play app snare” when listening to the module to confirm there is no doubled sound.
 6. Disconnect during count-in/running: the run should pause with a reconnect message. Reconnect and confirm the saved port/profile is restored.

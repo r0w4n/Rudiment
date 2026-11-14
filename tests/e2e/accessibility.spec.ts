@@ -58,6 +58,31 @@ test('library, settings, and statistics dialogs pass axe and manage focus', asyn
   }
 });
 
+test('contextual metronome and bar controls pass axe and restore focus', async ({ page }) => {
+  await page.goto('/');
+  for (const [triggerSelector, dialogName] of [
+    ['#visual-metronome', 'Metronome'],
+    ['#bar-selection-trigger', 'Bar selection'],
+  ]) {
+    const trigger = page.locator(triggerSelector);
+    await trigger.focus();
+    await page.keyboard.press('Space');
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByRole('dialog', { name: dialogName })).toBeVisible();
+    if (dialogName === 'Metronome') {
+      const dialog = page.getByRole('dialog', { name: dialogName });
+      await dialog.getByLabel('Increase tempo').focus();
+      await page.keyboard.press('Space');
+      await expect(dialog.getByLabel('Tempo in BPM')).toHaveValue('61');
+      await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
+    }
+    await expectNoWcagViolations(page, `${dialogName} popover`);
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  }
+});
+
 test('keyboard focus remains visible at narrow and zoomed layouts', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');

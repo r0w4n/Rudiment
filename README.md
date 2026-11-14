@@ -17,6 +17,11 @@ npm run dev
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in desktop Chrome. Starting practice unlocks browser audio. No account, server, registration or MIDI device is required; press `J` for demo snare input. Space pauses/resumes and `R` restarts when focus is not in a form field.
 
+Select the visual metronome above the score to adjust tempo, count-in and click
+settings. The same saved controls are available in Settings. Tempo and volume
+change during playback; count-in applies on the next start, while click
+enablement, subdivision and timbre apply on the next start or resume.
+
 Enable **Settings → Exercise → Repeat bar until Good** for focused practice. Rudiment then holds each bar until every expected note is graded Perfect or Good with no extra or wrong-drum hits. Failed attempts are discarded, the attempt counter advances, and successful bars are retained in the final saved session; empty rest bars pass automatically when no hit is played.
 
 The development server writes its disposable hot-reload build to `web/dist/`; release builds continue to use the repository-level `dist/`. It watches both Rust/Trunk inputs and `web/js/bridge.js`, rebuilding the browser bridge before Trunk reloads the page. The watchers are restricted to source paths and use Trunk's post-build cooldown, preventing generated output from retriggering its own build.
@@ -59,7 +64,7 @@ All imports, settings, mappings and sessions remain in IndexedDB on the current 
 
 ## Supported scope
 
-Desktop Chrome is the hardware target because Web MIDI support varies by browser. Demo mode works in modern Chromium browsers without permission. Once MIDI permission has been granted, Rudiment restores the saved input automatically, selects a sole available input, and listens for reconnects; the explicit Connect control remains the first-use permission gesture and recovery path. The MIDI importer supports PPQ SMF 0/1, tempo/time-signature metadata, ordinary percussion tracks, onset-derived quarter/eighth/sixteenth and triplet values, R/L lyric events and short practice files. Raw note-gate duration is preserved as metadata but never mistaken for written rhythm. MIDI tempo maps drive playback and scoring, and imported files are saved in a browser-local IndexedDB library with the most recently selected import restored on startup. SMPTE timebases, dense polyphony and arbitrary notation remain outside this PoC.
+Desktop Chrome is the hardware target because Web MIDI support varies by browser. Demo mode works in modern Chromium browsers without permission. Once MIDI permission has been granted, Rudiment selects a sole available input even if it differs from the last selected one. When several inputs are available, it restores the last selected input if available; otherwise, choose an input in Settings. It also listens for device changes; the explicit Connect control remains the first-use permission gesture and recovery path. The MIDI importer supports PPQ SMF 0/1, tempo/time-signature metadata, ordinary percussion tracks, onset-derived quarter/eighth/sixteenth and triplet values, R/L lyric events and short practice files. Raw note-gate duration is preserved as metadata but never mistaken for written rhythm. MIDI tempo maps drive playback and scoring, and imported files are saved in a browser-local IndexedDB library with the most recently selected import restored on startup. SMPTE timebases, dense polyphony and arbitrary notation remain outside this PoC.
 
 Only the standards-based General MIDI fallback is bundled. No Alesis mapping is claimed without a physical verification; MIDI Learn is authoritative for unknown kits. See [TESTING.md](TESTING.md), [DEPENDENCY_DECISIONS.md](DEPENDENCY_DECISIONS.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

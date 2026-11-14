@@ -50,6 +50,28 @@ const performanceProfile={
 function tempoAtBeat(beat,map,initialBpm){let bpm=initialBpm;for(const change of map){if(change.beat>beat)break;bpm=change.bpm;}return bpm;}
 function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),within=beat-bars*meter;return `${bars}:${within}:0`;}
 
+function positionMetronomePopover(){
+  const popup=document.getElementById('metronome-popover');
+  if(!popup||popup.classList.contains('hidden'))return;
+  popup.style.setProperty('--metronome-offset-y','0px');
+  const bounds=popup.getBoundingClientRect(),scale=bounds.width/popup.offsetWidth;
+  const offset=Math.max(8-bounds.top,Math.min(0,window.innerHeight-8-bounds.bottom));
+  popup.style.setProperty('--metronome-offset-y',`${offset/scale}px`);
+}
+let metronomePopoverObserver;
+document.addEventListener('click',event=>{
+  if(!(event.target instanceof Element)||!event.target.closest('#visual-metronome'))return;
+  requestAnimationFrame(()=>{
+    const popup=document.getElementById('metronome-popover');
+    if(popup&&!metronomePopoverObserver){
+      metronomePopoverObserver=new ResizeObserver(positionMetronomePopover);
+      metronomePopoverObserver.observe(popup);
+    }
+    positionMetronomePopover();
+  });
+});
+window.addEventListener('resize',positionMetronomePopover);
+
 // A glanceable drummer-style display: the sweep borrows the left/right motion
 // of a digital needle, while the LEDs show beat position and a stronger
 // downbeat. Pulses are queued from the same Tone callback and output timestamp
@@ -85,7 +107,7 @@ const visualMetronome = {
     const dots=[...root.querySelectorAll('.visual-metronome-beats i')];
     dots.forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
     const label=root.querySelector('.visual-metronome-label');if(label)label.textContent=beat<0?'COUNT IN':'PLAY';
-    root.setAttribute('aria-label',`Visual metronome, ${beat<0?'count-in':'practice'}, beat ${beatInBar+1} of ${meter}`);
+    root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
     while(this.pending.length&&this.pending[0].performanceTime<=now+8){
       const event=this.pending.shift();if(event.step!==this.lastStep){this.lastStep=event.step;this.pulse(event);}
     }
@@ -97,7 +119,7 @@ const visualMetronome = {
     delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
     root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>dot.classList.remove('current'));
     const label=root.querySelector('.visual-metronome-label');if(label)label.textContent='READY';
-    root.setAttribute('aria-label','Visual metronome, stopped');
+    root.setAttribute('aria-label','Metronome settings, READY');
   }
 };
 
@@ -870,11 +892,11 @@ function choosePreferredInput(){
   selectedInput=WebMidi.inputs.find(input=>input.id===savedId)
     ||(identityMatches.length===1?identityMatches[0]:null)
     ||(selectedInput&&WebMidi.inputs.find(input=>input.id===selectedInput.id))
-    ||(!savedIdentity&&WebMidi.inputs.length===1?WebMidi.inputs[0]:null)
+    ||(WebMidi.inputs.length===1?WebMidi.inputs[0]:null)
     ||null;
   rememberMidiInput(selectedInput);
 }
-function bindMidiLifecycle(){if(midiBound)return;WebMidi.addListener('connected',()=>{bindMidiInputs();choosePreferredInput();sendMidiState({permission:'granted',reconnected:true});});WebMidi.addListener('disconnected',event=>{if(event.port?.id===selectedInput?.id)selectedInput=null;bindMidiInputs();sendMidiState({disconnectedId:event.port?.id,permission:'granted'});});midiBound=true;}
+function bindMidiLifecycle(){if(midiBound)return;WebMidi.addListener('connected',()=>{bindMidiInputs();choosePreferredInput();sendMidiState({permission:'granted',reconnected:true});});WebMidi.addListener('disconnected',event=>{const selectedDisconnected=event.port?.id===selectedInput?.id;if(selectedDisconnected)selectedInput=null;bindMidiInputs();choosePreferredInput();sendMidiState({disconnectedId:selectedDisconnected?event.port?.id:null,permission:'granted'});});midiBound=true;}
 async function connectMidi(callback) {
   midiCallback=callback;
   try {

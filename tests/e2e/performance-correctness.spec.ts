@@ -29,7 +29,7 @@ test('high-rate MIDI feedback paints by the next frame and Restart clears it',as
   });
   await page.goto('/');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();

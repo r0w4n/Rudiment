@@ -977,6 +977,94 @@ fn focus_result_close() {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContextPopup {
+    Bars,
+    Metronome,
+}
+
+fn focus_popup_trigger(popup: ContextPopup) {
+    let id = match popup {
+        ContextPopup::Bars => "bar-selection-trigger",
+        ContextPopup::Metronome => "visual-metronome",
+    };
+    if let Some(element) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = element.focus();
+    }
+}
+
+#[component]
+fn MetronomeSettings(
+    bpm: RwSignal<f64>,
+    count_in: RwSignal<u8>,
+    subdivision: RwSignal<u8>,
+    timbre: RwSignal<String>,
+    metronome: RwSignal<bool>,
+    click_volume: RwSignal<f64>,
+    snare_volume: RwSignal<f64>,
+    snare_muted: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    change_tempo: Rc<dyn Fn(f64)>,
+    save: Rc<dyn Fn()>,
+) -> impl IntoView {
+    let tempo_down = change_tempo.clone();
+    let tempo_input = change_tempo.clone();
+    let tempo_commit = change_tempo.clone();
+    let tempo_up = change_tempo;
+    let save_down = save.clone();
+    let save_input = save.clone();
+    let save_commit = save.clone();
+    let save_up = save.clone();
+    let save_enabled = save.clone();
+    let save_count = save.clone();
+    let save_subdivision = save.clone();
+    let save_timbre = save.clone();
+    view! {
+      <label class="toggle-row metronome-enabled"><span>"Click during exercise"</span><input type="checkbox" prop:checked=move || metronome.get() on:change=move |event|{metronome.set(event_target_checked(&event));save_enabled();}/></label>
+      <div class="tempo-field"><span>"Tempo (BPM)"</span>
+        <div class="tempo-control">
+          <button type="button" aria-label="Decrease tempo" on:click=move |_|{tempo_down(bpm.get_untracked()-1.0);save_down();}><Minus size=17/></button>
+          <div class="tempo-value">
+            <input aria-label="Tempo in BPM" title="Type a tempo from 30 to 240 BPM" type="number" inputmode="numeric" min="30" max="240" step="1"
+              prop:value=move || bpm.get().round().to_string()
+              on:focus=move |event|{event_target::<web_sys::HtmlInputElement>(&event).select();}
+              on:input=move |event|{
+                if let Ok(value)=event_target_value(&event).parse::<f64>() && (30.0..=240.0).contains(&value){
+                  tempo_input(value.round());save_input();
+                }
+              }
+              on:change=move |event|{
+                let input=event_target::<web_sys::HtmlInputElement>(&event);
+                let value=input.value().parse::<f64>().unwrap_or_else(|_|bpm.get_untracked()).round().clamp(30.0,240.0);
+                tempo_commit(value);input.set_value(&value.to_string());save_commit();
+              }/>
+            <span>"BPM"</span>
+          </div>
+          <button type="button" aria-label="Increase tempo" on:click=move |_|{tempo_up(bpm.get_untracked()+1.0);save_up();}><Plus size=17/></button>
+        </div>
+      </div>
+      <label class="metronome-count-in">"Count-in"<select prop:value=move || count_in.get().to_string() on:change=move |event|{count_in.set(event_target_value(&event).parse().unwrap_or(1));save_count();}><option value="0">"Off"</option><option value="1">"1 bar"</option><option value="2">"2 bars"</option></select></label>
+      <label class="metronome-subdivision">"Subdivision"<select prop:value=move || subdivision.get().to_string() on:change=move |event|{subdivision.set(event_target_value(&event).parse().unwrap_or(1));save_subdivision();}><option value="1">"Quarter notes"</option><option value="2">"Eighth notes"</option><option value="4">"Sixteenth notes"</option></select></label>
+      <label class="metronome-timbre">"Click timbre"<div class="inline-select"><select prop:value=move || timbre.get() on:change=move |event|{timbre.set(event_target_value(&event));save_timbre();}><option value="woodblock">"Warm woodblock"</option><option value="crisp">"Crisp click"</option><option value="cowbell">"Cowbell"</option></select><button type="button" on:click=move |_|{
+        error.set(None);
+        let promise=preview_click(&timbre.get_untracked());
+        spawn_local(async move{
+          if let Err(detail)=JsFuture::from(promise).await{
+            let detail=detail.as_string().unwrap_or_else(||format!("{detail:?}"));
+            error.set(Some(format!("Metronome preview failed: {detail}")));
+          }
+        });
+      }>"Preview"</button></div></label>
+      <small role="alert" class=move || if error.get().is_some(){"metronome-preview-error"}else{"metronome-preview-error hidden"}>{move || error.get().unwrap_or_default()}</small>
+      <label class="metronome-volume">"Metronome volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || click_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);click_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},value);save();}/></label>
+      <small class="metronome-scheduling-help">"Count-in applies on the next start; subdivision, timbre and click enablement on the next start or resume."</small>
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let exercise = RwSignal::new(paradiddle());
@@ -1001,7 +1089,7 @@ fn App() -> impl IntoView {
     let repeat_tolerance = RwSignal::new(RepeatTolerance::Standard);
     let selection_start_bar = RwSignal::new(0usize);
     let selection_end_bar = RwSignal::new(usize::MAX);
-    let bar_selection_open = RwSignal::new(false);
+    let context_popup = RwSignal::new(None::<ContextPopup>);
     let progress = RwSignal::new(-1.0);
     let run_start_ms = RwSignal::new(0.0);
     let paused_run_start_ms = RwSignal::new(None::<f64>);
@@ -1029,6 +1117,7 @@ fn App() -> impl IntoView {
     let result_dismiss_after_ms = RwSignal::new(f64::INFINITY);
     let welcome = RwSignal::new(true);
     let import_error = RwSignal::new(None::<String>);
+    let metronome_preview_error = RwSignal::new(None::<String>);
     let midi_status = RwSignal::new("Not connected".to_string());
     let midi_ports = RwSignal::new(Vec::<MidiPort>::new());
     let selected_midi = RwSignal::new(None::<String>);
@@ -1733,6 +1822,7 @@ fn App() -> impl IntoView {
                             }
                         });
                     }
+                    context_popup.set(None);
                     exercise.set(parsed);
                     result_modal_open.set(false);
                     phase.set("idle".into());
@@ -1756,23 +1846,27 @@ fn App() -> impl IntoView {
                 selected_midi.set(event.selected_id.clone());
                 if let Some(error) = event.error {
                     midi_status.set(format!("MIDI error · {error}"));
-                } else if event.disconnected_id.is_some() {
-                    midi_status.set("Drums disconnected — reconnecting when available".into());
-                    if matches!(phase.get_untracked().as_str(), "running" | "count_in") {
+                } else {
+                    if event.disconnected_id.is_some()
+                        && matches!(phase.get_untracked().as_str(), "running" | "count_in")
+                    {
                         midi_pause();
                     }
-                } else if let Some(id) = event.selected_id {
-                    let port = event.ports.iter().find(|port| port.id == id);
-                    midi_status.set(
-                        port.map(|port| format!("{} · connected", port.name))
-                            .unwrap_or_else(|| "Connected".into()),
-                    );
-                } else if event.permission.as_deref() == Some("prompt") {
-                    midi_status.set("MIDI ready · connect to grant access".into());
-                } else if event.permission.as_deref() == Some("unsupported") {
-                    midi_status.set("Web MIDI unavailable in this browser".into());
-                } else {
-                    midi_status.set("No MIDI drums detected".into());
+                    if let Some(id) = event.selected_id {
+                        let port = event.ports.iter().find(|port| port.id == id);
+                        midi_status.set(
+                            port.map(|port| format!("{} · connected", port.name))
+                                .unwrap_or_else(|| "Connected".into()),
+                        );
+                    } else if event.disconnected_id.is_some() {
+                        midi_status.set("Drums disconnected — reconnecting when available".into());
+                    } else if event.permission.as_deref() == Some("prompt") {
+                        midi_status.set("MIDI ready · connect to grant access".into());
+                    } else if event.permission.as_deref() == Some("unsupported") {
+                        midi_status.set("Web MIDI unavailable in this browser".into());
+                    } else {
+                        midi_status.set("No MIDI drums detected".into());
+                    }
                 }
                 return;
             }
@@ -2021,26 +2115,47 @@ fn App() -> impl IntoView {
     let key_hit = hit_input.clone();
     let key_pause_run = pause_run.clone();
     let key_resume_run = resume_run.clone();
-    let outside_bar_selection = Closure::wrap(Box::new(move |event: web_sys::Event| {
-        if !bar_selection_open.get_untracked() {
-            return;
-        }
-        let inside = event
+    let outside_context_popup = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        let target = event
             .target()
-            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-            .and_then(|element| element.closest(".bar-selection-control").ok().flatten())
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+        let inside_file_info = target
+            .as_ref()
+            .and_then(|element| element.closest(".score-file-info").ok().flatten())
+            .is_some();
+        if !inside_file_info
+            && let Some(details) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| {
+                    document
+                        .query_selector(".score-file-info[open]")
+                        .ok()
+                        .flatten()
+                })
+        {
+            let _ = details.remove_attribute("open");
+        }
+        let Some(popup) = context_popup.get_untracked() else {
+            return;
+        };
+        let selector = match popup {
+            ContextPopup::Bars => ".bar-selection-control",
+            ContextPopup::Metronome => ".metronome-context",
+        };
+        let inside = target
+            .and_then(|element| element.closest(selector).ok().flatten())
             .is_some();
         if !inside {
-            bar_selection_open.set(false);
+            context_popup.set(None);
         }
     }) as Box<dyn FnMut(web_sys::Event)>);
     if let Some(document) = web_sys::window().and_then(|window| window.document()) {
         let _ = document.add_event_listener_with_callback(
             "click",
-            outside_bar_selection.as_ref().unchecked_ref(),
+            outside_context_popup.as_ref().unchecked_ref(),
         );
     }
-    outside_bar_selection.forget();
+    outside_context_popup.forget();
     let keyboard = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
         // A held computer key generates synthetic keydown events at the OS
         // repeat interval. Those are not additional physical drum strikes and
@@ -2048,9 +2163,31 @@ fn App() -> impl IntoView {
         if event.repeat() {
             return;
         }
-        if bar_selection_open.get_untracked() && event.key() == "Escape" {
+        if let Some(popup) = context_popup.get_untracked()
+            && event.key() == "Escape"
+        {
             event.prevent_default();
-            bar_selection_open.set(false);
+            context_popup.set(None);
+            focus_popup_trigger(popup);
+            return;
+        }
+        if event.key() == "Escape"
+            && let Some(details) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| {
+                    document
+                        .query_selector(".score-file-info[open]")
+                        .ok()
+                        .flatten()
+                })
+        {
+            event.prevent_default();
+            let _ = details.remove_attribute("open");
+            if let Some(summary) = details.query_selector("summary").ok().flatten()
+                && let Ok(summary) = summary.dyn_into::<web_sys::HtmlElement>()
+            {
+                let _ = summary.focus();
+            }
             return;
         }
         if library_open.get_untracked() {
@@ -2100,6 +2237,18 @@ fn App() -> impl IntoView {
         let target = event
             .target()
             .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok());
+        if event.key() == " "
+            && target.as_ref().is_some_and(|element| {
+                element.tag_name() == "BUTTON"
+                    && element
+                        .closest(".bar-selection-control, .metronome-context")
+                        .ok()
+                        .flatten()
+                        .is_some()
+            })
+        {
+            return;
+        }
         let typing = target
             .as_ref()
             .map(|element| matches!(element.tag_name().as_str(), "INPUT" | "SELECT" | "TEXTAREA"))
@@ -2195,25 +2344,12 @@ fn App() -> impl IntoView {
         })
     };
     let choose_cb = file_callback.clone();
-    let save_tempo_down = save_current_settings.clone();
-    let save_tempo_input = save_current_settings.clone();
-    let save_tempo_commit = save_current_settings.clone();
-    let save_tempo_up = save_current_settings.clone();
-    let tempo_down = change_tempo.clone();
-    let tempo_input = change_tempo.clone();
-    let tempo_commit = change_tempo.clone();
-    let tempo_up = change_tempo.clone();
     let stop_for_connect = stop_for_navigation.clone();
     let stop_for_stats = stop_for_navigation.clone();
     let stop_for_settings = stop_for_navigation.clone();
     let stop_for_import = stop_for_navigation.clone();
     let stop_for_library = stop_for_navigation.clone();
     let save_welcome = save_current_settings.clone();
-    let save_metronome = save_current_settings.clone();
-    let save_countin = save_current_settings.clone();
-    let save_subdivision = save_current_settings.clone();
-    let save_timbre = save_current_settings.clone();
-    let save_click_volume = save_current_settings.clone();
     let save_snare_mute = save_current_settings.clone();
     let save_snare_reference_mode = save_current_settings.clone();
     let save_snare_volume = save_current_settings.clone();
@@ -2240,29 +2376,6 @@ fn App() -> impl IntoView {
           <button id="stats-trigger" class="stats-trigger" aria-label="Stats" title="Performance history" aria-haspopup="dialog" aria-expanded=move || stats_open.get().to_string() on:click=move |_|{stop_for_stats();stats_open.set(true);focus_stats_close();}><ChartNoAxesCombined size=19/></button>
           <a class="brand" href="#" aria-label="Rudiment"><span class="brand-mark" aria-hidden="true"></span><span>"Rudiment"</span></a>
           <div class="exercise-heading"><span class="eyebrow">"CURRENT EXERCISE"</span><strong>{move || exercise.get().title}</strong><small>"4/4 · sticking and accents"</small></div>
-          <div class="tempo-control">
-            <button aria-label="Decrease tempo" on:click=move |_|{tempo_down(bpm.get_untracked()-1.0);save_tempo_down();}><Minus size=17/></button>
-            <label>
-              <input aria-label="Tempo in BPM" title="Type a tempo from 30 to 240 BPM" type="number" inputmode="numeric" min="30" max="240" step="1"
-                prop:value=move || bpm.get().round().to_string()
-                on:focus=move |event|{event_target::<web_sys::HtmlInputElement>(&event).select();}
-                on:input=move |event|{
-                  if let Ok(value)=event_target_value(&event).parse::<f64>() && (30.0..=240.0).contains(&value){
-                    tempo_input(value.round());
-                    save_tempo_input();
-                  }
-                }
-                on:change=move |event|{
-                  let input=event_target::<web_sys::HtmlInputElement>(&event);
-                  let value=input.value().parse::<f64>().unwrap_or_else(|_|bpm.get_untracked()).round().clamp(30.0,240.0);
-                  tempo_commit(value);
-                  input.set_value(&value.to_string());
-                  save_tempo_commit();
-                }/>
-              <span>"BPM"</span>
-            </label>
-            <button aria-label="Increase tempo" on:click=move |_|{tempo_up(bpm.get_untracked()+1.0);save_tempo_up();}><Plus size=17/></button>
-          </div>
           <button id="settings-trigger" class="stats-trigger settings-trigger" aria-label="Open settings" title="Rudiment settings" aria-haspopup="dialog" aria-expanded=move || settings_open.get().to_string() on:click=move |_|{stop_for_settings();settings_open.set(true);focus_settings_close();}><SettingsIcon size=19/></button>
           <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label=move || format!("MIDI connection: {}",midi_status.get()) on:click={let connect=connect_action.clone();move |_|{stop_for_connect();connect();}}><span class="status-dot"></span>{move || midi_status.get()}</button>
         </header>
@@ -2271,10 +2384,16 @@ fn App() -> impl IntoView {
               <aside class=move || if welcome.get(){"welcome"}else{"welcome hidden"}><div><strong>              "A paradiddle is ready."</strong><span>"Space pauses; R restarts."</span></div><button aria-label="Got it, dismiss welcome hint" on:click=move |_|{welcome.set(false);save_welcome();}>"Got it"</button></aside>
             <section id="score-card" class="score-card">
               <div class="score-meta">
-                <div id="visual-metronome" class="visual-metronome" role="img" aria-label="Visual metronome, stopped">
-                  <span class="visual-metronome-sweep" aria-hidden="true"><i></i></span>
-                  <span class="visual-metronome-beats" aria-hidden="true">{move || (0..beats_per_bar(&exercise.get()).round().max(1.0) as usize).map(|_|view!{<i></i>}).collect_view()}</span>
-                  <small class="visual-metronome-label">"READY"</small>
+                <div class="metronome-context">
+                  <button id="visual-metronome" class="visual-metronome" type="button" aria-label="Metronome settings, READY" aria-haspopup="dialog" aria-controls="metronome-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Metronome)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Metronome){None}else{Some(ContextPopup::Metronome)})>
+                    <span class="visual-metronome-sweep" aria-hidden="true"><i></i></span>
+                    <span class="visual-metronome-beats" aria-hidden="true">{move || (0..beats_per_bar(&exercise.get()).round().max(1.0) as usize).map(|_|view!{<i></i>}).collect_view()}</span>
+                    <small class="visual-metronome-label" aria-hidden="true">"READY"</small>
+                  </button>
+                    <div id="metronome-popover" class=move || if context_popup.get()==Some(ContextPopup::Metronome){"bar-selection-popover metronome-popover"}else{"bar-selection-popover metronome-popover hidden"} role="dialog" aria-label="Metronome">
+                      <div class="bar-selection-popover-head"><strong>"Metronome"</strong><button class="bar-selection-close" type="button" aria-label="Close metronome settings" on:click=move |_|{context_popup.set(None);focus_popup_trigger(ContextPopup::Metronome);}><X size=15/></button></div>
+                      <MetronomeSettings bpm=bpm count_in=count_in subdivision=subdivision timbre=timbre metronome=metronome click_volume=click_volume snare_volume=snare_volume snare_muted=snare_muted error=metronome_preview_error change_tempo=change_tempo.clone() save=save_current_settings.clone()/>
+                    </div>
                 </div>
                 <details class="score-file-info">
                   <summary role="button" aria-label="File information" title="File information"><Info size=16/></summary>
@@ -2289,10 +2408,10 @@ fn App() -> impl IntoView {
               <div id="notation" class="notation" role="region" aria-label="Musical notation" aria-live="off" tabindex="0"></div>
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
               <div class="position-row">
-                <div class=move || if bar_selection_open.get(){"bar-selection-control open"}else{"bar-selection-control"}>
-                  <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-expanded=move || bar_selection_open.get().to_string() on:click=move |_|bar_selection_open.update(|open| *open = !*open)><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let bar_beats=beats_per_bar(&exercise.get());let total=(exercise_beats(&exercise.get())/bar_beats).ceil().max(1.0) as usize;let raw=(progress.get().max(0.0)/bar_beats).floor() as usize;let start=selection_start_bar.get().min(total.saturating_sub(1));let end=selection_end_bar.get().min(total.saturating_sub(1)).max(start);let full_performance=start==0&&end+1==total&&app_mode.get()==AppMode::Performance;let current=if full_performance{raw.min(total.saturating_sub(1))+1}else{start+raw.saturating_sub(start)%(end-start+1)+1};let range_total=end+1;if repeat_bar_until_good.get(){format!("BAR {current} / {range_total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {range_total}")}}}</span></button>
-                  <div class=move || if bar_selection_open.get(){"bar-selection-popover"}else{"bar-selection-popover hidden"} role="dialog" aria-label="Bar selection">
-                    <div class="bar-selection-popover-head"><strong>"Practise bars"</strong><button class="bar-selection-close" type="button" aria-label="Close bar selection" on:click=move |_|bar_selection_open.set(false)><X size=15/></button></div>
+                <div class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-control open"}else{"bar-selection-control"}>
+                  <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-controls="bar-selection-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Bars)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Bars){None}else{Some(ContextPopup::Bars)})><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let bar_beats=beats_per_bar(&exercise.get());let total=(exercise_beats(&exercise.get())/bar_beats).ceil().max(1.0) as usize;let raw=(progress.get().max(0.0)/bar_beats).floor() as usize;let start=selection_start_bar.get().min(total.saturating_sub(1));let end=selection_end_bar.get().min(total.saturating_sub(1)).max(start);let full_performance=start==0&&end+1==total&&app_mode.get()==AppMode::Performance;let current=if full_performance{raw.min(total.saturating_sub(1))+1}else{start+raw.saturating_sub(start)%(end-start+1)+1};let range_total=end+1;if repeat_bar_until_good.get(){format!("BAR {current} / {range_total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {range_total}")}}}</span></button>
+                  <div id="bar-selection-popover" class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-popover"}else{"bar-selection-popover hidden"} role="dialog" aria-label="Bar selection">
+                    <div class="bar-selection-popover-head"><strong>"Practise bars"</strong><button class="bar-selection-close" type="button" aria-label="Close bar selection" on:click=move |_|{context_popup.set(None);focus_popup_trigger(ContextPopup::Bars);}><X size=15/></button></div>
                     <div class="bar-range-fields">
                       <label>"From"<select aria-label="First selected bar" prop:value=move || selection_start_bar.get().to_string() on:change={let stop=stop_for_navigation.clone();move |event|{stop();let value=event_target_value(&event).parse().unwrap_or(0);selection_start_bar.set(value);if selection_end_bar.get_untracked()<value{selection_end_bar.set(value);}save_selection_start();}}>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;(0..count).map(|bar|view!{<option value=bar.to_string()>{format!("Bar {}",bar+1)}</option>}).collect_view()}}</select></label>
                       <label>"To"<select aria-label="Last selected bar" prop:value=move || selection_end_bar.get().min((exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize-1).to_string() on:change={let stop=stop_for_navigation.clone();move |event|{stop();let value=event_target_value(&event).parse().unwrap_or(selection_start_bar.get_untracked());selection_end_bar.set(value.max(selection_start_bar.get_untracked()));save_selection_end();}}>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;(0..count).map(|bar|view!{<option value=bar.to_string()>{format!("Bar {}",bar+1)}</option>}).collect_view()}}</select></label>
@@ -2516,11 +2635,8 @@ fn App() -> impl IntoView {
         }>
           <div class="drawer-head"><div><span class="eyebrow">"RUDIMENT SETUP"</span><h2 id="settings-title">"Sound & drums"</h2></div><button id="settings-close" aria-label="Close settings" on:click=move |_|{settings_open.set(false);restore_settings_focus();}><X size=22/></button></div>
           <div class="drawer-scroll">
-            <section><h3>"Metronome"</h3><label class="toggle-row"><span>"Click during exercise"</span><input type="checkbox" prop:checked=move || metronome.get() on:change=move |event|{metronome.set(event_target_checked(&event));save_metronome();}/></label>
-              <label>"Count-in"<select prop:value=move || count_in.get().to_string() on:change=move |event|{count_in.set(event_target_value(&event).parse().unwrap_or(1));save_countin();}><option value="0">"Off"</option><option value="1">"1 bar"</option><option value="2">"2 bars"</option></select></label>
-              <label>"Subdivision"<select prop:value=move || subdivision.get().to_string() on:change=move |event|{subdivision.set(event_target_value(&event).parse().unwrap_or(1));save_subdivision();}><option value="1">"Quarter notes"</option><option value="2">"Eighth notes"</option><option value="4">"Sixteenth notes"</option></select></label>
-              <label>"Click timbre"<div class="inline-select"><select prop:value=move || timbre.get() on:change=move |event|{timbre.set(event_target_value(&event));save_timbre();}><option value="woodblock">"Warm woodblock"</option><option value="crisp">"Crisp click"</option><option value="cowbell">"Cowbell"</option></select><button on:click=move |_|{let promise=preview_click(&timbre.get_untracked());spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Preview"</button></div></label>
-              <label>"Metronome volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || click_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);click_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},value);save_click_volume();}/></label>
+            <section><h3>"Metronome"</h3>
+              <MetronomeSettings bpm=bpm count_in=count_in subdivision=subdivision timbre=timbre metronome=metronome click_volume=click_volume snare_volume=snare_volume snare_muted=snare_muted error=metronome_preview_error change_tempo=change_tempo.clone() save=save_current_settings.clone()/>
             </section>
             <section><h3>"Reference snare"</h3><label class="toggle-row"><span>"Play app snare"<small>"Mute this if your drum module is audible."</small></span><input type="checkbox" prop:checked=move || !snare_muted.get() on:change=move |event|{snare_muted.set(!event_target_checked(&event));set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},click_volume.get_untracked());save_snare_mute();}/></label><label>"Play snare"<select aria-label="Reference snare timing" prop:value=move || snare_reference_mode.get() on:change=move |event|{let value=event_target_value(&event);snare_reference_mode.set(if value=="notes"{"notes".into()}else{"hits".into()});save_snare_reference_mode();}><option value="hits">"With your hits"</option><option value="notes">"On written notes"</option></select><small class="help">{move || if snare_reference_mode.get()=="notes"{"Plays each written snare note as a reference; your strikes are still scored silently."}else{"Plays immediately when Rudiment receives your keyboard or MIDI strike."}}</small></label><label>"Snare volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || snare_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);snare_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{value},click_volume.get_untracked());save_snare_volume();}/></label></section>
             <section><h3>"Practice repeats"</h3>

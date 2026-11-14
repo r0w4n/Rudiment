@@ -87,7 +87,7 @@ async function loadFixture(page,id){
 
 async function configurePractice(page){
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Count-in').selectOption('0');
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   await page.getByRole('button',{name:/Pause/}).waitFor({timeout:15_000});
