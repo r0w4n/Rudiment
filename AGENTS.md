@@ -2,10 +2,49 @@
 
 ## Architecture and generated assets
 
-- `crates/core/src/lib.rs` is the web-independent MIDI/timing/scoring domain; `web/src/main.rs` is the Leptos/WASM UI and practice state. `web/js/bridge.js` handles Web MIDI, Tone.js audio, VexFlow notation and IndexedDB. Tone.Transport is the musical clock; rendering must not become a second scheduler.
+- `crates/core/src/lib.rs` is the web-independent MIDI/timing/scoring domain; `web/src/main.rs` is the Leptos/WASM UI and practice state. `web/js/bridge.js` handles Web MIDI, Tone.js audio, VexFlow notation and IndexedDB. Tone.Transport is the authoritative musical clock; rendering must not become a second scheduler.
 - Edit `web/js/bridge.js`, not the generated `web/public/bridge.js`. `npm run build` regenerates fixtures and bundles the bridge before Trunk writes `dist/`; `npm run dev` does the same and watches sources into `web/dist/` (port 5173, override with `RUDIMENT_PORT`).
 - `scripts/generate-fixtures.mjs` generates ignored MIDI files and the performance manifest; the built-in `web/public/exercises/rudiments/*.mid` are tracked. Their test-only reference engravings and manifest are in `tests/fixtures/rudiment-reference/`; keep them out of the deployed app.
 - GitHub Pages builds with `--public-url "./"`; preserve relative asset paths so the app also works under a repository subpath.
+
+## Presentation architecture and rendering boundaries
+
+The application separates musical domain logic, renderer-independent presentation state and visual rendering. Preserve this separation when implementing the MIDI highway or changing existing notation.
+
+### Domain and application state
+
+- `crates/core/src/lib.rs` owns web-independent MIDI exercise data, expected hits, timing, instrument classification and scoring.
+- `web/src/main.rs` owns Leptos application/practice state and connects it to the browser bridge.
+- Tone.Transport remains the single authoritative musical clock. Do not introduce a second clock, MIDI parser, scheduler or scoring engine for a visualisation.
+- Domain data and musical behaviour must not depend on SVG, Canvas, PixiJS, DOM elements or viewport coordinates.
+
+### Renderer-independent presentation integration
+
+- `web/js/highway-controller.mjs` provides the renderer-independent presentation controller.
+- `web/js/presentation-host.mjs` hosts the optional presentation integration.
+- `web/js/bridge.js` supplies existing browser integration and transport updates.
+- `docs/presentation-integration.md` documents the established integration boundary; consult it before changing the controller or adding a renderer.
+- The controller/host consume authoritative exercise, selection, playback and judgement state. Preserve stable expected-note identifiers, loop-iteration identity (including repeated notes), noncontiguous bar selections, pause/seek/restart behaviour and the existing hit assessments.
+- Use the existing Tone transport frame callback; do not add a parallel timer, animation loop or duplicate subscriptions to make presentation state work.
+- The integration is optional and must remain dormant when no renderer is mounted, without unnecessary per-frame presentation work.
+
+### Renderer contract and isolation
+
+- Implement a new renderer against the established lifecycle contract: `initialize`, `update`, `resize` and `dispose`.
+- A renderer consumes presentation data and draws it. It must not parse MIDI, decide scoring classifications, modify canonical exercise state or schedule audio.
+- Keep SVG-specific (or future Canvas/PixiJS-specific) implementation details inside the renderer, not in the domain, controller or shared playback logic.
+- Mount/unmount must clean up subscriptions, animation resources and listeners. Renderer errors must not interrupt playback or scoring.
+- The existing VexFlow notation renderer stays on its established path. Do not route it through the new presentation controller or refactor it solely for architectural symmetry without an explicit requirement and tests.
+- The controller integration exists, but a user-facing SVG highway and Notation/Highway selector are **not** part of that architectural milestone. Do not assume they are already implemented.
+
+### Presentation-specific verification
+
+When modifying the controller/host or adding a renderer:
+
+- Add mock-renderer tests for controller behaviour and real-app integration tests for transport and feedback.
+- Cover noncontiguous selections, loop iterations, repeated-note feedback, pausing, seeking, restarting, renderer disposal and error isolation as applicable.
+- Verify the existing notation path remains unchanged, and measure actual renderer performance separately from controller or notation performance.
+- Do not claim simulated Web MIDI or headless browser tests establish physical hardware latency or real-device frame rates.
 
 ## Setup and focused checks
 
@@ -36,75 +75,39 @@ Review failures, fix regressions introduced by the change, and rerun affected ch
 - Base performance refactoring on measurements, keep profiling opt-in, and avoid workers, AudioWorklets, canvas or virtualisation without a real-browser trace demonstrating the need. Update deterministic benchmarks when exercise functionality, rhythms, instruments or import behaviour expands; maintain `scripts/performance`, `tests/performance`, baselines, budgets, CI and `PERFORMANCE.md` together.
 - Compare on matching browser/OS/architecture and workload where possible, with adequate samples and both relative and absolute regression margins. Do not weaken accessibility/performance gates or treat an incompatible baseline as relative-regression evidence. Simulated Web MIDI does not validate USB, driver, device, speaker or subjective audio latency.
 
-## Automatic Git commits and pushes
+## Automatic Git commit and push workflow
 
-After completing any task that modifies project files:
+**Default:** After completing a task that modifies project files, validate, commit and push the completed work. An explicit task instruction to stop without committing or to commit locally without pushing **overrides this default**.
 
-1. Run the relevant tests, linting, type checks and build validation.
-2. If validation fails, attempt to fix the issues. Do not commit or push while checks are failing.
-3. Check `git status` and review the diff.
-4. Stage only files belonging to the completed task. Never include unrelated changes or secrets.
-5. Create a commit using a descriptive Conventional Commit message (`feat:`, `fix:`, `refactor:`, etc.).
-6. Push the commit to the current branch's configured remote.
-7. Report the commit hash, branch and push result.
+### Initial verification
 
-Do not create empty commits, force-push, bypass Git hooks or push to an unexpected branch.
+- Before making changes, inspect `git status`, the current branch, its upstream and outgoing commits. Identify unrelated uncommitted work and unpublished commits.
+- Inspect the Git hook configuration and verify that pre-commit and pre-push hooks are installed and active; do not assume that tracked hook files are automatically executing.
+- Preserve the existing validation infrastructure. Do not bypass, disable or modify hooks to make a task pass.
 
-If a push fails, report the failure and preserve the local commit.
+### Validation and commit
 
-When multiple agents are working concurrently, do not commit or push another agent's changes.
+1. Run the relevant tests, linting, type checks and build validation appropriate to the change. Avoid redundant checks already covered by active hooks unless needed to diagnose a failure.
+2. If validation fails, investigate and fix regressions introduced by the task, then rerun affected checks. If a failure is demonstrably pre-existing or unrelated, report it and obtain approval before undertaking substantial out-of-scope fixes; do not claim successful validation or bypass a required failing gate.
+3. Review `git status` and the diff. Stage only files belonging to the completed task; never include unrelated changes or secrets.
+4. Create a descriptive Conventional Commit (`feat:`, `fix:`, `refactor:`, etc.) and allow pre-commit hooks to run normally.
+5. If a commit hook fails, diagnose and fix the cause, then retry the commit with hooks enabled. Do not repeatedly retry an unchanged failure.
+6. Do not create empty commits, rewrite published history or commit another agent's changes.
 
-## Automatic Git Commit and Push Workflow
+### Push (unless explicitly prohibited)
 
-After completing any task that modifies project files, automatically commit and push the changes.
+1. Inspect the commits that would be published to the configured upstream. **If the push would also publish unrelated, previously unpublished commits, disclose them and obtain confirmation before pushing.**
+2. Push only to the expected current branch and configured upstream; never force-push or push to an unexpected branch.
+3. Allow the pre-push hooks to execute normally. If a hook fails, diagnose and fix its cause, commit any required task-related corrections with hooks enabled, and retry. Do not bypass hooks or repeatedly retry the same unchanged failure.
+4. If a push cannot complete safely, preserve the local commit and report the blocker. Never claim remote success until the push has actually succeeded.
 
-### 1. Commit phase
-
-1. Review the changes and stage only files relevant to the task.
-2. Create a descriptive Conventional Commit.
-3. Allow all existing Git commit hooks to execute normally.
-4. If a hook fails:
-   - Investigate the failure and identify its root cause.
-   - Fix the underlying issue.
-   - Re-run the commit, allowing the hooks to execute again.
-   - Repeat until validation succeeds or the issue cannot be resolved safely.
-
-### 2. Push phase
-
-1. Once the commit succeeds, push to the current branch's configured upstream.
-2. Allow all existing Git pre-push hooks to execute normally.
-3. If a pre-push hook fails:
-   - Investigate the failure and identify its root cause.
-   - Fix the underlying issue.
-   - Commit the corrections, allowing commit hooks to execute again.
-   - Retry the push, allowing pre-push hooks to execute again.
-   - Repeat until successful or the issue cannot be resolved safely.
-
-### 3. Rules
-
-- Do not bypass, disable or modify Git hooks.
-- Do not duplicate validation already performed by Git hooks unless necessary for debugging.
-- Do not force-push or rewrite published history.
-- Do not commit unrelated changes.
-- Do not push if any required validation fails.
-- Do not repeatedly retry an unchanged failing operation.
-- If a failure cannot be resolved safely, stop and explain the blocker.
-- Never claim success unless the remote push has completed successfully.
-
-### 4. Completion
+### Completion report
 
 Report:
 
-- Summary of changes.
-- Any hook failures encountered and how they were resolved.
-- Final commit hash.
-- Branch pushed.
-- Confirmation that the push succeeded.
+- Summary of changes and relevant files.
+- Tests and validation actually run, including failures, fixes, skips and limitations.
+- Final commit hash and branch (or why no commit was made).
+- Push result, clearly distinguishing **pushed**, **local only by request**, and **blocked/not attempted**.
 
-### 5. Initial verification
-
-Before applying these instructions, inspect the existing Git hook configuration and verify that commit and pre-push hooks are installed and active.
-
-Do not assume that hooks are executing merely because hook configuration files exist.
-
-Preserve the existing validation infrastructure.
+When multiple agents work concurrently, do not stage, commit or push another agent's changes.
