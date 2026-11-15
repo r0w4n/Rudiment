@@ -50,7 +50,7 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(settingsButton).toHaveText('');
   const libraryButton=page.getByRole('button',{name:/MIDI library/});
   await expect(libraryButton.locator('svg.lucide')).toHaveCount(1);
-  await expect(libraryButton.locator('.library-count')).toHaveText('11');
+  await expect(libraryButton.locator('.library-count')).toHaveText('13');
   await expect(page.locator('.score-meta #midi-library-trigger')).toHaveCount(0);
   const topbarButtons=await page.locator('.stats-trigger').evaluateAll(elements=>elements.map(element=>{
     const bounds=element.getBoundingClientRect(),style=getComputedStyle(element);
@@ -92,8 +92,8 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await page.getByRole('button',{name:'Stats'}).click();
   await expect(page.getByRole('dialog',{name:'Performance history'})).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
-  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible();
+  await page.getByRole('button', { name: 'Resume' }).click();
   await page.getByRole('button', { name: /Pause/ }).click();
   await expect(page.getByRole('button', { name: /Resume/ })).toBeVisible();
   await page.getByRole('button', { name: /Resume/ }).click();
@@ -206,7 +206,7 @@ test('percussion engraving aligns the snare, places sticking below without accen
   expect(tablet.viewportHeight).toBeGreaterThanOrEqual(tablet.rowHeight * 2);
 });
 
-test('live BPM changes retime the active transport without restarting practice', async ({ page }) => {
+test('tempo changes pause and retime the transport on explicit resume', async ({ page }) => {
   await page.addInitScript(()=>{
     const originalStart=AudioBufferSourceNode.prototype.start;
     (window as any).__metronomeClickTimes=[];
@@ -225,11 +225,16 @@ test('live BPM changes retime the active transport without restarting practice',
   const clickCount=await page.evaluate(()=>(window as any).__metronomeClickTimes.length);
   const before = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
   await setTempo(page, '120');
+  await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible();
+  const paused = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
+  expect(paused.currentBeat).toBeGreaterThanOrEqual(before.currentBeat);
+  expect(paused.activeRun).toBe(false);
+  await page.getByRole('button', { name: 'Resume' }).click();
   await expect(page.getByRole('button', { name: /Pause/ })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().transportBpm)).toBeCloseTo(120, 0);
   await expect.poll(()=>page.evaluate(()=>(window as any).__metronomeClickTimes.length)).toBeGreaterThanOrEqual(clickCount+5);
   const after = await page.evaluate(() => (window as any).rudiment.audioDiagnostics());
-  expect(after.transportTicks).toBeGreaterThan(before.transportTicks);
+  expect(after.currentBeat).toBeGreaterThan(paused.currentBeat);
   const clickTimes=await page.evaluate(()=>(window as any).__metronomeClickTimes.map((click:{time:number})=>click.time));
   for(let index=clickTimes.length-3;index<clickTimes.length;index++){
     expect(clickTimes[index]-clickTimes[index-1]).toBeCloseTo(.5,1);
@@ -403,18 +408,264 @@ test('a missing selected metronome recording reports an explicit playback error'
   expect(diagnostics.metronomeSampleErrors['cowbell-accent']).toContain('Failed to fetch');
 });
 
-test('navigation and configuration controls stop an active practice cleanly', async ({ page }) => {
+test('navigation and configuration controls pause an active practice without resetting it', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: /Start practice/ }).click();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
-  await expect(page.locator('.feedback-strip')).toHaveCount(0);
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(.1);
+  await page.keyboard.press('j');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible();
+  const paused=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat);
+  await expect(page.locator('.score-note[data-judgement], .unmatched-hit-marker').first()).toBeVisible();
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat)).toBe(paused);
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible();
+  await page.getByRole('button', { name: 'Resume' }).click();
+  await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible();
   await page.getByRole('button', { name: /MIDI library/ }).click();
-  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
-  await expect(page.locator('.feedback-strip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'MIDI library' })).toBeVisible();
+});
+
+test('Enter commits and clamps tempo without starting or resuming playback', async ({page}) => {
+  await page.goto('/');
+  await page.locator('#visual-metronome').click();
+  const tempo=page.locator('#metronome-popover').getByLabel('Tempo in BPM');
+  await tempo.fill('300');
+  await tempo.press('Enter');
+  await expect(tempo).toHaveValue('240');
+  await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
+  await page.getByLabel('Close metronome settings').click();
+  await page.getByRole('button',{name:/Start performance/}).click();
+  await expect(page.getByRole('button',{name:'Pause'})).toBeVisible();
+  await page.locator('#visual-metronome').click();
+  await expect(page.getByRole('button',{name:'Resume'})).toBeVisible();
+  await tempo.fill('125');
+  await tempo.press('Enter');
+  await expect(tempo).toHaveValue('125');
+  await page.getByLabel('Close metronome settings').click();
+  await expect(page.getByRole('button',{name:'Resume'})).toBeVisible();
+  expect(await page.evaluate(()=>(window as any).rudiment.audioDiagnostics().activeRun)).toBe(false);
+});
+
+test('automatic results preference persists without disabling recorded sessions', async ({page}) => {
+  await page.goto('/');
+  await setTempo(page,'240');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  const preference=page.getByLabel('Automatically show session statistics');
+  await expect(preference).toBeChecked();
+  await preference.uncheck();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await expect.poll(()=>page.evaluate(async()=>(await (window as any).rudiment.loadSettings()).autoShowStatistics)).toBe(false);
+  await page.reload();
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await expect(preference).not.toBeChecked();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start performance/}).click();
+  await expect.poll(()=>page.evaluate(async()=>(await (window as any).rudiment.loadSessions()).length),{timeout:10000}).toBe(1);
+  await expect(page.getByRole('dialog',{name:'Session Complete'})).toBeHidden();
+  await page.getByRole('button',{name:'Stats'}).click();
+  await expect(page.getByRole('dialog',{name:'Performance history'}).locator('.stats-session')).toHaveCount(1);
+});
+
+test('historical sessions open their own saved results and return to history', async ({page}) => {
+  await page.goto('/');
+  await page.evaluate(async()=>{
+    for(const [index,score] of [42,89].entries())await (window as any).rudiment.saveSession({
+      id:`history-${index}`,endedAt:`2026-11-10T18:0${index}:00Z`,exerciseId:`exercise-${index}`,exerciseTitle:`Exercise ${index}`,exerciseHash:`hash-${index}`,bpm:80+index,inputMode:'demo',scoringVersion:'v3',toleranceMs:60,latencyMs:0,
+      summary:{score,matched:8,expected:10,missed:2,extras:index,wrong_instrument:0,mean_abs_error_ms:20,signed_mean_error_ms:0,timing_consistency_ms:10,scoring_version:'v3',results:[]},
+      ...(index===0?{}:{observed:[],schemaVersion:1}),mode:'performance'
+    });
+    await (window as any).rudiment.saveSession({id:'incomplete-record'});
+  });
+  await page.reload();
+  await page.getByRole('button',{name:'Stats'}).click();
+  const history=page.getByRole('dialog',{name:'Performance history'});
+  await expect(history.locator('.stats-session')).toHaveCount(2);
+  await expect(history.getByRole('status')).toContainText('1 incomplete historical record');
+  await expect(page.getByRole('button',{name:'Close statistics'})).toBeFocused();
+  for(const [index,score] of [[0,42],[1,89]]){
+    const entry=history.getByRole('button',{name:new RegExp(`Exercise ${index}`)});
+    if(index===0){await entry.focus();await page.keyboard.press('Space');}else await entry.click();
+    const result=page.getByRole('dialog',{name:'Session Complete'});
+    await expect(result).toContainText(`Exercise ${index} · ${80+index} BPM`);
+    await expect(result.locator('.summary-score strong')).toHaveText(String(score));
+    await expect(result).toContainText(`${index} extra`);
+    await expect(result.getByRole('button',{name:'Perform again'})).toBeHidden();
+    await result.getByRole('button',{name:'Back to history'}).click();
+    await expect(history).toBeVisible();
+  }
+});
+
+test('top controls remain interactive in browser fullscreen', async ({page}) => {
+  await page.goto('/');
+  await page.evaluate(()=>{
+    document.querySelector('.brand')!.addEventListener('click',event=>{
+      event.preventDefault();
+      void document.documentElement.requestFullscreen().catch(error=>{(window as any).__fullscreenError=String(error);});
+    },{once:true});
+  });
+  await page.locator('.brand').click();
+  const fullscreenError=await page.evaluate(()=>(window as any).__fullscreenError);
+  test.skip(fullscreenError==='TypeError: not granted',`Fullscreen API was rejected by the browser: ${fullscreenError}`);
+  expect(fullscreenError).toBeUndefined();
+  await expect.poll(()=>page.evaluate(()=>Boolean(document.fullscreenElement))).toBe(true);
+  await page.getByRole('button',{name:/MIDI library/}).click();
+  await expect(page.getByRole('dialog',{name:'MIDI library'})).toBeVisible();
+  await page.getByRole('button',{name:'Close MIDI library'}).click();
+  await page.getByRole('button',{name:'Stats'}).click();
+  await expect(page.getByRole('dialog',{name:'Performance history'})).toBeVisible();
+  await page.getByRole('button',{name:'Close statistics'}).click();
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await expect(page.getByRole('dialog',{name:'Sound & drums'})).toBeVisible();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.evaluate(()=>document.exitFullscreen());
+});
+
+test('built-in difficulty filter finds playable beginner, intermediate and advanced exercises', async ({page}) => {
+  await page.goto('/');
+  await page.getByRole('button',{name:/MIDI library/}).click();
+  const library=page.getByRole('dialog',{name:'MIDI library'});
+  const difficulty=library.getByLabel('Exercise difficulty');
+  await difficulty.selectOption('Beginner');
+  await expect(library.locator('.bundled-entry')).toHaveCount(2);
+  await expect(library.locator('.bundled-entry')).toContainText(['Single Strokes — Beginner','Single Paradiddle — Beginner']);
+  await difficulty.selectOption('Intermediate');
+  await expect(library.locator('.bundled-entry').first()).toContainText('Intermediate');
+  await difficulty.selectOption('Advanced');
+  await expect(library.locator('.bundled-entry')).toHaveCount(4);
+  await expect(library.locator('.bundled-entry').first()).toContainText('Advanced');
+  await difficulty.selectOption('Beginner');
+  await library.getByRole('button',{name:/Single Strokes — Beginner/}).click();
+  await expect(page.locator('.exercise-heading strong')).toHaveText('Single Strokes — Beginner');
+  await expect(page.locator('.score-note')).toHaveCount(8);
+  await expect(page.locator('#notation svg')).toHaveAttribute('data-system-count','2');
+});
+
+test('bar popover trigger has no persistent pointer outline and keeps keyboard focus', async ({page}) => {
+  await page.goto('/');
+  const trigger=page.locator('#bar-selection-trigger');
+  await trigger.click();
+  await expect(page.getByRole('dialog',{name:'Bar selection'})).toBeVisible();
+  const pointerStyle=await trigger.evaluate(element=>({outline:getComputedStyle(element).outlineStyle,focusVisible:element.matches(':focus-visible')}));
+  expect(pointerStyle).toEqual({outline:'none',focusVisible:false});
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Tab');
+  await trigger.focus();
+  await expect(trigger).toBeFocused();
+  expect(await trigger.evaluate(element=>element.matches(':focus-visible')&&getComputedStyle(element).outlineStyle!=='none')).toBe(true);
+});
+
+test('practice time persists active playback but excludes pauses and settings', async ({page}) => {
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start performance/}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(.1);
+  await page.keyboard.press('j');
+  await page.waitForTimeout(400);
+  await page.getByRole('button',{name:'Open settings'}).click();
+  const first=await page.evaluate(()=>(window as any).rudiment.loadPracticeTime());
+  expect(first).toBeGreaterThan(400);
+  await page.waitForTimeout(600);
+  expect(await page.evaluate(()=>(window as any).rudiment.loadPracticeTime())).toBeCloseTo(first,0);
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:'Resume'}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  await page.waitForTimeout(450);
+  await page.getByRole('button',{name:/Restart/}).click();
+  const total=await page.evaluate(()=>(window as any).rudiment.loadPracticeTime());
+  expect(total-first).toBeGreaterThan(350);
+  expect(total-first).toBeLessThan(1100);
+  await page.reload();
+  expect(await page.evaluate(()=>(window as any).rudiment.loadPracticeTime())).toBeCloseTo(total,0);
+  await page.getByRole('button',{name:'Stats'}).click();
+  await expect(page.locator('.practice-time-card strong')).toHaveText('0 minutes');
+});
+
+test('keyboard calibration hits still work with settings open',async({page})=>{
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.evaluate(()=>{
+    (window as any).rudiment.startCalibration=()=>Promise.resolve(Array(8).fill(performance.now()-100));
+  });
+  await page.getByRole('button',{name:'Start 8-tap calibration'}).click();
+  await page.waitForTimeout(100);
+  await page.evaluate(()=>{for(let index=0;index<8;index++)window.dispatchEvent(new KeyboardEvent('keydown',{key:'j',bubbles:true}));});
+  await expect(page.locator('.cal-value')).toHaveText(/\+[1-9]\d+ ms/);
+  await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
+});
+
+test('notation selection shares the bar range and follows resizing and keyboard input', async ({page}) => {
+  await page.goto('/');
+  await setTempo(page,'240');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.locator('.score-note[data-score-bar="1"]').first().click();
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(1);
+  await page.locator('.score-note[data-score-bar="2"]').first().click();
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(2);
+  await page.getByLabel('Select bars').click();
+  await expect(page.getByLabel('First selected bar')).toHaveValue('1');
+  await expect(page.getByLabel('Last selected bar')).toHaveValue('2');
+  await page.getByLabel('Last selected bar').selectOption('3');
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(3);
+  await page.getByLabel('Close bar selection').click();
+  await page.setViewportSize({width:800,height:700});
+  await expect.poll(()=>page.locator('#notation').evaluate(element=>Math.abs(Number(element.querySelector('svg')?.getAttribute('width'))-element.clientWidth))).toBeLessThanOrEqual(1);
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(3);
+  const first=page.getByRole('button',{name:'Select bar 1',exact:true});
+  await first.focus();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(2);
+  await page.getByLabel('Select bars').click();
+  await expect(page.getByLabel('First selected bar')).toHaveValue('0');
+  await expect(page.getByLabel('Last selected bar')).toHaveValue('1');
+  await page.getByLabel('Close bar selection').click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(0);
+  await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible({timeout:5000});
+  const stopped=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat);
+  expect(stopped).toBeGreaterThanOrEqual(7.9);
+  expect(stopped).toBeLessThan(8.3);
+});
+
+test('selecting notation during a run pauses without discarding its feedback',async({page})=>{
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start performance/}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(.1);
+  await page.keyboard.press('j');
+  await expect(page.locator('.score-note[data-judgement], .unmatched-hit-marker').first()).toBeVisible();
+  await page.locator('.score-note[data-score-bar="0"]').first().click();
+  await expect(page.getByRole('button',{name:'Resume'})).toBeVisible();
+  await expect(page.locator('.score-note[data-judgement], .unmatched-hit-marker').first()).toBeVisible();
+  await expect(page.locator('.selection-notice')).toBeVisible();
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(4);
+});
+
+test.describe('touch notation selection',()=>{
+  test.use({hasTouch:true,viewport:{width:412,height:915}});
+  test('tapping two bars selects their inclusive range',async({page})=>{
+    await page.goto('/');
+    await page.locator('.score-note[data-score-bar="0"]').first().tap();
+    await page.locator('.score-note[data-score-bar="1"]').first().tap();
+    await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(2);
+    await page.getByLabel('Select bars').tap();
+    await expect(page.getByLabel('First selected bar')).toHaveValue('0');
+    await expect(page.getByLabel('Last selected bar')).toHaveValue('1');
+  });
 });
 
 test('a keyboard hit dismisses Statistics without starting practice', async ({ page }) => {
@@ -422,6 +673,7 @@ test('a keyboard hit dismisses Statistics without starting practice', async ({ p
   await page.getByRole('button', { name: 'Stats' }).click();
   const stats = page.getByRole('dialog', { name: 'Performance history' });
   await expect(stats).toBeVisible();
+  await page.evaluate(()=>(document.activeElement as HTMLElement | null)?.blur());
   await page.keyboard.press('Space');
   await expect(stats).toBeVisible();
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
@@ -607,7 +859,7 @@ test('one drum hit dismisses results and a second hit starts the next run',async
   await expect(page.getByRole('dialog',{name:'Session Complete'})).toBeVisible();
   await page.keyboard.press('j');
   await expect(page.getByRole('dialog',{name:'Session Complete'})).toBeVisible();
-  await page.waitForTimeout(2_050);
+  await page.waitForTimeout(550);
   await page.keyboard.press('j');
   await expect(page.locator('.result-backdrop')).toBeHidden();
   await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
@@ -677,10 +929,10 @@ test('all built-in rudiments match the supplied timing and engraving reference',
   await expect(dialog.locator('a')).toHaveCount(0);
   await page.keyboard.press('Tab');
   await expect.poll(() => page.evaluate(() => document.querySelector('#midi-library-dialog')?.contains(document.activeElement) ?? false)).toBe(true);
-  await expect(dialog.getByText('Page 1 of 2')).toBeVisible();
+  await expect(dialog.getByText('Page 1 of 3')).toBeVisible();
   await dialog.getByRole('button', { name: 'Next library page' }).click();
-  await expect(dialog.locator('.bundled-entry')).toHaveCount(5);
-  await expect(dialog.getByText('Page 2 of 2')).toBeVisible();
+  await expect(dialog.locator('.bundled-entry')).toHaveCount(6);
+  await expect(dialog.getByText('Page 2 of 3')).toBeVisible();
   await dialog.getByRole('button', { name: 'Close MIDI library' }).click();
 
   for (const [index, piece] of manifest.pieces.entries()) {
@@ -845,7 +1097,7 @@ test('built-in and personal MIDI import paths remain distinct and broken files e
   page.once('dialog',dialog=>dialog.accept());
   await libraryDialog.getByRole('button',{name:'Delete quarter-note-reference.mid'}).click();
   await expect(libraryDialog.getByText('No personal imports yet')).toBeVisible();
-  await expect(libraryTrigger).toContainText('11');
+  await expect(libraryTrigger).toContainText('13');
   await libraryDialog.getByRole('button', { name: 'Close MIDI library' }).click();
 
   const chooserPromise = page.waitForEvent('filechooser');
@@ -2190,7 +2442,7 @@ test('top toolbar fits and preserves control order at mobile and desktop widths'
     expect(layout.controlsFit,`${width}px clips a toolbar control`).toBe(true);
     expect(layout.controlsOverlap,`${width}px overlaps toolbar controls`).toBe(false);
     expect(layout.statusFits,`${width}px clips the MIDI status bar`).toBe(true);
-    expect(layout.sourceOrder).toEqual(['MIDI library · 11 exercises','Stats','Rudiment','Open settings']);
+    expect(layout.sourceOrder).toEqual(['MIDI library · 13 exercises','Stats','Rudiment','Open settings']);
 
     if(width<=700){
       expect(layout.order.map(control=>control.left),`${width}px changes toolbar control order`).toEqual([...layout.order.map(control=>control.left)].sort((a,b)=>a-b));

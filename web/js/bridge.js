@@ -22,6 +22,30 @@ async function saveLastImport(hash){const db=await dbPromise,current=await db.ge
 const put = async (store, value) => (await dbPromise).put(store, value);
 const all = async store => (await dbPromise).getAll(store);
 const clear = async store => (await dbPromise).clear(store);
+// Practice duration is wall-clock time only while the musical transport is
+// playing. Checkpoints are persisted independently of completed performances,
+// so an interrupted run still contributes without re-counting on resume.
+const practiceTime={
+  since:null,timer:null,pending:0,error:null,writes:Promise.resolve(),
+  checkpoint(){
+    if(this.since===null)return;
+    const now=performance.now();this.pending+=Math.max(0,now-this.since);this.since=now;
+    this.writes=this.writes.catch(()=>{}).then(async()=>{
+      const increment=this.pending;if(!increment)return;
+      const db=await dbPromise,tx=db.transaction('settings','readwrite');
+      const saved=await tx.store.get('practiceTime');
+      const total=Number(saved?.value)||0;
+      await tx.store.put({key:'practiceTime',value:total+increment});await tx.done;
+      this.pending-=increment;this.error=null;
+    }).catch(error=>{this.error=error;});
+  },
+  start(){if(this.since!==null)return;this.since=performance.now();this.timer=setInterval(()=>this.checkpoint(),5000);},
+  stop(){if(this.since===null)return;this.checkpoint();this.since=null;clearInterval(this.timer);this.timer=null;},
+  async read(){if(this.since!==null)this.checkpoint();await this.writes;if(this.error)throw this.error;return Number((await (await dbPromise).get('settings','practiceTime'))?.value)||0;},
+  async clearHistory(){this.stop();await this.writes;if(this.error)throw this.error;const db=await dbPromise,tx=db.transaction(['sessions','settings'],'readwrite');await tx.objectStore('sessions').clear();await tx.objectStore('settings').delete('practiceTime');await tx.done;}
+};
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')practiceTime.stop();});
+window.addEventListener('pagehide',()=>practiceTime.stop());
 const clampVelocity = velocity => Math.max(1,Math.min(127,Number(velocity)||1));
 const velocityGain = velocity => {
   const normalised=(clampVelocity(velocity)-1)/126;
@@ -319,9 +343,14 @@ const audio = {
     // while ensure() is pending increments generation again, preventing this
     // asynchronous start from reviving a session the user already stopped.
     this.stop(); const generation = this.generation;
-    await this.ensure();
-    if(generation!==this.generation)return {cancelled:true,state:this.state};
-    if(options.metronome)await this.waitForMetronome(options.timbre||'woodblock');
+    try{
+      await this.ensure();
+      if(generation!==this.generation)return {cancelled:true,state:this.state};
+      if(options.metronome)await this.waitForMetronome(options.timbre||'woodblock');
+    }catch(error){
+      if(generation!==this.generation)return {cancelled:true,state:this.state};
+      throw error;
+    }
     if(generation!==this.generation)return {cancelled:true,state:this.state};
     const transport = Tone.getTransport(), tempoMap=(options.tempoMap||[]).slice().sort((a,b)=>a.beat-b.beat),sourceBpm=options.sourceBpm||options.bpm,tempoScale=options.bpm/sourceBpm,offset = options.offsetBeat || 0,initialBpm=tempoAtBeat(offset,tempoMap,sourceBpm)*tempoScale,countBeats = options.countInBars * options.meter;
     const remaining = Math.max(0, options.totalBeats - offset), startDelay = 0;
@@ -401,14 +430,20 @@ const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
 let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
 let pendingScoreFeedback=[],pendingScoreFeedbackFrame=0;
 let selectedBarRange={start:0,end:Number.MAX_SAFE_INTEGER};
+let scoreSelectionCallback=null;
 function applySelectedBarRange(){
   if(!scoreData.svg)return;
   for(const label of scoreData.svg.querySelectorAll('.score-measure-number[data-score-bar]')){
     const bar=Number(label.dataset.scoreBar);
     label.classList.toggle('selected-bar-number',bar>=selectedBarRange.start&&bar<=selectedBarRange.end);
   }
+  for(const area of scoreData.svg.querySelectorAll('.score-bar-highlight')){
+    const bar=Number(area.dataset.scoreBar),selected=bar>=selectedBarRange.start&&bar<=selectedBarRange.end;
+    area.classList.toggle('selected',selected);area.setAttribute('aria-pressed',String(selected));
+  }
 }
 function setSelectedBars(start,end){selectedBarRange={start:Number(start)||0,end:Number.isFinite(Number(end))?Number(end):Number.MAX_SAFE_INTEGER};applySelectedBarRange();}
+function bindScoreSelection(callback){scoreSelectionCallback=callback;}
 let scoreResizeObserver=null;
 const handText = hand => hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·';
 const durationTable=[[4,'w',false,false],[3,'h',true,false],[2,'h',false,false],[1.5,'q',true,false],[1,'q',false,false],[.75,'8',true,false],[2/3,'q',false,true],[.5,'8',false,false],[.375,'16',true,false],[1/3,'8',false,true],[.25,'16',false,false],[1/6,'16',false,true],[.125,'32',false,false]];
@@ -455,10 +490,13 @@ function instrumentForHit(hit) {
   if(note>=39&&note<=81)return 'other_percussion';
   return 'snare';
 }
-function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
+function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBarOverride=null) {
   const profileStart=performanceProfile.enabled&&layoutPass===0?performance.now():0;
-  const element = document.getElementById('notation'); if (!element) return; element.innerHTML = '';
+  const element = document.getElementById('notation'); if (!element) return;
   const isResize=scoreData.exercise===exercise;
+  const active=document.activeElement;
+  const focusBar=focusBarOverride??(isResize&&element.contains(active)&&active?.classList.contains('score-bar-highlight')?Number(active.dataset.scoreBar):null);
+  element.innerHTML = '';
   const previousBeat=isResize&&Number.isFinite(scoreData.lastBeat)?scoreData.lastBeat:-99;
   const previousJudgements=isResize?scoreData.lastJudgements:[];
   if(!isResize){element.scrollTop=0;element.scrollLeft=0;}
@@ -627,7 +665,35 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
     label.setAttribute('font-family','Inter, sans-serif');label.setAttribute('font-size','10');label.setAttribute('font-weight','600');
     label.setAttribute('fill','#666d68');label.textContent=String(bar+1);svg?.appendChild(label);
   }
-  if (svg) { svg.setAttribute('role','img'); svg.setAttribute('aria-label',`${exercise.title} percussion notation with sticking`); }
+  if (svg) {
+    svg.setAttribute('role','group');svg.setAttribute('aria-label',`${exercise.title} percussion notation with sticking`);
+    const highlights=document.createElementNS('http://www.w3.org/2000/svg','g');
+    for(const bar of barLayouts){
+      const area=document.createElementNS('http://www.w3.org/2000/svg','rect');
+      area.setAttribute('class','score-bar-highlight');area.dataset.scoreBar=String(bar.index);
+      area.setAttribute('x',String(Math.max(0,bar.xStart-12)));area.setAttribute('y',String(scoreTopMargin+bar.row*scoreRowHeight-12));
+      area.setAttribute('width',String(Math.min(width-Math.max(0,bar.xStart-12),barWidth+12)));area.setAttribute('height',String(scoreRowHeight-4));
+      area.setAttribute('rx','6');area.setAttribute('role','button');area.setAttribute('tabindex',bar.index===(focusBar??0)?'0':'-1');area.setAttribute('aria-label',`Select bar ${bar.index+1}`);
+      area.addEventListener('keydown',event=>{
+        if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();scoreSelectionCallback?.(bar.index,event.shiftKey);}
+        else if(['ArrowLeft','ArrowUp','ArrowRight','ArrowDown'].includes(event.key)){
+          event.preventDefault();event.stopPropagation();
+          const direction=['ArrowLeft','ArrowUp'].includes(event.key)?-1:1;
+          const next=highlights.children[Math.max(0,Math.min(barLayouts.length-1,bar.index+direction))];
+          if(next){area.setAttribute('tabindex','-1');next.setAttribute('tabindex','0');next.focus();}
+        }
+      });
+      highlights.appendChild(area);
+    }
+    svg.insertBefore(highlights,svg.firstChild);
+    svg.addEventListener('click',event=>{
+      const point=svg.createSVGPoint(),matrix=svg.getScreenCTM();if(!matrix)return;
+      point.x=event.clientX;point.y=event.clientY;const local=point.matrixTransform(matrix.inverse());
+      const row=Math.floor((local.y-(scoreTopMargin-12))/scoreRowHeight);
+      const bar=barLayouts.find(item=>item.row===row&&local.x>=Math.max(0,item.xStart-12)&&local.x<=Math.min(width,item.xEnd));
+      if(bar)scoreSelectionCallback?.(bar.index,event.shiftKey);
+    });
+  }
   if(svg){
     svg.dataset.barsPerLine=String(barsPerLine);svg.dataset.staffLines=singleLine?'1':'5';
     svg.dataset.systemBarCounts=JSON.stringify(systemBarCounts);svg.dataset.systemWidths=JSON.stringify(systemWidths);
@@ -669,7 +735,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
     svg.dataset.systemMarkClearances=JSON.stringify(clearances);
     const shortfall=Math.max(0,...clearances.filter(Number.isFinite).map(clearance=>SYSTEM_MARK_BASELINE_CLEARANCE-clearance));
     if(shortfall>.5&&layoutPass<2){
-      renderScore(exercise,Math.ceil(scoreRowHeight+shortfall),layoutPass+1);
+      renderScore(exercise,Math.ceil(scoreRowHeight+shortfall),layoutPass+1,focusBar);
       if(layoutPass===0)performanceProfile.record('notation_render_ms',performance.now()-profileStart);
       return;
     }
@@ -685,6 +751,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0) {
   scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:0,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
   applySelectedBarRange();
   applyJudgements(previousJudgements);updateScore(previousBeat,null);
+  if(focusBar!==null)svg?.querySelector(`.score-bar-highlight[data-score-bar="${focusBar}"]`)?.focus({preventScroll:true});
   if(typeof ResizeObserver!=='undefined'){
     scoreResizeObserver??=new ResizeObserver(entries=>{
       const rect=entries[0]?.contentRect,observedWidth=rect?.width??scoreData.container?.clientWidth??0,observedHeight=rect?.height??scoreData.container?.clientHeight??0;
@@ -940,7 +1007,7 @@ function downloadJson(value,name){const anchor=document.createElement('a');ancho
 window.rudiment={
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,setSelectedBars,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
-  saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>clear('sessions'),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await clear('settings');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
+  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
+  saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };

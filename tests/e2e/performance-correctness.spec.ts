@@ -33,6 +33,7 @@ test('high-rate MIDI feedback paints by the next frame and Restart clears it',as
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
   await page.evaluate(()=>{const input=(window as any).__performanceInput;for(let index=0;index<64;index++)input.dispatch([0x99,index%8===0?36:38,40+index%88],performance.now()+index*.1);});
   await expect(page.locator('.score-note[data-judgement],.unmatched-hit-marker').first()).toBeVisible();
   await page.getByRole('button',{name:/Restart/}).click();

@@ -1,13 +1,13 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 
 const vlq = n => { const out=[n&127]; while((n>>=7)) out.unshift((n&127)|128); return out; };
-const text = (type, s) => [0xff,type,s.length,...Buffer.from(s)];
-function midi(name, hands, notes, ambiguous=false) {
+const text = (type, s) => {const bytes=Buffer.from(s);return [0xff,type,...vlq(bytes.length),...bytes];};
+function midi(name, hands, notes, ambiguous=false, spacing=240) {
   const track=[...vlq(0),...text(0x03,name),...vlq(0),0xff,0x51,0x03,0x0f,0x42,0x40,
     ...vlq(0),0xff,0x58,0x04,0x04,0x02,0x18,0x08];
   for(let i=0;i<notes.length;i++) {
-    // The prior note-off advances 120 ticks; another 120 reaches the next 240-tick eighth note.
-    const delta=i===0?0:120;
+    // The preceding note-off advances 120 ticks; complete the requested spacing.
+    const delta=i===0?0:spacing-120;
     track.push(...vlq(delta),...text(0x05,hands[i] ?? '?'),...vlq(0),0x99,notes[i],i%8===0?120:92);
     if (ambiguous && i===0) track.push(...vlq(0),0x99,38,90);
     track.push(...vlq(120),0x89,notes[i],0);
@@ -46,6 +46,9 @@ await writeFile('web/public/exercises/single-paradiddle.mid',midi('Single Paradi
 await writeFile('web/public/exercises/single-stroke-roll.mid',midi('Single Stroke Roll','RLRLRLRL'.repeat(4).split(''),Array(32).fill(38)));
 await writeFile('web/public/exercises/ambiguous-sticking.mid',midi('Ambiguous Sticking',['R','L'],[38,38],true));
 await writeFile('web/public/exercises/quarter-note-reference.mid',quarterReference());
+await mkdir('web/public/exercises/rudiments',{recursive:true});
+await writeFile('web/public/exercises/rudiments/12_beginner_single_strokes.mid',midi('Single Strokes — Beginner','RLRLRLRL'.split(''),Array(8).fill(38),false,480));
+await writeFile('web/public/exercises/rudiments/13_beginner_paradiddle.mid',midi('Single Paradiddle — Beginner','RLRRLRLL'.repeat(2).split(''),Array(16).fill(38)));
 
 const performanceFixtures={
   small:{name:'Performance Small',bars:4,bpm:60,subdivision:4},
@@ -62,4 +65,3 @@ for(const [id,definition] of Object.entries(performanceFixtures)){
   manifest.fixtures[id]={...definition,noteCount};
 }
 await writeFile('web/public/exercises/performance/manifest.json',`${JSON.stringify(manifest,null,2)}\n`);
-

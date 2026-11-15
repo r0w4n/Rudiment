@@ -34,68 +34,117 @@ struct BuiltinRudiment {
     id: &'static str,
     title: &'static str,
     description: &'static str,
+    difficulty: Difficulty,
 }
 
-const BUILTIN_RUDIMENTS: [BuiltinRudiment; 11] = [
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Difficulty {
+    Beginner,
+    Intermediate,
+    Advanced,
+}
+
+impl Difficulty {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Beginner => "Beginner",
+            Self::Intermediate => "Intermediate",
+            Self::Advanced => "Advanced",
+        }
+    }
+}
+
+const BUILTIN_RUDIMENTS: [BuiltinRudiment; 13] = [
     BuiltinRudiment {
         id: "01_roll",
         title: "Roll",
         description: "Alternating double strokes; long-roll mechanism.",
+        difficulty: Difficulty::Intermediate,
     },
     BuiltinRudiment {
         id: "02_mother_or_5_s_roll",
         title: "Mother or 5 S. Roll",
         description: "Four internal strokes followed by an accented release.",
+        difficulty: Difficulty::Intermediate,
     },
     BuiltinRudiment {
         id: "03_7_stroke_roll",
         title: "7 Stroke Roll",
         description: "Three doubles and an accented finishing tap.",
+        difficulty: Difficulty::Intermediate,
     },
     BuiltinRudiment {
         id: "04_9_stroke_roll",
         title: "9 Stroke Roll",
         description: "Four doubles and an accented sustained finishing tap.",
+        difficulty: Difficulty::Intermediate,
     },
     BuiltinRudiment {
         id: "05_hard_flams",
         title: "Hard Flams",
         description: "Alternating flams with sounded grace notes.",
+        difficulty: Difficulty::Intermediate,
     },
     BuiltinRudiment {
         id: "06_single_paradiddle",
         title: "Single Paradiddle",
         description: "RLRR / LRLL with four-note accents.",
+        difficulty: Difficulty::Intermediate,
     },
     BuiltinRudiment {
         id: "07_double_paradiddle",
         title: "Double Paradiddle",
         description: "RLRLRR / LRLRLL in eighth-note triplets.",
+        difficulty: Difficulty::Intermediate,
     },
     BuiltinRudiment {
         id: "08_flam_paradiddle",
         title: "Flam Paradiddle",
         description: "Paradiddles with opposing-hand flam grace strokes.",
+        difficulty: Difficulty::Advanced,
     },
     BuiltinRudiment {
         id: "09_single_drag",
         title: "Single Drag",
         description: "Two opposing-hand grace strokes before each tap.",
+        difficulty: Difficulty::Advanced,
     },
     BuiltinRudiment {
         id: "10_single_rotamacue",
         title: "Single Rotamacue",
         description: "Drag and triplet cells using the historical spelling.",
+        difficulty: Difficulty::Advanced,
     },
     BuiltinRudiment {
         id: "11_advanced_the_drummers_call_study",
         title: "The Drummers Call — Advanced Study",
         description: "An original eight-bar study inspired by the historical call.",
+        difficulty: Difficulty::Advanced,
+    },
+    BuiltinRudiment {
+        id: "12_beginner_single_strokes",
+        title: "Single Strokes — Beginner",
+        description: "Two bars of alternating quarter notes.",
+        difficulty: Difficulty::Beginner,
+    },
+    BuiltinRudiment {
+        id: "13_beginner_paradiddle",
+        title: "Single Paradiddle — Beginner",
+        description: "Two short bars of RLRR / LRLL in eighth notes.",
+        difficulty: Difficulty::Beginner,
     },
 ];
 
+fn builtin_count(difficulty: Option<Difficulty>) -> usize {
+    BUILTIN_RUDIMENTS
+        .iter()
+        .filter(|item| difficulty.is_none_or(|level| item.difficulty == level))
+        .count()
+}
+
 const LIBRARY_PAGE_SIZE: usize = 6;
 const CONTINUOUS_LOOP_CHUNK: u8 = 240;
+const RESULT_DISMISS_GRACE_MS: f64 = 500.0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -137,6 +186,8 @@ extern "C" {
     fn render_score(exercise: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = setSelectedBars)]
     fn set_selected_bars(start: usize, end: usize);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = bindScoreSelection)]
+    fn bind_score_selection(callback: &Function);
     #[wasm_bindgen(js_namespace = rudiment, js_name = scrollScoreToBeat)]
     fn scroll_score_to_beat(beat: f64);
     #[wasm_bindgen(js_namespace = rudiment, js_name = updateScore)]
@@ -169,6 +220,10 @@ extern "C" {
     fn load_sessions() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearHistory)]
     fn clear_history() -> Promise;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = setPracticeActive)]
+    fn set_practice_active(active: bool);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = loadPracticeTime)]
+    fn load_practice_time() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = exportHistory)]
     fn export_history() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = saveSettings)]
@@ -218,6 +273,7 @@ struct Settings {
     snare_channel: Option<u8>,
     welcome_dismissed: Option<bool>,
     last_import_hash: Option<String>,
+    auto_show_statistics: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,7 +334,9 @@ struct SessionRecord {
     tolerance_ms: f64,
     latency_ms: f64,
     summary: SessionSummary,
+    #[serde(default)]
     observed: Vec<ObservedHit>,
+    #[serde(default)]
     schema_version: u8,
     #[serde(default)]
     mode: AppMode,
@@ -331,6 +389,22 @@ struct LiveJudgement {
 
 fn beats_per_bar(exercise: &Exercise) -> f64 {
     exercise.meter_numerator as f64 * 4.0 / exercise.meter_denominator.max(1) as f64
+}
+
+fn format_practice_time(milliseconds: f64) -> String {
+    let minutes = (milliseconds.max(0.0) / 60_000.0).floor() as u64;
+    let hours = minutes / 60;
+    let remaining = minutes % 60;
+    match (hours, remaining) {
+        (0, 1) => "1 minute".into(),
+        (0, _) => format!("{remaining} minutes"),
+        (1, 0) => "1 hour".into(),
+        (_, 0) => format!("{hours} hours"),
+        (1, 1) => "1 hour 1 minute".into(),
+        (1, _) => format!("1 hour {remaining} minutes"),
+        (_, 1) => format!("{hours} hours 1 minute"),
+        _ => format!("{hours} hours {remaining} minutes"),
+    }
 }
 
 fn timing_hit_counts(summary: &SessionSummary) -> (usize, usize, usize, usize) {
@@ -436,6 +510,8 @@ fn progress_scores(current: &SessionRecord, history: &[SessionRecord]) -> Vec<f6
                 && (session.bpm - current.bpm).abs() < 0.01
                 && session.scoring_version == current.scoring_version
                 && session.summary.score.is_some()
+                && (session.ended_at.as_str(), session.id.as_str())
+                    <= (current.ended_at.as_str(), current.id.as_str())
         })
         .collect::<Vec<_>>();
     matching.sort_by(|left, right| {
@@ -998,6 +1074,32 @@ fn focus_popup_trigger(popup: ContextPopup) {
     }
 }
 
+fn keyboard_targets_control(event: &web_sys::KeyboardEvent) -> bool {
+    event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+        .and_then(|element| element.closest("button, summary, a[href]").ok().flatten())
+        .is_some()
+}
+
+fn dismiss_result(
+    result_modal_open: RwSignal<bool>,
+    result_dismiss_after_ms: RwSignal<f64>,
+    historical_result: RwSignal<Option<SessionRecord>>,
+    stats_open: RwSignal<bool>,
+) {
+    result_modal_open.set(false);
+    result_dismiss_after_ms.set(f64::INFINITY);
+    if historical_result.get_untracked().is_some() {
+        historical_result.set(None);
+        stats_open.set(true);
+        focus_stats_close();
+    } else {
+        clear_score_feedback();
+        restore_result_focus();
+    }
+}
+
 #[component]
 fn MetronomeSettings(
     bpm: RwSignal<f64>,
@@ -1015,10 +1117,12 @@ fn MetronomeSettings(
     let tempo_down = change_tempo.clone();
     let tempo_input = change_tempo.clone();
     let tempo_commit = change_tempo.clone();
+    let tempo_enter = change_tempo.clone();
     let tempo_up = change_tempo;
     let save_down = save.clone();
     let save_input = save.clone();
     let save_commit = save.clone();
+    let save_enter = save.clone();
     let save_up = save.clone();
     let save_enabled = save.clone();
     let save_count = save.clone();
@@ -1038,9 +1142,18 @@ fn MetronomeSettings(
                   tempo_input(value.round());save_input();
                 }
               }
+              on:keydown=move |event: web_sys::KeyboardEvent|{
+                if event.key()=="Enter" {
+                  event.prevent_default();
+                  event.stop_propagation();
+                  let input=event_target::<web_sys::HtmlInputElement>(&event);
+                  let value=input.value().parse::<f64>().ok().filter(|value|value.is_finite()).unwrap_or_else(||bpm.get_untracked()).round().clamp(30.0,240.0);
+                  tempo_enter(value);input.set_value(&value.to_string());save_enter();
+                }
+              }
               on:change=move |event|{
                 let input=event_target::<web_sys::HtmlInputElement>(&event);
-                let value=input.value().parse::<f64>().unwrap_or_else(|_|bpm.get_untracked()).round().clamp(30.0,240.0);
+                let value=input.value().parse::<f64>().ok().filter(|value|value.is_finite()).unwrap_or_else(||bpm.get_untracked()).round().clamp(30.0,240.0);
                 tempo_commit(value);input.set_value(&value.to_string());save_commit();
               }/>
             <span>"BPM"</span>
@@ -1090,6 +1203,8 @@ fn App() -> impl IntoView {
     let repeat_tolerance = RwSignal::new(RepeatTolerance::Standard);
     let selection_start_bar = RwSignal::new(0usize);
     let selection_end_bar = RwSignal::new(usize::MAX);
+    let selection_anchor = RwSignal::new(None::<usize>);
+    let selection_notice = RwSignal::new(false);
     let context_popup = RwSignal::new(None::<ContextPopup>);
     let progress = RwSignal::new(-1.0);
     let run_start_ms = RwSignal::new(0.0);
@@ -1107,15 +1222,21 @@ fn App() -> impl IntoView {
     let live_matched_expected = RwSignal::new(HashSet::<String>::new());
     let input_mode = RwSignal::new(InputSource::Demo);
     let result = RwSignal::new(None::<SessionRecord>);
+    let historical_result = RwSignal::new(None::<SessionRecord>);
+    let displayed_result = Signal::derive(move || historical_result.get().or_else(|| result.get()));
     let history = RwSignal::new(Vec::<SessionRecord>::new());
+    let incomplete_history = RwSignal::new(0usize);
+    let practice_time_ms = RwSignal::new(None::<f64>);
     let comparison = RwSignal::new(None::<f64>);
     let settings_open = RwSignal::new(false);
     let stats_open = RwSignal::new(false);
     let library_open = RwSignal::new(false);
     let library_personal = RwSignal::new(false);
     let library_page = RwSignal::new(0usize);
+    let library_difficulty = RwSignal::new(None::<Difficulty>);
     let result_modal_open = RwSignal::new(false);
     let result_dismiss_after_ms = RwSignal::new(f64::INFINITY);
+    let auto_show_statistics = RwSignal::new(true);
     let welcome = RwSignal::new(true);
     let import_error = RwSignal::new(None::<String>);
     let metronome_preview_error = RwSignal::new(None::<String>);
@@ -1157,10 +1278,12 @@ fn App() -> impl IntoView {
             snare_channel: Some(snare_channel.get_untracked()),
             welcome_dismissed: Some(!welcome.get_untracked()),
             last_import_hash: selected_import.get_untracked(),
+            auto_show_statistics: Some(auto_show_statistics.get_untracked()),
         })
     });
 
     let finish_run: Rc<dyn Fn()> = Rc::new(move || {
+        set_practice_active(false);
         phase.set("finishing".into());
         let expected = run_expected.get_untracked();
         let tempo_map = runtime_tempo_map.get_untracked();
@@ -1225,14 +1348,18 @@ fn App() -> impl IntoView {
         history.update(|items| items.push(current.clone()));
         result.set(Some(current));
         phase.set("complete".into());
-        result_dismiss_after_ms.set(
-            web_sys::window()
-                .and_then(|window| window.performance())
-                .map(|performance| performance.now() + 2_000.0)
-                .unwrap_or(Date::now() + 2_000.0),
-        );
-        result_modal_open.set(true);
-        focus_result_close();
+        if auto_show_statistics.get_untracked() {
+            result_dismiss_after_ms.set(
+                web_sys::window()
+                    .and_then(|window| window.performance())
+                    .map(|performance| performance.now() + RESULT_DISMISS_GRACE_MS)
+                    .unwrap_or(Date::now() + RESULT_DISMISS_GRACE_MS),
+            );
+            result_modal_open.set(true);
+            focus_result_close();
+        } else {
+            result_dismiss_after_ms.set(f64::INFINITY);
+        }
     });
 
     let frame_holder: CallbackSlot<FrameCallback> = Rc::new(RefCell::new(None));
@@ -1302,6 +1429,7 @@ fn App() -> impl IntoView {
             };
             let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":bar_beats,"exerciseBeats":exercise_length,"displayRangeStart":range_start,"displayRangeBeats":range_end-range_start,"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes})).unwrap_or(JsValue::NULL);
             let origin_set = Rc::new(Cell::new(false));
+            let tracking_started = Rc::new(Cell::new(false));
             let range_length = (range_end - range_start).max(0.001);
             let initial_visible_loop =
                 ((offset - range_start).max(0.0) / range_length).floor() as usize;
@@ -1332,6 +1460,9 @@ fn App() -> impl IntoView {
                 {
                     phase.set("running".into());
                 }
+                if beat >= offset - 0.000_001 && !tracking_started.replace(true) {
+                    set_practice_active(true);
+                }
                 if !repeat_enabled && beat >= range_start {
                     let current_visible_loop =
                         ((beat - range_start) / range_length).floor() as usize;
@@ -1357,6 +1488,7 @@ fn App() -> impl IntoView {
             let done_finish = finish_run.clone();
             let repeat_launch = launch_holder.clone();
             let done = Closure::wrap(Box::new(move || {
+                set_practice_active(false);
                 if !repeat_enabled {
                     if app_mode.get_untracked() == AppMode::Practice && loops.get_untracked() == 0 {
                         observed.set(vec![]);
@@ -1435,6 +1567,7 @@ fn App() -> impl IntoView {
                 match JsFuture::from(promise).await {
                     Ok(_) => {}
                     Err(error) => {
+                        set_practice_active(false);
                         phase.set("error".into());
                         let detail = error.as_string().unwrap_or_else(|| format!("{error:?}"));
                         import_error.set(Some(format!("Audio failed: {detail}")));
@@ -1446,8 +1579,21 @@ fn App() -> impl IntoView {
     *launch_holder.borrow_mut() = Some(launch_run.clone());
 
     let pause_run: Rc<dyn Fn()> = Rc::new(move || {
-        progress.set(current_audio_beat().max(0.0));
-        paused_run_start_ms.set(Some(run_start_ms.get_untracked()));
+        set_practice_active(false);
+        let (_, _, range_start, _) = selected_bar_range(
+            &exercise.get_untracked(),
+            selection_start_bar.get_untracked(),
+            selection_end_bar.get_untracked(),
+        );
+        let position = if phase.get_untracked() == "starting" {
+            progress.get_untracked()
+        } else {
+            current_audio_beat()
+        };
+        progress.set(position.max(range_start));
+        if run_start_ms.get_untracked() > 0.0 {
+            paused_run_start_ms.set(Some(run_start_ms.get_untracked()));
+        }
         stop_audio();
         phase.set("paused".into());
     });
@@ -1455,12 +1601,15 @@ fn App() -> impl IntoView {
         let launch = launch_run.clone();
         Rc::new(move || {
             if phase.get_untracked() == "paused" {
+                selection_notice.set(false);
                 launch(progress.get_untracked().max(0.0), 0, true);
             }
         })
     };
 
     let reset_run: Rc<dyn Fn()> = Rc::new(move || {
+        set_practice_active(false);
+        selection_notice.set(false);
         stop_audio();
         result_modal_open.set(false);
         observed.set(vec![]);
@@ -1481,8 +1630,9 @@ fn App() -> impl IntoView {
     let stop_for_navigation: Rc<dyn Fn()> = Rc::new(move || {
         if matches!(
             phase.get_untracked().as_str(),
-            "running" | "count_in" | "paused"
+            "running" | "count_in" | "starting" | "paused"
         ) {
+            set_practice_active(false);
             stop_audio();
             observed.set(vec![]);
             feedback_dirty.set(true);
@@ -1500,6 +1650,40 @@ fn App() -> impl IntoView {
             phase.set("idle".into());
         }
     });
+
+    {
+        let pause = pause_run.clone();
+        let save = save_current_settings.clone();
+        let selection = Closure::wrap(Box::new(move |bar: u32, extend: bool| {
+            if matches!(
+                phase.get_untracked().as_str(),
+                "running" | "count_in" | "starting"
+            ) {
+                pause();
+            }
+            if phase.get_untracked() == "paused" {
+                selection_notice.set(true);
+                return;
+            }
+            selection_notice.set(false);
+            let bar = bar as usize;
+            let anchor = selection_anchor
+                .get_untracked()
+                .or_else(|| extend.then_some(selection_start_bar.get_untracked()));
+            if let Some(anchor) = anchor {
+                selection_start_bar.set(anchor.min(bar));
+                selection_end_bar.set(anchor.max(bar));
+                selection_anchor.set(if extend { Some(anchor) } else { None });
+            } else {
+                selection_start_bar.set(bar);
+                selection_end_bar.set(bar);
+                selection_anchor.set(Some(bar));
+            }
+            save();
+        }) as Box<dyn FnMut(u32, bool)>);
+        bind_score_selection(selection.as_ref().unchecked_ref());
+        selection.forget();
+    }
 
     let change_tempo: Rc<dyn Fn(f64)> = Rc::new(move |value| {
         let value = value.clamp(30.0, 240.0);
@@ -1576,10 +1760,12 @@ fn App() -> impl IntoView {
         move |timestamp, instrument, velocity, source, raw_note, raw_channel| {
             if result_modal_open.get_untracked() {
                 if timestamp >= result_dismiss_after_ms.get_untracked() {
-                    result_modal_open.set(false);
-                    result_dismiss_after_ms.set(f64::INFINITY);
-                    clear_score_feedback();
-                    restore_result_focus();
+                    dismiss_result(
+                        result_modal_open,
+                        result_dismiss_after_ms,
+                        historical_result,
+                        stats_open,
+                    );
                 }
                 return;
             }
@@ -1612,6 +1798,9 @@ fn App() -> impl IntoView {
                         save_for_hit();
                     }
                 }
+                return;
+            }
+            if settings_open.get_untracked() || context_popup.get_untracked().is_some() {
                 return;
             }
             if matches!(phase.get_untracked().as_str(), "idle" | "complete") {
@@ -1740,8 +1929,9 @@ fn App() -> impl IntoView {
             }
             if matches!(
                 phase.get_untracked().as_str(),
-                "running" | "count_in" | "paused"
+                "running" | "count_in" | "starting" | "paused"
             ) {
+                set_practice_active(false);
                 stop_audio();
                 observed.set(vec![]);
                 accepted_observed.set(vec![]);
@@ -1821,6 +2011,8 @@ fn App() -> impl IntoView {
                         });
                     }
                     context_popup.set(None);
+                    selection_anchor.set(None);
+                    selection_notice.set(false);
                     exercise.set(parsed);
                     result_modal_open.set(false);
                     phase.set("idle".into());
@@ -1846,7 +2038,10 @@ fn App() -> impl IntoView {
                     midi_status.set(format!("MIDI error · {error}"));
                 } else {
                     if event.disconnected_id.is_some()
-                        && matches!(phase.get_untracked().as_str(), "running" | "count_in")
+                        && matches!(
+                            phase.get_untracked().as_str(),
+                            "running" | "count_in" | "starting"
+                        )
                     {
                         midi_pause();
                     }
@@ -2015,9 +2210,18 @@ fn App() -> impl IntoView {
         });
     }
     spawn_local(async move {
-        if let Ok(value) = JsFuture::from(load_sessions()).await
-            && let Ok(items) = serde_wasm_bindgen::from_value::<Vec<SessionRecord>>(value)
-        {
+        if let Ok(value) = JsFuture::from(load_sessions()).await {
+            let records = Array::from(&value);
+            let mut items = records
+                .iter()
+                .filter_map(|record| serde_wasm_bindgen::from_value::<SessionRecord>(record).ok())
+                .collect::<Vec<_>>();
+            incomplete_history.set(records.length() as usize - items.len());
+            items.sort_by(|left, right| {
+                left.ended_at
+                    .cmp(&right.ended_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
             history.set(items);
         }
     });
@@ -2042,6 +2246,9 @@ fn App() -> impl IntoView {
                     }
                     if let Some(v) = saved.metronome {
                         metronome.set(v);
+                    }
+                    if let Some(v) = saved.auto_show_statistics {
+                        auto_show_statistics.set(v);
                     }
                     if let Some(v) = saved.click_volume {
                         click_volume.set(v);
@@ -2113,6 +2320,45 @@ fn App() -> impl IntoView {
     let key_hit = hit_input.clone();
     let key_pause_run = pause_run.clone();
     let key_resume_run = resume_run.clone();
+    // Capture activation before component handlers run. Transport and restart
+    // own their toggle/reset semantics; loading a file still replaces the run.
+    let interaction_pause = pause_run.clone();
+    let control_interaction = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        if !matches!(
+            phase.get_untracked().as_str(),
+            "running" | "count_in" | "starting"
+        ) {
+            return;
+        }
+        let control = event
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+            .and_then(|element| {
+                element
+                    .closest("button, input, select, textarea, summary, a[href]")
+                    .ok()
+                    .flatten()
+            });
+        if let Some(control) = control
+            && control
+                .closest(".start-button, .restart-button")
+                .ok()
+                .flatten()
+                .is_none()
+        {
+            interaction_pause();
+        }
+    }) as Box<dyn FnMut(web_sys::Event)>);
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        for name in ["click", "pointerdown"] {
+            let _ = document.add_event_listener_with_callback_and_bool(
+                name,
+                control_interaction.as_ref().unchecked_ref(),
+                true,
+            );
+        }
+    }
+    control_interaction.forget();
     let outside_context_popup = Closure::wrap(Box::new(move |event: web_sys::Event| {
         let target = event
             .target()
@@ -2193,7 +2439,9 @@ fn App() -> impl IntoView {
                 event.prevent_default();
                 library_open.set(false);
                 restore_library_focus();
-            } else if matches!(event.key().to_lowercase().as_str(), "j" | " " | "r") {
+            } else if matches!(event.key().to_lowercase().as_str(), "j" | "r")
+                || (event.key() == " " && !keyboard_targets_control(&event))
+            {
                 event.prevent_default();
             }
             return;
@@ -2207,6 +2455,7 @@ fn App() -> impl IntoView {
                     return;
                 }
                 "j" => {}
+                " " if keyboard_targets_control(&event) => return,
                 " " | "r" => {
                     event.prevent_default();
                     return;
@@ -2218,13 +2467,16 @@ fn App() -> impl IntoView {
             match event.key().to_lowercase().as_str() {
                 "escape" => {
                     event.prevent_default();
-                    result_modal_open.set(false);
-                    result_dismiss_after_ms.set(f64::INFINITY);
-                    clear_score_feedback();
-                    restore_result_focus();
+                    dismiss_result(
+                        result_modal_open,
+                        result_dismiss_after_ms,
+                        historical_result,
+                        stats_open,
+                    );
                     return;
                 }
                 "j" => {}
+                " " if keyboard_targets_control(&event) => return,
                 " " | "r" => {
                     event.prevent_default();
                     return;
@@ -2232,19 +2484,13 @@ fn App() -> impl IntoView {
                 _ => return,
             }
         }
+        if settings_open.get_untracked() && event.key().to_lowercase() != "j" {
+            return;
+        }
         let target = event
             .target()
             .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok());
-        if event.key() == " "
-            && target.as_ref().is_some_and(|element| {
-                element.tag_name() == "BUTTON"
-                    && element
-                        .closest(".bar-selection-control, .metronome-context")
-                        .ok()
-                        .flatten()
-                        .is_some()
-            })
-        {
+        if event.key() == " " && keyboard_targets_control(&event) {
             return;
         }
         let typing = target
@@ -2269,7 +2515,7 @@ fn App() -> impl IntoView {
             " " => {
                 event.prevent_default();
                 match phase.get_untracked().as_str() {
-                    "running" | "count_in" => key_pause_run(),
+                    "running" | "count_in" | "starting" => key_pause_run(),
                     "paused" => key_resume_run(),
                     "idle" | "complete" => {
                         observed.set(vec![]);
@@ -2298,7 +2544,10 @@ fn App() -> impl IntoView {
             .and_then(|window| window.document())
             .map(|document| document.visibility_state() == web_sys::VisibilityState::Hidden)
             .unwrap_or(false)
-            && matches!(phase.get_untracked().as_str(), "running" | "count_in")
+            && matches!(
+                phase.get_untracked().as_str(),
+                "running" | "count_in" | "starting"
+            )
         {
             visibility_pause();
         }
@@ -2342,11 +2591,7 @@ fn App() -> impl IntoView {
         })
     };
     let choose_cb = file_callback.clone();
-    let stop_for_connect = stop_for_navigation.clone();
-    let stop_for_stats = stop_for_navigation.clone();
-    let stop_for_settings = stop_for_navigation.clone();
     let stop_for_import = stop_for_navigation.clone();
-    let stop_for_library = stop_for_navigation.clone();
     let save_welcome = save_current_settings.clone();
     let save_snare_mute = save_current_settings.clone();
     let save_snare_reference_mode = save_current_settings.clone();
@@ -2361,21 +2606,21 @@ fn App() -> impl IntoView {
     let save_cal_manual = save_current_settings.clone();
     let save_on_time = save_current_settings.clone();
     let save_excellent = save_current_settings.clone();
+    let save_auto_statistics = save_current_settings.clone();
     view! {
       <main class="app">
         <header class="topbar">
           <button id="midi-library-trigger" class="stats-trigger library-topbar-trigger" aria-label=move || format!("MIDI library · {} exercises",saved_imports.get().len()+BUILTIN_RUDIMENTS.len()) title=move || format!("MIDI library · {} exercises",saved_imports.get().len()+BUILTIN_RUDIMENTS.len()) aria-haspopup="dialog" aria-expanded=move || library_open.get().to_string() on:click=move |_|{
-            stop_for_library();
             library_personal.set(false);
             library_page.set(0);
             library_open.set(true);
             focus_library_close();
           }><FolderOpen size=19/><span class="library-count" aria-hidden="true">{move || saved_imports.get().len()+BUILTIN_RUDIMENTS.len()}</span></button>
-          <button id="stats-trigger" class="stats-trigger" aria-label="Stats" title="Performance history" aria-haspopup="dialog" aria-expanded=move || stats_open.get().to_string() on:click=move |_|{stop_for_stats();stats_open.set(true);focus_stats_close();}><ChartNoAxesCombined size=19/></button>
+          <button id="stats-trigger" class="stats-trigger" aria-label="Stats" title="Performance history" aria-haspopup="dialog" aria-expanded=move || stats_open.get().to_string() on:click=move |_|{stats_open.set(true);focus_stats_close();practice_time_ms.set(None);let promise=load_practice_time();spawn_local(async move{match JsFuture::from(promise).await{Ok(value)=>practice_time_ms.set(value.as_f64()),Err(error)=>import_error.set(Some(format!("Practice time could not load: {error:?}")))}});}><ChartNoAxesCombined size=19/></button>
           <a class="brand" href="#" aria-label="Rudiment"><span class="brand-mark" aria-hidden="true"></span><span>"Rudiment"</span></a>
           <div class="exercise-heading"><span class="eyebrow">"CURRENT EXERCISE"</span><strong>{move || exercise.get().title}</strong><small>"4/4 · sticking and accents"</small></div>
-          <button id="settings-trigger" class="stats-trigger settings-trigger" aria-label="Open settings" title="Rudiment settings" aria-haspopup="dialog" aria-expanded=move || settings_open.get().to_string() on:click=move |_|{stop_for_settings();settings_open.set(true);focus_settings_close();}><SettingsIcon size=19/></button>
-          <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label=move || format!("MIDI connection: {}",midi_status.get()) on:click={let connect=connect_action.clone();move |_|{stop_for_connect();connect();}}><span class="status-dot"></span>{move || midi_status.get()}</button>
+          <button id="settings-trigger" class="stats-trigger settings-trigger" aria-label="Open settings" title="Rudiment settings" aria-haspopup="dialog" aria-expanded=move || settings_open.get().to_string() on:click=move |_|{settings_open.set(true);focus_settings_close();}><SettingsIcon size=19/></button>
+          <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label=move || format!("MIDI connection: {}",midi_status.get()) on:click={let connect=connect_action.clone();move |_|connect()}><span class="status-dot"></span>{move || midi_status.get()}</button>
         </header>
 
           <section class="workspace">
@@ -2407,51 +2652,52 @@ fn App() -> impl IntoView {
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
               <div class="position-row">
                 <div class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-control open"}else{"bar-selection-control"}>
-                  <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-controls="bar-selection-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Bars)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Bars){None}else{Some(ContextPopup::Bars)})><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let bar_beats=beats_per_bar(&exercise.get());let total=(exercise_beats(&exercise.get())/bar_beats).ceil().max(1.0) as usize;let raw=(progress.get().max(0.0)/bar_beats).floor() as usize;let start=selection_start_bar.get().min(total.saturating_sub(1));let end=selection_end_bar.get().min(total.saturating_sub(1)).max(start);let full_performance=start==0&&end+1==total&&app_mode.get()==AppMode::Performance;let current=if full_performance{raw.min(total.saturating_sub(1))+1}else{start+raw.saturating_sub(start)%(end-start+1)+1};let range_total=end+1;if repeat_bar_until_good.get(){format!("BAR {current} / {range_total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {range_total}")}}}</span></button>
+                  <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-controls="bar-selection-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Bars)).to_string() on:click=move |_|{selection_notice.set(false);context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Bars){None}else{Some(ContextPopup::Bars)});}><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let bar_beats=beats_per_bar(&exercise.get());let total=(exercise_beats(&exercise.get())/bar_beats).ceil().max(1.0) as usize;let raw=(progress.get().max(0.0)/bar_beats).floor() as usize;let start=selection_start_bar.get().min(total.saturating_sub(1));let end=selection_end_bar.get().min(total.saturating_sub(1)).max(start);let full_performance=start==0&&end+1==total&&app_mode.get()==AppMode::Performance;let current=if full_performance{raw.min(total.saturating_sub(1))+1}else{start+raw.saturating_sub(start)%(end-start+1)+1};let range_total=end+1;if repeat_bar_until_good.get(){format!("BAR {current} / {range_total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {range_total}")}}}</span></button>
+                  <span class=move || if selection_notice.get(){"selection-notice"}else{"selection-notice hidden"} role="status">"Restart the current run before choosing different bars on the score."</span>
                   <div id="bar-selection-popover" class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-popover"}else{"bar-selection-popover hidden"} role="dialog" aria-label="Bar selection">
                     <div class="bar-selection-popover-head"><strong>"Practise bars"</strong><button class="bar-selection-close" type="button" aria-label="Close bar selection" on:click=move |_|{context_popup.set(None);focus_popup_trigger(ContextPopup::Bars);}><X size=15/></button></div>
                     <div class="bar-range-fields">
-                      <label>"From"<select aria-label="First selected bar" prop:value=move || selection_start_bar.get().to_string() on:change={let stop=stop_for_navigation.clone();move |event|{stop();let value=event_target_value(&event).parse().unwrap_or(0);selection_start_bar.set(value);if selection_end_bar.get_untracked()<value{selection_end_bar.set(value);}save_selection_start();}}>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;(0..count).map(|bar|view!{<option value=bar.to_string()>{format!("Bar {}",bar+1)}</option>}).collect_view()}}</select></label>
-                      <label>"To"<select aria-label="Last selected bar" prop:value=move || selection_end_bar.get().min((exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize-1).to_string() on:change={let stop=stop_for_navigation.clone();move |event|{stop();let value=event_target_value(&event).parse().unwrap_or(selection_start_bar.get_untracked());selection_end_bar.set(value.max(selection_start_bar.get_untracked()));save_selection_end();}}>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;(0..count).map(|bar|view!{<option value=bar.to_string()>{format!("Bar {}",bar+1)}</option>}).collect_view()}}</select></label>
+                      <label>"From"<select aria-label="First selected bar" prop:value=move || selection_start_bar.get().to_string() on:change={let stop=stop_for_navigation.clone();move |event|{stop();selection_anchor.set(None);let value=event_target_value(&event).parse().unwrap_or(0);selection_start_bar.set(value);if selection_end_bar.get_untracked()<value{selection_end_bar.set(value);}save_selection_start();}}>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;(0..count).map(|bar|view!{<option value=bar.to_string()>{format!("Bar {}",bar+1)}</option>}).collect_view()}}</select></label>
+                      <label>"To"<select aria-label="Last selected bar" prop:value=move || selection_end_bar.get().min((exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize-1).to_string() on:change={let stop=stop_for_navigation.clone();move |event|{stop();selection_anchor.set(None);let value=event_target_value(&event).parse().unwrap_or(selection_start_bar.get_untracked());selection_end_bar.set(value.max(selection_start_bar.get_untracked()));save_selection_end();}}>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;(0..count).map(|bar|view!{<option value=bar.to_string()>{format!("Bar {}",bar+1)}</option>}).collect_view()}}</select></label>
                     </div>
-                    <button class="select-all-bars" type="button" on:click={let stop=stop_for_navigation.clone();move |_|{stop();selection_start_bar.set(0);selection_end_bar.set(usize::MAX);save_selection_all();}}>"All bars"</button>
+                    <button class="select-all-bars" type="button" on:click={let stop=stop_for_navigation.clone();move |_|{stop();selection_anchor.set(None);selection_start_bar.set(0);selection_end_bar.set(usize::MAX);save_selection_all();}}>"All bars"</button>
                     <small>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;let start=selection_start_bar.get().min(count-1);let end=selection_end_bar.get().min(count-1).max(start);if start==0&&end+1==count{"All bars · Performance when played once".into()}else if start==end{format!("Bar {} selected · Practice",start+1)}else{format!("Bars {}–{} selected · Practice",start+1,end+1)}}}</small>
                   </div>
                 </div>
                 <div class="timeline"><i style=move || format!("width:{:.2}%",(progress.get().max(0.0)/exercise_beats(&exercise.get())*100.0).rem_euclid(100.0).clamp(0.0,100.0))></i></div>
                 <select class="loop-control" aria-label=move || format!("Loops: {}", match loops.get(){2=>"2 LOOPS",4=>"4 LOOPS",0=>"∞ LOOP",_=>"1 / 1 LOOP"}) title="Choose how many times to play the selected bars" prop:value=move || loops.get().to_string() on:change={let save=save_loops.clone();let stop=stop_for_navigation.clone();move |event|{stop();loops.set(event_target_value(&event).parse().unwrap_or(1));save();}}><option value="1">"1 / 1 LOOP"</option><option value="2">"2 LOOPS"</option><option value="4">"4 LOOPS"</option><option value="0">"∞ LOOP"</option></select>
               </div>
-              <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);clear_score_feedback();restore_result_focus();}>
+              <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>
               <section id="result-dialog" class="stats-modal results-modal" role="dialog" aria-modal="true" aria-labelledby="result-title" on:click=|event|event.stop_propagation() on:keydown=move |event:web_sys::KeyboardEvent|{
                   match event.key().as_str(){
-                    "Escape"=>{event.prevent_default();result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);clear_score_feedback();restore_result_focus();},
+                    "Escape"=>{event.prevent_default();event.stop_propagation();dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open);},
                     "Tab"=>trap_dialog_tab(&event,"#result-dialog"),
                     _=>{},
                   }
                 }>
                 <header class="summary-header">
-                  <div class="summary-title-group"><span class="summary-icon" aria-hidden="true">"R"</span><div><h2 id="result-title">"Session Complete"</h2><p>{move || result.get().map(|session|format!("{} · {:.0} BPM",session.exercise_title,session.bpm)).unwrap_or_default()}</p></div></div>
-                  <button id="result-modal-close" aria-label="Close session results" on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);clear_score_feedback();restore_result_focus();}><X size=21/></button>
+                  <div class="summary-title-group"><span class="summary-icon" aria-hidden="true">"R"</span><div><h2 id="result-title">"Session Complete"</h2><p>{move || displayed_result.get().map(|session|format!("{} · {:.0} BPM",session.exercise_title,session.bpm)).unwrap_or_default()}</p></div></div>
+                  <button id="result-modal-close" aria-label="Close session results" on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)><X size=21/></button>
                 </header>
                 <section class="summary-achievement">
-                  <div class=move || if result.get().is_some_and(|session|is_white_mastery(&session.summary)){"summary-stars mastery"}else{"summary-stars"} aria-label=move || result.get().map(|session|{let rating=performance_rating(&session.summary);if is_white_mastery(&session.summary){"Mastery, three white stars".into()}else{format!("{} of 3 gold stars",rating.stars)}}).unwrap_or_default()>{move || {let rating=result.get().map(|session|performance_rating(&session.summary)).unwrap_or(PerformanceRating{stars:0,award:PerformanceAward::None});(0..3).map(|index|view!{<Star size=38 fill=if index<rating.stars{"currentColor"}else{"none"}/>}).collect_view()}}</div>
-                  <h3>{move || result.get().map(|session|achievement_copy(&session.summary).0).unwrap_or("")}</h3>
-                  <p>{move || result.get().map(|session|achievement_copy(&session.summary).1).unwrap_or("")}</p>
+                  <div class=move || if displayed_result.get().is_some_and(|session|is_white_mastery(&session.summary)){"summary-stars mastery"}else{"summary-stars"} aria-label=move || displayed_result.get().map(|session|{let rating=performance_rating(&session.summary);if is_white_mastery(&session.summary){"Mastery, three white stars".into()}else{format!("{} of 3 gold stars",rating.stars)}}).unwrap_or_default()>{move || {let rating=displayed_result.get().map(|session|performance_rating(&session.summary)).unwrap_or(PerformanceRating{stars:0,award:PerformanceAward::None});(0..3).map(|index|view!{<Star size=38 fill=if index<rating.stars{"currentColor"}else{"none"}/>}).collect_view()}}</div>
+                  <h3>{move || displayed_result.get().map(|session|achievement_copy(&session.summary).0).unwrap_or("")}</h3>
+                  <p>{move || displayed_result.get().map(|session|achievement_copy(&session.summary).1).unwrap_or("")}</p>
                 </section>
                 <div class="summary-cards">
                   <section class="summary-card score-summary-card">
                     <h3>"Session Score"</h3>
-                    <div class="summary-score"><strong>{move || display_score(result.get().and_then(|session|session.summary.score))}</strong><span>"/ 100"</span></div>
-                    <span class=move || if result.get().is_some_and(|session|is_new_high_score(&session,&history.get())){"new-high-score"}else{"new-high-score hidden"}>"↗ New high score"</span>
+                    <div class="summary-score"><strong>{move || display_score(displayed_result.get().and_then(|session|session.summary.score))}</strong><span>"/ 100"</span></div>
+                    <span class=move || if historical_result.get().is_none()&&displayed_result.get().is_some_and(|session|is_new_high_score(&session,&history.get())){"new-high-score"}else{"new-high-score hidden"}>"↗ New high score"</span>
                   </section>
                   <section class="summary-card breakdown-card">
                     <h3>"Hit Breakdown"</h3>
-                    <div class="breakdown-list">{move || result.get().map(|session|{let (perfect,good,early,late)=timing_hit_counts(&session.summary);[("Perfect","perfect",perfect),("Good","good",good),("Early","early",early),("Late","late",late),("Missed","missed",session.summary.missed)].into_iter().map(|(label,class,count)|{let value=percentage(count,session.summary.expected);view!{<article class=format!("breakdown-row {class}")><span><i></i>{label}</span><strong>{format!("{count} / {}",session.summary.expected)}</strong><em><i style=format!("width:{value:.3}%")></i></em><b>{format!("{value:.0}%")}</b></article>}}).collect_view()}).unwrap_or_default()}</div>
+                    <div class="breakdown-list">{move || displayed_result.get().map(|session|{let (perfect,good,early,late)=timing_hit_counts(&session.summary);[("Perfect","perfect",perfect),("Good","good",good),("Early","early",early),("Late","late",late),("Missed","missed",session.summary.missed)].into_iter().map(|(label,class,count)|{let value=percentage(count,session.summary.expected);view!{<article class=format!("breakdown-row {class}")><span><i></i>{label}</span><strong>{format!("{count} / {}",session.summary.expected)}</strong><em><i style=format!("width:{value:.3}%")></i></em><b>{format!("{value:.0}%")}</b></article>}}).collect_view()}).unwrap_or_default()}</div>
                   </section>
                 </div>
                 <section class="summary-card progress-card">
                   <h3>"Your Progress"</h3><p>"Session score over time"</p>
-                  {move || result.get().map(|session|{let scores=progress_scores(&session,&history.get());let points=progress_chart_points(&scores);let line=points.iter().map(|(x,y)|format!("{x:.1},{y:.1}")).collect::<Vec<_>>().join(" ");let latest=points.last().copied().zip(scores.last().copied());view!{
+                  {move || displayed_result.get().map(|session|{let scores=progress_scores(&session,&history.get());let points=progress_chart_points(&scores);let line=points.iter().map(|(x,y)|format!("{x:.1},{y:.1}")).collect::<Vec<_>>().join(" ");let latest=points.last().copied().zip(scores.last().copied());view!{
                     <svg class="progress-chart" viewBox="0 0 760 190" role="img" aria-label=format!("Scores for the last {} sessions",scores.len())>
                       <title>{format!("Last {} scores for this exercise at {:.0} BPM",scores.len(),session.bpm)}</title>
                       {[100_u8,75,50,25,0].into_iter().map(|value|{let y=146.0-132.0*value as f64/100.0;view!{<g class="progress-grid"><line x1="48" y1=y.to_string() x2="712" y2=y.to_string()/><text x="36" y=(y+4.0).to_string()>{value}</text></g>}}).collect_view()}
@@ -2462,14 +2708,14 @@ fn App() -> impl IntoView {
                     </svg>
                   }.into_any()}).unwrap_or_else(||().into_any())}
                 </section>
-                <footer class="summary-footer"><p>{move || result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);clear_score_feedback();restore_result_focus();}>"Back to score"</button><button class="primary" on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
+                <footer class="summary-footer"><p>{move || displayed_result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>{move || if historical_result.get().is_some(){"Back to history"}else{"Back to score"}}</button><button class=move || if historical_result.get().is_some(){"primary hidden"}else{"primary"} on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
                 </section>
               </div>
             </section>
             <section class="practice-controls">
               <div class="transport">
                 <button class="restart-button" on:click={let reset=reset_run.clone();move |_|reset()}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true"><RotateCcw size=24/></span><span>"Restart"</span></span><small>"Clear current run"</small></button>
-                <button class="primary start-button" aria-label=move || match phase.get().as_str(){"running"|"count_in"=>String::from("Pause"),"paused"=>String::from("Resume"),_=>{let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;if selection_start_bar.get()==0&&selection_end_bar.get().min(count-1)+1==count&&loops.get()==1{String::from("Start performance Hit your drum or press J to start Start practice")}else{String::from("Start practice Hit your drum or press J to start Start performance")}}} on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"=>"Pause","paused"=>"Resume",_=>{let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;if selection_start_bar.get()==0&&selection_end_bar.get().min(count-1)+1==count&&loops.get()==1{"Start performance "}else{"Start practice "}}}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
+                <button class="primary start-button" aria-label=move || match phase.get().as_str(){"running"|"count_in"|"starting"=>String::from("Pause"),"paused"=>String::from("Resume"),_=>{let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;if selection_start_bar.get()==0&&selection_end_bar.get().min(count-1)+1==count&&loops.get()==1{String::from("Start performance Hit your drum or press J to start Start practice")}else{String::from("Start practice Hit your drum or press J to start Start performance")}}} on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"|"starting"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"|"starting"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"|"starting"=>"Pause","paused"=>"Resume",_=>{let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;if selection_start_bar.get()==0&&selection_end_bar.get().min(count-1)+1==count&&loops.get()==1{"Start performance "}else{"Start practice "}}}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
                 <aside class="timing-key" aria-label="Timing feedback key">
                   <span class="perfect"><i aria-hidden="true"></i>"Perfect"</span>
                   <span class="good"><i aria-hidden="true"></i>"Good"</span>
@@ -2486,7 +2732,8 @@ fn App() -> impl IntoView {
                 match event.key().as_str(){
                   "Escape"=>{event.prevent_default();event.stop_propagation();library_open.set(false);restore_library_focus();},
                   "Tab"=>trap_dialog_tab(&event,"#midi-library-dialog"),
-                  "j"|"J"|"r"|"R"|" "=>{event.prevent_default();event.stop_propagation();},
+                  "j"|"J"|"r"|"R"=>{event.prevent_default();event.stop_propagation();},
+                  " " if !keyboard_targets_control(&event)=>{event.prevent_default();event.stop_propagation();},
                   _=>{},
                 }
               }>
@@ -2504,6 +2751,7 @@ fn App() -> impl IntoView {
                   <button role="tab" aria-selected=move || (!library_personal.get()).to_string() class=move || if library_personal.get(){""}else{"active"} on:click=move |_|{library_personal.set(false);library_page.set(0);}>{format!("Built-in · {}",BUILTIN_RUDIMENTS.len())}</button>
                   <button role="tab" aria-selected=move || library_personal.get().to_string() class=move || if library_personal.get(){"active"}else{""} on:click=move |_|{library_personal.set(true);library_page.set(0);}>{move || format!("Your imports · {}",saved_imports.get().len())}</button>
                 </div>
+                <label class=move || if library_personal.get(){"library-difficulty hidden"}else{"library-difficulty"}>"Difficulty"<select aria-label="Exercise difficulty" prop:value=move || library_difficulty.get().map(Difficulty::label).unwrap_or("All") on:change=move |event|{library_difficulty.set(match event_target_value(&event).as_str(){"Beginner"=>Some(Difficulty::Beginner),"Intermediate"=>Some(Difficulty::Intermediate),"Advanced"=>Some(Difficulty::Advanced),_=>None});library_page.set(0);}><option value="All">"All levels"</option><option value="Beginner">"Beginner"</option><option value="Intermediate">"Intermediate"</option><option value="Advanced">"Advanced"</option></select></label>
                 <div class="library-page" role="list">
                   {move || if library_personal.get(){
                     let imports=saved_imports.get();
@@ -2558,8 +2806,9 @@ fn App() -> impl IntoView {
                       }).collect_view().into_any()
                     }
                   }else{
-                    let page=library_page.get().min(BUILTIN_RUDIMENTS.len().div_ceil(LIBRARY_PAGE_SIZE)-1);
-                    BUILTIN_RUDIMENTS.into_iter().skip(page*LIBRARY_PAGE_SIZE).take(LIBRARY_PAGE_SIZE).map(|item|{
+                    let difficulty=library_difficulty.get();
+                    let page=library_page.get().min(builtin_count(difficulty).div_ceil(LIBRARY_PAGE_SIZE).max(1)-1);
+                    BUILTIN_RUDIMENTS.into_iter().filter(|item|difficulty.is_none_or(|level|item.difficulty==level)).skip(page*LIBRARY_PAGE_SIZE).take(LIBRARY_PAGE_SIZE).map(|item|{
                       let midi_url=format!("public/exercises/rudiments/{}.mid",item.id);
                       let load_name=format!("{}.mid",item.title);
                       view!{
@@ -2568,7 +2817,7 @@ fn App() -> impl IntoView {
                             library_open.set(false);
                             restore_library_focus();
                             load_bundled_from_library(&midi_url,&load_name);
-                          }><strong>{item.title}</strong><small>{item.description}</small></button>
+                          }><strong>{item.title}</strong><small>{format!("{} · {}",item.difficulty.label(),item.description)}</small></button>
                         </article>
                       }
                     }).collect_view().into_any()
@@ -2576,8 +2825,8 @@ fn App() -> impl IntoView {
                 </div>
                 <div class="library-pagination" aria-label="Library pagination">
                   <button aria-label="Previous library page" disabled=move || library_page.get()==0 on:click=move |_|library_page.update(|page|*page=page.saturating_sub(1))><ArrowLeft size=13/>"Previous"</button>
-                  <span>{move || {let count=if library_personal.get(){saved_imports.get().len()}else{BUILTIN_RUDIMENTS.len()};let pages=count.div_ceil(LIBRARY_PAGE_SIZE).max(1);let page=library_page.get().min(pages-1);format!("Page {} of {}",page+1,pages)}}</span>
-                  <button aria-label="Next library page" disabled=move || {let count=if library_personal.get(){saved_imports.get().len()}else{BUILTIN_RUDIMENTS.len()};library_page.get()+1>=count.div_ceil(LIBRARY_PAGE_SIZE).max(1)} on:click=move |_|{let count=if library_personal.get_untracked(){saved_imports.get_untracked().len()}else{BUILTIN_RUDIMENTS.len()};let pages=count.div_ceil(LIBRARY_PAGE_SIZE).max(1);library_page.update(|page|*page=(*page+1).min(pages-1));}>"Next"<ArrowRight size=13/></button>
+                  <span>{move || {let count=if library_personal.get(){saved_imports.get().len()}else{builtin_count(library_difficulty.get())};let pages=count.div_ceil(LIBRARY_PAGE_SIZE).max(1);let page=library_page.get().min(pages-1);format!("Page {} of {}",page+1,pages)}}</span>
+                  <button aria-label="Next library page" disabled=move || {let count=if library_personal.get(){saved_imports.get().len()}else{builtin_count(library_difficulty.get())};library_page.get()+1>=count.div_ceil(LIBRARY_PAGE_SIZE).max(1)} on:click=move |_|{let count=if library_personal.get_untracked(){saved_imports.get_untracked().len()}else{builtin_count(library_difficulty.get_untracked())};let pages=count.div_ceil(LIBRARY_PAGE_SIZE).max(1);library_page.update(|page|*page=(*page+1).min(pages-1));}>"Next"<ArrowRight size=13/></button>
                 </div>
               </section>
             </div>
@@ -2605,18 +2854,23 @@ fn App() -> impl IntoView {
                   <article><span>"EARLY HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).2).sum::<usize>()}</strong></article>
                   <article><span>"LATE HITS"</span><strong>{move || history.get().iter().map(|session|timing_hit_counts(&session.summary).3).sum::<usize>()}</strong></article>
                   <article><span>"MISSED NOTES"</span><strong>{move || history.get().iter().map(|session|session.summary.missed).sum::<usize>()}</strong></article>
+                  <article class="practice-time-card"><span>"PRACTICE TIME"</span><strong>{move || practice_time_ms.get().map(format_practice_time).unwrap_or_else(||"—".into())}</strong></article>
                 </div>
+                <p class="practice-time-help">"Practice time is recorded on this device during playback; older sessions have no recorded duration."</p>
+                <p class=move || if incomplete_history.get()!=0{"practice-time-help"}else{"practice-time-help hidden"} role="status">{move || format!("{} incomplete historical record(s) could not be displayed.",incomplete_history.get())}</p>
                 <h3>"Recent sessions"</h3>
                 <ol class="stats-recent">
                   {move || if history.get().is_empty(){
                     view!{<li class="stats-empty">"Complete a performance to see your statistics here."</li>}.into_any()
                   }else{
-                    history.get().iter().rev().take(8).map(|session|view!{
+                    history.get().iter().rev().take(8).map(|session|{let selected=session.clone();view!{
                       <li>
+                        <button class="stats-session" on:click=move |_|{historical_result.set(Some(selected.clone()));stats_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);result_modal_open.set(true);focus_result_close();}>
                         <span><strong>{session.exercise_title.clone()}</strong><small>{let (perfect,good,early,late)=timing_hit_counts(&session.summary);format!("{:.0} BPM · {} · {} · {} perfect, {} good, {} early, {} late, {} missed",session.bpm,match session.input_mode{InputSource::Demo=>"Demo",InputSource::Midi=>"MIDI"},session.ended_at.get(..10).unwrap_or_default(),perfect,good,early,late,session.summary.missed)}</small></span>
                         <b>{format!("{}/100",display_score(session.summary.score))}</b>
+                        </button>
                       </li>
-                    }).collect_view().into_any()
+                    }}).collect_view().into_any()
                   }}
                 </ol>
               </section>
@@ -2636,6 +2890,7 @@ fn App() -> impl IntoView {
             <section><h3>"Metronome"</h3>
               <MetronomeSettings bpm=bpm count_in=count_in subdivision=subdivision timbre=timbre metronome=metronome click_volume=click_volume snare_volume=snare_volume snare_muted=snare_muted error=metronome_preview_error change_tempo=change_tempo.clone() save=save_current_settings.clone()/>
             </section>
+            <section><h3>"Session statistics"</h3><label class="toggle-row"><span>"Automatically show session statistics"<small>"Results are always saved after a performance."</small></span><input type="checkbox" prop:checked=move || auto_show_statistics.get() on:change=move |event|{auto_show_statistics.set(event_target_checked(&event));save_auto_statistics();}/></label></section>
             <section><h3>"Reference snare"</h3><label class="toggle-row"><span>"Play app snare"<small>"Mute this if your drum module is audible."</small></span><input type="checkbox" prop:checked=move || !snare_muted.get() on:change=move |event|{snare_muted.set(!event_target_checked(&event));set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},click_volume.get_untracked());save_snare_mute();}/></label><label>"Play snare"<select aria-label="Reference snare timing" prop:value=move || snare_reference_mode.get() on:change=move |event|{let value=event_target_value(&event);snare_reference_mode.set(if value=="notes"{"notes".into()}else{"hits".into()});save_snare_reference_mode();}><option value="hits">"With your hits"</option><option value="notes">"On written notes"</option></select><small class="help">{move || if snare_reference_mode.get()=="notes"{"Plays each written snare note as a reference; your strikes are still scored silently."}else{"Plays immediately when Rudiment receives your keyboard or MIDI strike."}}</small></label><label>"Snare volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || snare_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);snare_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{value},click_volume.get_untracked());save_snare_volume();}/></label></section>
             <section><h3>"Practice repeats"</h3>
               <label class="toggle-row"><span>"Repeat until successful"<small>"A failed bar is tried again; every failed attempt still reduces the final performance score."</small></span><input aria-label="Repeat bar until Good" type="checkbox" prop:checked=move || repeat_bar_until_good.get() on:change={let save=save_repeat_bar.clone();move |event|{repeat_bar_until_good.set(event_target_checked(&event));save();}}/></label>
@@ -2648,7 +2903,7 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment performance history from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{if JsFuture::from(promise).await.is_ok(){history.set(vec![]);}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selection_start_bar.set(0);selection_end_bar.set(usize::MAX);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment performance history and practice time from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{match JsFuture::from(promise).await{Ok(_)=>{history.set(vec![]);incomplete_history.set(0);practice_time_ms.set(Some(0.0));},Err(error)=>import_error.set(Some(format!("History could not be cleared: {error:?}")))}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selection_start_bar.set(0);selection_end_bar.set(usize::MAX);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" tabindex="-1" on:click=move |_|{settings_open.set(false);restore_settings_focus();}></button>
       </main>
@@ -3134,6 +3389,58 @@ mod tests {
         assert_eq!(progress_scores(&lone, &[]), vec![78.0]);
         assert_eq!(progress_chart_points(&[78.0]).len(), 1);
         assert_eq!(progress_chart_points(&[60.0, 80.0]).len(), 2);
+        assert_eq!(progress_scores(&history[2], &history), vec![0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn builtin_library_levels_have_valid_midi_and_simple_beginner_patterns() {
+        assert_eq!(builtin_count(Some(Difficulty::Beginner)), 2);
+        assert_eq!(builtin_count(Some(Difficulty::Intermediate)), 7);
+        assert_eq!(builtin_count(Some(Difficulty::Advanced)), 4);
+        for item in BUILTIN_RUDIMENTS {
+            let path = format!(
+                "{}/public/exercises/rudiments/{}.mid",
+                env!("CARGO_MANIFEST_DIR"),
+                item.id
+            );
+            let data = std::fs::read(path).expect("built-in MIDI is present");
+            let exercise = parse_midi(&data, item.title, None).expect("built-in MIDI parses");
+            assert!(!exercise.hits.is_empty(), "{}", item.title);
+            if item.difficulty == Difficulty::Beginner {
+                assert!(
+                    exercise
+                        .hits
+                        .iter()
+                        .all(|hit| !hit.grace && hit.hand != rudiment_core::Hand::Unknown)
+                );
+                assert!(exercise.hits.last().unwrap().beat < 8.0);
+                let expected_spacing = if item.id == "12_beginner_single_strokes" {
+                    1.0
+                } else {
+                    0.5
+                };
+                assert!(
+                    exercise
+                        .hits
+                        .windows(2)
+                        .all(
+                            |pair| ((pair[1].beat - pair[0].beat) - expected_spacing).abs() < 0.001
+                        )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn practice_time_formats_accumulated_minutes_and_hours() {
+        assert_eq!(format_practice_time(0.0), "0 minutes");
+        assert_eq!(format_practice_time(60_000.0), "1 minute");
+        assert_eq!(format_practice_time(12.0 * 60_000.0), "12 minutes");
+        assert_eq!(format_practice_time(85.0 * 60_000.0), "1 hour 25 minutes");
+        assert_eq!(
+            format_practice_time(850.0 * 60_000.0),
+            "14 hours 10 minutes"
+        );
     }
 
     #[test]

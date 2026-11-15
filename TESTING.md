@@ -25,23 +25,30 @@ Rust tests cover SMF parsing, absolute tick conversion, metadata, lyric ambiguit
    Confirm Perfect notes turn green, Good notes light green, Early notes orange and Late notes purple; missed noteheads must keep their original colour and show no circle. Hit noteheads must change colour and their accessible labels must state the judgement and signed offset. Adjust the Perfect and Good thresholds in Settings and repeat.
 5. Start with a drum hit or `J`; pause/resume with Space, then test Stop and Restart. A natural completion must save a real 0–100 result in a readable, non-scrolling modal without leaving the practice workspace. The first new hit should dismiss the results modal; a second hit should begin the next run.
 6. Practise the same tempo/input twice; confirm the second result compares against the previous run. Reload and check that the history count remains.
-7. Open MIDI library. Confirm the 11 built-in exercises are paginated, contain no reference-image links, and load R/L sticking and accents through the same import callback. Import or drag `single-stroke-roll.mid` onto the score and try the ambiguous fixture to inspect its warning.
+7. Open MIDI library. Confirm the 13 built-in exercises are paginated and filterable by difficulty, contain no reference-image links, and load R/L sticking and accents through the same import callback. Import or drag `single-stroke-roll.mid` onto the score and try the ambiguous fixture to inspect its warning.
 8. Open settings: preview all three click timbres, toggle the exercise click and app snare independently, change loops, run eight-tap calibration and Reset it.
 9. Import `web/public/exercises/quarter-note-reference.mid`. Confirm eight quarter notes render even though each raw MIDI gate is only 110 ticks. Open the MIDI library, reload the saved file, reload the browser and verify it restores the last selected import; delete it from the library and confirm the prompt.
 
 ## Sampled metronome browser checklist
 
 The visual metronome opens a contextual settings panel; its controls share the
-saved values in Settings. Tempo and click volume update during playback.
+saved values in Settings. Opening controls pauses playback; changed tempo and
+click volume apply without automatically resuming it.
 Count-in applies on the next start; subdivision, click timbre, and click
 enablement apply on the next start or resume, following the existing transport
 scheduling behavior.
 
 1. In desktop Chrome, preview Warm woodblock, Crisp click and Cowbell. Confirm each uses its own recorded timbre and that its accent is stronger than its regular beat.
 2. Start a 4/4 exercise with count-in. Confirm the first count-in beat and each bar downbeat are accented; regular beats remain even. Repeat with a non-4/4 exercise and with bar repetition enabled.
-3. Change tempo during practice, pause between beats, resume, stop/restart and switch presets. Confirm accents remain attached to musical downbeats, there are no doubled/stuck clicks, and exercise/MIDI scoring is unchanged.
+3. Open the metronome during practice, change tempo, explicitly resume, stop/restart and switch presets. Confirm accents remain attached to musical downbeats, there are no doubled/stuck clicks, and exercise/MIDI scoring is unchanged.
 4. Repeat on iPad Safari. Start from a user gesture, background/restore Safari or lock/unlock the device, then resume practice from a user gesture. Confirm audio resumes without a second clock or a burst of late clicks. Recheck all three previews and accents.
 5. Treat browser automation as scheduling/decoding evidence only. Physical iPad Safari listening, speaker differences and subjective audio quality require a real device and must not be reported as verified without that check.
+
+## Range selection, practice time and fullscreen
+
+- Click or tap two bars, or focus a bar and use the arrow keys plus Enter/Space, to select an inclusive range. Check the bar menu and highlight agree after resize. Selecting the score during a run pauses it and preserves feedback; restart is currently required before choosing a new score range. Changing the range or loop count through the existing menu still clears a paused run.
+- Practice time counts transport playback rather than count-in or pauses. It is checkpointed every five seconds and on normal stop/backgrounding. An abrupt browser termination may lose the last uncheckpointed interval; durations of sessions recorded before this feature cannot be recovered.
+- Test the top controls in ordinary browsing, actual browser fullscreen, and the MIDI Web full-page presentation on the relevant mobile/tablet devices. Check hit-testing and whether a host overlay intercepts the controls before changing stacking styles. The local automated Chrome fullscreen request returned `TypeError: not granted` in both headless and headed runs, so that regression test skips in this environment. MIDI Web itself was not available for reproduction; neither its cause nor a fullscreen fix has been established.
 
 ## Physical Chrome + USB drum-kit checklist
 
