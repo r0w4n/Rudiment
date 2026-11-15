@@ -3189,6 +3189,120 @@ mod tests {
     }
 
     #[test]
+    fn greedy_live_and_final_optimal_assignments_can_disagree() {
+        let mut expected = two_note_bar();
+        expected[1].beat = 0.08;
+        let live = live_feedback(&expected, &[60.0, 150.0]);
+        assert_eq!(live[0].expected_id.as_deref(), Some("bar-note-2"));
+        assert_eq!(live[1].judgement, Judgement::Extra);
+        let final_result = score_session_with_tempo_map(
+            &expected,
+            &[observed_at(60.0), observed_at(150.0)],
+            60.0,
+            0.0,
+            0.0,
+            ScoringConfig::default(),
+            &[],
+        );
+        assert_eq!(final_result.matched, 2);
+        assert_eq!(final_result.results[0].observed_ms, Some(60.0));
+        assert_eq!(final_result.results[1].observed_ms, Some(150.0));
+    }
+
+    #[test]
+    fn live_and_final_can_disagree_on_wrong_instrument_after_a_match() {
+        let expected = vec![two_note_bar()[0].clone()];
+        let mut kick = observed_at(0.0);
+        kick.instrument = Instrument::Kick;
+        let sequence = BarSequence::new(&paradiddle(), &[0]);
+        let timing = LiveTimingContext {
+            session_start_ms: 0.0,
+            bpm: 60.0,
+            tempo_map: &[],
+            sequence: &sequence,
+            latency_ms: 0.0,
+            config: ScoringConfig::default(),
+        };
+        let mut matched = HashSet::new();
+        live_judgement_for_hit(&expected, &mut matched, &observed_at(0.0), &timing);
+        let live = live_judgement_for_hit(&expected, &mut matched, &kick, &timing);
+        assert_eq!(live.judgement, Judgement::Extra);
+        let final_result = score_session_with_tempo_map(
+            &expected,
+            &[observed_at(0.0), kick],
+            60.0,
+            0.0,
+            0.0,
+            ScoringConfig::default(),
+            &[],
+        );
+        assert_eq!(final_result.wrong_instrument, 1);
+        assert_eq!(
+            final_result.results[1].judgement,
+            Judgement::WrongInstrument
+        );
+    }
+
+    // Native measurement of the actual live matcher, not the browser callback.
+    // Deliberately opt-in; use a release build for meaningful timings.
+    #[test]
+    #[ignore]
+    fn scoring_study_live_matcher_benchmark() {
+        use std::time::Instant;
+        for (count, spacing) in [
+            (500, 1000.0),
+            (500, 250.0),
+            (500, 125.0),
+            (500, 62.5),
+            (1000, 31.25),
+            (2000, 62.5),
+            (10000, 62.5),
+        ] {
+            let template = two_note_bar()[0].clone();
+            let expected: Vec<_> = (0..count)
+                .map(|i| ExpectedHit {
+                    id: format!("n{i}-loop{}", i / 16 + 1),
+                    beat: i as f64 * spacing / 1000.0,
+                    notation_beat: i as f64 * spacing / 1000.0,
+                    ..template.clone()
+                })
+                .collect();
+            let sequence = BarSequence::new(&paradiddle(), &[0]);
+            let timing = LiveTimingContext {
+                session_start_ms: 0.0,
+                bpm: 60.0,
+                tempo_map: &[],
+                sequence: &sequence,
+                latency_ms: 0.0,
+                config: ScoringConfig::default(),
+            };
+            let mut matched = HashSet::new();
+            let mut samples = Vec::with_capacity(count);
+            for i in 0..count {
+                let hit = observed_at(i as f64 * spacing + 5.0);
+                let start = Instant::now();
+                std::hint::black_box(live_judgement_for_hit(
+                    &expected,
+                    &mut matched,
+                    &hit,
+                    &timing,
+                ));
+                samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            let p =
+                |fraction: f64| samples[((samples.len() - 1) as f64 * fraction).ceil() as usize];
+            println!(
+                "live count={count} spacing_ms={spacing:.1} p50_ms={:.4} p95_ms={:.4} p99_ms={:.4} max_ms={:.4}",
+                p(0.5),
+                p(0.95),
+                p(0.99),
+                p(1.0)
+            );
+        }
+    }
+
+    #[test]
     fn reference_snare_uses_only_snare_notes_in_the_active_segment() {
         let mut expected = two_note_bar();
         expected[0].velocity = 42;
