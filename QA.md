@@ -18,7 +18,7 @@ npm ci
 | Command                  | Scope                                                                                    |
 | ------------------------ | ---------------------------------------------------------------------------------------- |
 | `npm run qa:quick`       | ESLint, adopted Prettier scope, Rust formatting/checking, and Clippy                     |
-| `npm run qa:unit`        | Locked Rust workspace unit and integration tests                                         |
+| `npm run qa:unit`        | Locked Rust workspace and JavaScript presentation unit tests                             |
 | `npm run qa:security`    | High/critical npm advisories and RustSec advisories                                      |
 | `npm run qa:a11y`        | Production build plus focused Playwright/axe WCAG automation                             |
 | `npm run qa:browser`     | Production build plus functional and performance-correctness browser tests               |

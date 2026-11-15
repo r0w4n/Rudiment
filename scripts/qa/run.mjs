@@ -18,6 +18,11 @@ const checks = {
     args: ['clippy', '--workspace', '--all-targets', '--all-features', '--locked', '--', '-D', 'warnings'],
   },
   unit: { label: 'Rust unit and integration tests', command: 'cargo', args: ['test', '--workspace', '--locked'] },
+  'js-unit': {
+    label: 'JavaScript unit tests',
+    command: 'node',
+    args: ['--test', 'tests/unit/highway-controller.test.mjs'],
+  },
   build: { label: 'Production WASM/browser build', command: 'npm', args: ['run', 'build'] },
   'npm-audit': {
     label: 'npm dependency audit',
@@ -39,6 +44,7 @@ const checks = {
       'tests/e2e/server.spec.ts',
       'tests/e2e/rudiment.spec.ts',
       'tests/e2e/performance-correctness.spec.ts',
+      'tests/e2e/presentation.spec.ts',
       '--output=test-results/browser',
     ],
     dependsOn: ['build'],
@@ -59,7 +65,7 @@ const checks = {
 
 const profiles = {
   quick: ['eslint', 'format', 'rust-fmt', 'rust-check', 'rust-clippy'],
-  unit: ['unit'],
+  unit: ['unit', 'js-unit'],
   security: ['npm-audit', 'cargo-audit'],
   browser: ['build', 'browser'],
   a11y: ['build', 'a11y'],
@@ -71,6 +77,7 @@ const profiles = {
     'rust-check',
     'rust-clippy',
     'unit',
+    'js-unit',
     'build',
     'npm-audit',
     'cargo-audit',
@@ -84,6 +91,7 @@ const profiles = {
     'rust-check',
     'rust-clippy',
     'unit',
+    'js-unit',
     'build',
     'npm-audit',
     'cargo-audit',

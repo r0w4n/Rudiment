@@ -2,6 +2,7 @@ import * as Tone from 'tone';
 import { WebMidi } from 'webmidi';
 import { openDB } from 'idb';
 import { Renderer, Stave, StaveNote, GraceNote, GraceNoteGroup, Voice, Formatter, Beam, Annotation, AnnotationVerticalJustify, Articulation, BarlineType, Dot, Fraction, Tuplet } from 'vexflow';
+import { createPresentationHost } from './presentation-host.mjs';
 
 const DB_NAME = 'rudiment';
 const DB_VERSION = 2;
@@ -71,6 +72,7 @@ const performanceProfile={
   reset(){this.samples.clear();},
   snapshot(){return Object.fromEntries([...this.samples].map(([name,values])=>[name,[...values]]));}
 };
+const presentation=createPresentationHost(()=>audio.activeRun?{beat:audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats,tempoBpm:Tone.getTransport().bpm.value}:null);
 function tempoAtBeat(beat,map,initialBpm){let bpm=initialBpm;for(const change of map){if(change.beat>beat)break;bpm=change.bpm;}return bpm;}
 function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),within=beat-bars*meter;return `${bars}:${within}:0`;}
 
@@ -326,7 +328,7 @@ const audio = {
     }
   },
   stop() {
-    if(this.activeRun)this.lastBeat=this.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-this.activeRun.countBeats;
+    if(this.activeRun){this.lastBeat=this.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-this.activeRun.countBeats;if(presentation.isActive())presentation.position(this.lastBeat,Tone.getTransport().bpm.value);}
     this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
     const transport = Tone.getTransport(); transport.stop(); transport.cancel(0); transport.seconds = 0;
     for(const source of this.scheduledVoices){
@@ -392,6 +394,7 @@ const audio = {
     const initialBeat=offset-countBeats;
     this.lastBeat=initialBeat;
     onFrame(initialBeat,performance.now(),runPerformance);
+    if(presentation.isActive())presentation.position(initialBeat,transport.bpm.value);
     transport.start(startDelay ? `+${startDelay}` : undefined);
     let lastStateFrame=-Infinity;
     let lastAnimationFrame=performance.now();
@@ -417,6 +420,7 @@ const audio = {
         if(this.activeRun)this.activeRun.lastDisplayBar=displayBar;
       }
       updateScore(scoreBeat,undefined,true);
+      if(presentation.isActive())presentation.position(beat,transport.bpm.value);
       visualMetronome.render(beat,options.meter,subdivision,now);
       // UI counters and scoring state do not need 60 updates per second. Keep
       // the playhead on every display frame, independent of the WASM work.
@@ -1022,6 +1026,7 @@ function trapDialogTab(event,selector){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
+  bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>presentation.unbind(),presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:()=>presentation.exerciseChanged(),presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),

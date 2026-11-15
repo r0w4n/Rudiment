@@ -182,6 +182,18 @@ extern "C" {
     fn stop_audio();
     #[wasm_bindgen(js_namespace = rudiment, js_name = currentAudioBeat)]
     fn current_audio_beat() -> f64;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = bindPresentationSnapshot)]
+    fn bind_presentation_snapshot(callback: &Function);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = unbindPresentation)]
+    fn unbind_presentation();
+    #[wasm_bindgen(js_namespace = rudiment, js_name = presentationActive)]
+    fn presentation_active() -> bool;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = presentationExerciseChanged)]
+    fn presentation_exercise_changed();
+    #[wasm_bindgen(js_namespace = rudiment, js_name = presentationConfiguration)]
+    fn presentation_configuration(value: JsValue);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = presentationJudgements)]
+    fn presentation_judgements(value: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = startCalibration)]
     fn start_calibration() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = renderScore)]
@@ -381,6 +393,8 @@ struct MidiEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LiveJudgement {
     expected_id: Option<String>,
+    #[serde(default)]
+    iteration: Option<usize>,
     expected_beat: Option<f64>,
     actual_beat: Option<f64>,
     instrument: Instrument,
@@ -966,6 +980,11 @@ fn live_judgement_for_hit(
         let judgement = context.config.classify(error_ms);
         return LiveJudgement {
             expected_id: Some(display_expected_id(&hit.id)),
+            iteration: hit
+                .id
+                .rsplit_once("-loop")
+                .and_then(|(_, suffix)| suffix.parse::<usize>().ok())
+                .and_then(|value| value.checked_sub(1)),
             expected_beat: Some(context.sequence.display_beat(hit.beat)),
             actual_beat: Some(context.sequence.display_beat(actual_beat)),
             instrument: observed.instrument,
@@ -984,6 +1003,7 @@ fn live_judgement_for_hit(
     });
     LiveJudgement {
         expected_id: None,
+        iteration: None,
         expected_beat: None,
         actual_beat: Some(
             context
@@ -1311,6 +1331,68 @@ fn App() -> impl IntoView {
     let on_time_ms = RwSignal::new(DEFAULT_GOOD_MS);
     let excellent_ms = RwSignal::new(DEFAULT_PERFECT_MS);
     let runtime_tempo_map = RwSignal::new(scaled_tempo_map(&paradiddle(), 1, 60.0));
+
+    // The optional presentation renderer reads the same state as notation.
+    // Its position is supplied by the existing Tone frame in the bridge, not
+    // by a reactive per-frame effect or an additional transport subscription.
+    let presentation_config = move || {
+        let sequence = bar_sequence.get_untracked();
+        let repetitions = if loops.get_untracked() == 0 {
+            CONTINUOUS_LOOP_CHUNK
+        } else {
+            loops.get_untracked()
+        };
+        let position = progress.get_untracked();
+        serde_json::json!({
+            "bars": sequence.bars,
+            "endBeat": sequence.origin + sequence.length() * f64::from(repetitions),
+            "position": if position < 0.0 { sequence.origin } else { position },
+            "phase": phase.get_untracked(),
+            "tempoBpm": bpm.get_untracked(),
+            "loops": loops.get_untracked(),
+            "repeatUntilGood": repeat_bar_until_good.get_untracked(),
+            "barAttempt": bar_attempt.get_untracked(),
+        })
+    };
+    let snapshot = Closure::wrap(Box::new(move || -> JsValue {
+        json_compatible(&serde_json::json!({
+            "exercise": exercise.get_untracked(),
+            "config": presentation_config(),
+            "judgements": live.get_untracked(),
+        }))
+        .unwrap_or(JsValue::NULL)
+    }) as Box<dyn FnMut() -> JsValue>);
+    bind_presentation_snapshot(snapshot.as_ref().unchecked_ref());
+    let _snapshot = StoredValue::new_local(snapshot);
+    on_cleanup(unbind_presentation);
+    Effect::new(move |_| {
+        exercise.track();
+        if presentation_active() {
+            presentation_exercise_changed();
+        }
+    });
+    Effect::new(move |_| {
+        selected_bars.track();
+        exercise.track();
+        loops.track();
+        repeat_bar_until_good.track();
+        bar_attempt.track();
+        phase.track();
+        bpm.track();
+        if presentation_active()
+            && let Ok(value) = json_compatible(&presentation_config())
+        {
+            presentation_configuration(value);
+        }
+    });
+    Effect::new(move |_| {
+        live.track();
+        if presentation_active()
+            && let Ok(value) = json_compatible(&live.get_untracked())
+        {
+            presentation_judgements(value);
+        }
+    });
 
     let save_current_settings = Rc::new(move || {
         persist_settings(Settings {
@@ -2515,6 +2597,15 @@ fn App() -> impl IntoView {
         }
         if stats_open.get_untracked() {
             match event.key().to_lowercase().as_str() {
+                "tab" => {
+                    // Focus can be on the page body after a programmatic blur.
+                    // The dialog-local handler cannot see that event, so keep
+                    // keyboard navigation inside the open modal here as well.
+                    if !event.default_prevented() {
+                        trap_dialog_tab(&event, "#stats-dialog");
+                    }
+                    return;
+                }
                 "escape" => {
                     event.prevent_default();
                     stats_open.set(false);

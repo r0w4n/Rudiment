@@ -819,6 +819,9 @@ test('a keyboard hit dismisses Statistics without starting practice', async ({ p
   await page.getByRole('button', { name: 'Stats' }).click();
   const stats = page.getByRole('dialog', { name: 'Performance history' });
   await expect(stats).toBeVisible();
+  // The dialog moves focus on its next frame; wait for that before simulating
+  // focus leaving the modal so a later deferred focus cannot race Space.
+  await expect(page.locator('#stats-close')).toBeFocused();
   await page.evaluate(()=>(document.activeElement as HTMLElement | null)?.blur());
   await page.keyboard.press('Space');
   await expect(stats).toBeVisible();
