@@ -194,6 +194,12 @@ extern "C" {
     fn presentation_configuration(value: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = presentationJudgements)]
     fn presentation_judgements(value: JsValue);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = savedHighwayMode)]
+    fn saved_highway_mode() -> bool;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = saveHighwayMode)]
+    fn save_highway_mode(selected: bool);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = setHighwayMode)]
+    fn set_highway_mode(selected: bool);
     #[wasm_bindgen(js_namespace = rudiment, js_name = startCalibration)]
     fn start_calibration() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = renderScore)]
@@ -1275,6 +1281,7 @@ fn App() -> impl IntoView {
     let snare_muted = RwSignal::new(false);
     let snare_reference_mode = RwSignal::new("hits".to_string());
     let app_mode = RwSignal::new(AppMode::Practice);
+    let highway = RwSignal::new(saved_highway_mode());
     let loops = RwSignal::new(1u8);
     let repeat_bar_until_good = RwSignal::new(false);
     let repeat_tolerance = RwSignal::new(RepeatTolerance::Standard);
@@ -1365,9 +1372,10 @@ fn App() -> impl IntoView {
     bind_presentation_snapshot(snapshot.as_ref().unchecked_ref());
     let _snapshot = StoredValue::new_local(snapshot);
     on_cleanup(unbind_presentation);
+    Effect::new(move |_| set_highway_mode(highway.get()));
     Effect::new(move |_| {
         exercise.track();
-        if presentation_active() {
+        if presentation_active() || highway.get_untracked() {
             presentation_exercise_changed();
         }
     });
@@ -2490,7 +2498,7 @@ fn App() -> impl IntoView {
             });
         if let Some(control) = control
             && control
-                .closest(".start-button, .restart-button")
+                .closest(".start-button, .restart-button, .visualisation-selector")
                 .ok()
                 .flatten()
                 .is_none()
@@ -2779,10 +2787,14 @@ fn App() -> impl IntoView {
           <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label=move || format!("MIDI connection: {}",midi_status.get()) on:click={let connect=connect_action.clone();move |_|connect()}><span class="status-dot"></span>{move || midi_status.get()}</button>
         </header>
 
-          <section class="workspace">
+          <section class=move || if highway.get(){"workspace highway-workspace"}else{"workspace"}>
               <aside class=move || if welcome.get(){"welcome"}else{"welcome hidden"}><div><strong>              "A paradiddle is ready."</strong><span>"Space pauses; R restarts."</span></div><button aria-label="Got it, dismiss welcome hint" on:click=move |_|{welcome.set(false);save_welcome();}>"Got it"</button></aside>
-            <section id="score-card" class="score-card">
+            <section id="score-card" class=move || if highway.get(){"score-card highway-active"}else{"score-card"}>
               <div class="score-meta">
+                <div class="visualisation-selector" role="group" aria-label="Musical visualisation">
+                  <button type="button" class=move || if !highway.get(){"active"}else{""} aria-pressed=move || (!highway.get()).to_string() on:click=move |_|{highway.set(false);save_highway_mode(false);}>"Notation"</button>
+                  <button type="button" class=move || if highway.get(){"active"}else{""} aria-pressed=move || highway.get().to_string() on:click=move |_|{highway.set(true);save_highway_mode(true);}>"Highway"</button>
+                </div>
                 <div class="metronome-context">
                   <button id="visual-metronome" class="visual-metronome" type="button" aria-label="Metronome settings, READY" aria-haspopup="dialog" aria-controls="metronome-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Metronome)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Metronome){None}else{Some(ContextPopup::Metronome)})>
                     <span class="visual-metronome-sweep" aria-hidden="true"><i></i></span>
@@ -2805,6 +2817,10 @@ fn App() -> impl IntoView {
                 </details>
               </div>
               <div id="notation" class="notation" role="region" aria-label="Musical notation" aria-live="off" tabindex="0"></div>
+              <div id="highway" class=move || if highway.get(){"highway-view"}else{"highway-view hidden"} role="region" aria-label="Snare highway">
+                <div class="highway-lane-label">"SNARE"</div><div id="highway-timeline" class="highway-timeline"></div>
+                <p id="highway-error" class="highway-error hidden" role="status"></p>
+              </div>
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
               <div class="position-row">
                 <div class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-control open"}else{"bar-selection-control"}>

@@ -1,5 +1,201 @@
 import { expect, test } from '@playwright/test';
 
+test('Highway replaces notation, persists and keeps the transport running', async ({ page }, testInfo) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(0.1);
+  const before = await page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat);
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Highway', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#highway svg')).toBeVisible();
+  expect((await page.locator('#highway-timeline').boundingBox())!.height).toBeGreaterThan(100);
+  await expect(page.locator('#notation')).toBeHidden();
+  await expect(page.locator('#score-card')).toHaveCSS('background-color', 'rgb(23, 28, 25)');
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(before);
+  expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('highway-desktop.png') });
+  await page.setViewportSize({ width: 1180, height: 820 });
+  await expect.poll(async () => (await page.locator('#highway-timeline').boundingBox())!.width).toBeLessThan(1100);
+  await page.screenshot({ path: testInfo.outputPath('highway-ipad-landscape.png') });
+  await page.getByRole('button', { name: 'Notation', exact: true }).click();
+  await expect(page.locator('#notation svg')).toBeVisible();
+  await expect(page.locator('#highway')).toBeHidden();
+  expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  for (let index = 0; index < 3; index++) {
+    await page.getByRole('button', { name: 'Highway', exact: true }).click();
+    await expect(page.locator('#highway svg')).toHaveCount(1);
+    await page.getByRole('button', { name: 'Notation', exact: true }).click();
+    await expect(page.locator('#highway svg')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).rudiment.presentationActive())).toBe(false);
+  }
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await page.reload();
+  await expect(page.locator('#highway svg')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Highway', exact: true })).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('Highway uses the transport position beneath a fixed centre playhead', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await expect(page.locator('.highway-note').first()).toBeVisible();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  const measure = () => page.evaluate(() => {
+    const app = (window as any).rudiment;
+    const viewport = document.querySelector('#highway-timeline')!.getBoundingClientRect();
+    const line = document.querySelector('.highway-playhead line')!.getBoundingClientRect();
+    const note = document.querySelector('.highway-note[data-note-id="p-0-2"]')!;
+    const marker = note.querySelector('rect')!.getBoundingClientRect();
+    return { beat: app.audioDiagnostics().currentBeat, width: viewport.width, centre: viewport.left + viewport.width / 2, line: line.left, note: marker.left + marker.width / 2, expected: Number(note.getAttribute('data-position')) };
+  });
+  const first = await measure();
+  await page.waitForTimeout(300);
+  const second = await measure();
+  expect(Math.abs(first.line - first.centre)).toBeLessThan(1);
+  expect(Math.abs(second.line - second.centre)).toBeLessThan(1);
+  expect(second.note).toBeLessThan(first.note);
+  expect(Math.abs(second.note - (second.centre + (second.expected - second.beat) * second.width / 10))).toBeLessThan(8);
+  await page.getByRole('button', { name: /Pause/ }).click();
+  const paused = await measure();
+  await page.waitForTimeout(150);
+  expect((await measure()).note).toBe(paused.note);
+  await page.locator('#visual-metronome').click();
+  await page.locator('#metronome-popover').getByLabel('Tempo in BPM').fill('120');
+  await page.getByLabel('Close metronome settings').click();
+  await page.getByRole('button', { name: /Resume/ }).click();
+  await expect.poll(async () => (await measure()).note).toBeLessThan(paused.note);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().transportBpm)).toBe(120);
+  const faster = await measure();
+  expect(Math.abs(faster.note - (faster.centre + (faster.expected - faster.beat) * faster.width / 10))).toBeLessThan(8);
+});
+
+test('Highway colours only the scored repetition and disposes when switched away', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.locator('#visual-metronome').click();
+  await page.locator('#metronome-popover').getByLabel('Tempo in BPM').fill('240');
+  await page.getByLabel('Close metronome settings').click();
+  await page.getByLabel('Select bars').click();
+  await page.getByLabel('Bar 1', { exact: true }).check();
+  await page.getByLabel('Close bar selection').click();
+  await page.getByLabel('Loops').selectOption('2');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  const hit = async (target: number) => page.evaluate(async (beat) => {
+    const app = (window as any).rudiment;
+    while (app.audioDiagnostics().currentBeat < beat - 0.04) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+  }, target);
+  await hit(1);
+  const first = page.locator('.highway-note[data-note-id="p-0-2"][data-iteration="0"]');
+  await expect(first).toHaveAttribute('data-judgement', /perfect|good|early|late/);
+  await expect(first.locator('.highway-judgement')).toHaveText(/P|G|E|L/);
+  const second = page.locator('.highway-note[data-note-id="p-0-2"][data-iteration="1"]');
+  await expect(second).toHaveAttribute('data-judgement', 'expected');
+  await hit(5);
+  await expect(second).toHaveAttribute('data-judgement', /perfect|good|early|late/);
+  const assessment = await second.getAttribute('data-judgement');
+  await page.getByRole('button', { name: 'Notation', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).rudiment.presentationActive())).toBe(false);
+  await expect(page.locator('#highway svg')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await expect(second).toHaveAttribute('data-judgement', assessment!);
+});
+
+test('unsupported instruments are announced and a later snare exercise remounts', async ({ page }) => {
+  const track = [0, 0x99, 36, 100, 0x83, 0x60, 0x99, 38, 100, 0x83, 0x60, 0xff, 0x2f, 0];
+  const midi = Buffer.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 1, 0xe0, 0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, track.length, ...track]);
+  await page.route('**/unsupported-highway.mid', route => route.fulfill({ status: 200, body: midi, contentType: 'audio/midi' }));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await expect(page.locator('#highway svg')).toBeVisible();
+  await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('unsupported-highway.mid', 'Unsupported drums'));
+  await expect(page.locator('#highway-error')).toContainText('kick');
+  await expect(page.locator('#highway-error')).toBeVisible();
+  await expect(page.locator('#highway svg')).toHaveCount(0);
+  await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('public/exercises/rudiments/06_single_paradiddle.mid', 'Single Paradiddle'));
+  await expect(page.locator('#highway-error')).toBeHidden();
+  await expect(page.locator('#highway svg')).toBeVisible();
+});
+
+test('Highway header and timing legend remain usable at narrow widths', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  const selector = (await page.locator('.visualisation-selector').boundingBox())!;
+  const metronome = (await page.locator('#visual-metronome').boundingBox())!;
+  expect(metronome.x + metronome.width).toBeLessThanOrEqual(selector.x);
+  await expect(page.getByLabel('Timing feedback key')).toBeVisible();
+  await expect(page.getByLabel('Timing feedback key')).toBeInViewport();
+  expect((await page.getByRole('button', { name: 'Highway', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+});
+
+test('Highway repositions stable note IDs when a noncontiguous selection changes', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await page.getByLabel('Select bars').click();
+  await page.getByLabel('Bar 1', { exact: true }).check();
+  await page.getByLabel('Bar 3', { exact: true }).check();
+  const note = page.locator('.highway-note[data-note-id="p-2-0"][data-iteration="0"]');
+  await expect(note).toHaveAttribute('data-position', '4');
+  await page.getByLabel('Bar 1', { exact: true }).uncheck();
+  await expect(note).toHaveAttribute('data-position', '8');
+  await page.getByLabel('Close bar selection').click();
+});
+
+test('grace strokes remain distinct without changing their onset positions', async ({ page }, testInfo) => {
+  await page.goto('/');
+  await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('public/exercises/rudiments/05_hard_flams.mid', 'Hard Flams'));
+  await expect(page.locator('.exercise-heading strong')).toHaveText('Hard Flams');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await expect(page.locator('.highway-note[data-grace="true"]').first()).toBeVisible();
+  const pairs = await page.evaluate(() => {
+    const notes = [...document.querySelectorAll('.highway-note')];
+    return notes.flatMap((note, index) => {
+      const next = notes[index + 1];
+      if (note.getAttribute('data-grace') !== 'true' || !next || next.getAttribute('data-grace') !== 'false') return [];
+      const gap = Number(next.getAttribute('data-position')) - Number(note.getAttribute('data-position'));
+      if (gap <= 0 || gap >= 0.15) return [];
+      const grace = note.querySelector('rect')!.getBoundingClientRect();
+      const principal = next.querySelector('rect')!.getBoundingClientRect();
+      return [{ gap, xGap: principal.x - grace.x, verticalGap: principal.top - grace.bottom }];
+    });
+  });
+  expect(pairs.length).toBeGreaterThan(0);
+  for (const pair of pairs) {
+    expect(pair.xGap).toBeGreaterThan(0);
+    expect(pair.verticalGap).toBeGreaterThanOrEqual(0);
+  }
+  await page.screenshot({ path: testInfo.outputPath('highway-flams.png') });
+  await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('public/exercises/rudiments/09_single_drag.mid', 'Single Drag'));
+  await expect(page.locator('.exercise-heading strong')).toHaveText('Single Drag');
+  await expect(page.locator('.highway-note[data-grace-row="2"]').first()).toBeVisible();
+  const drag = await page.evaluate(() => {
+    const notes = [...document.querySelectorAll('.highway-note[data-grace="true"]')];
+    return notes.flatMap((note, index) => {
+      const next = notes[index + 1];
+      if (!next || Number(next.getAttribute('data-position')) - Number(note.getAttribute('data-position')) >= 0.15) return [];
+      const first = note.querySelector('rect')!.getBoundingClientRect();
+      const second = next.querySelector('rect')!.getBoundingClientRect();
+      return [{ xGap: second.x - first.x, verticalGap: first.top - second.bottom }];
+    });
+  });
+  expect(drag.length).toBeGreaterThan(0);
+  for (const pair of drag) {
+    expect(pair.xGap).toBeGreaterThan(0);
+    expect(pair.verticalGap).toBeGreaterThanOrEqual(0);
+  }
+});
+
 test('real transport, noncontiguous selection and Rust feedback reach a mounted renderer', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('#notation svg')).toBeVisible();

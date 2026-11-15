@@ -57,12 +57,12 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
       for (let barIndex = firstBar; barIndex <= lastBar; barIndex++) {
         const barStart = base + barIndex * exercise.barBeats;
         if (barStart > end || barStart + exercise.barBeats < start || barStart >= sequence.endBeat) continue;
-        // Quarter-beat subdivisions, in quarter-note beat units. Include the
-        // bar line separately so unusual time signatures retain exact bars.
-        for (let offset = 0; offset < exercise.barBeats - EPSILON; offset += 0.25) {
+        // Denominator-note beats, expressed in the transport's quarter-note units.
+        const subdivision = exercise.beatUnit / 4;
+        for (let offset = 0; offset < exercise.barBeats - EPSILON; offset += subdivision) {
           const beat = barStart + offset;
           if (beat < start - EPSILON || beat > end + EPSILON || beat >= sequence.endBeat) continue;
-          const kind = offset < EPSILON ? 'bar' : Math.abs(offset - Math.round(offset)) < EPSILON ? 'beat' : 'subdivision';
+          const kind = offset < EPSILON ? 'bar' : Math.abs(offset / exercise.beatUnit - Math.round(offset / exercise.beatUnit)) < EPSILON ? 'beat' : 'subdivision';
           boundaries.push(Object.freeze({ position: beat, kind, bar: sequence.bars[barIndex] + 1 }));
         }
       }
@@ -118,12 +118,12 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
         return Object.freeze({
           id: hit.id, instrument: hit.instrument, beat: hit.beat, notationBeat: hit.notation_beat ?? hit.beat,
           duration: hit.raw_duration_ticks == null ? null : hit.raw_duration_ticks / source.ticks_per_beat,
-          hand: hit.hand, accent: Boolean(hit.accent),
+          hand: hit.hand, accent: Boolean(hit.accent), grace: Boolean(hit.grace),
         });
       });
       const lastBeat = notes.reduce((last, note) => Math.max(last, note.beat), 0);
       // Match the application's exercise_beats convention at bar boundaries.
-      exercise = { barBeats, barCount: Math.max(1, Math.ceil((lastBeat + 0.001) / barBeats)), notes };
+      exercise = { barBeats, beatUnit: 4 / source.meter_denominator, barCount: Math.max(1, Math.ceil((lastBeat + 0.001) / barBeats)), notes };
       judgements = new Map();
       setSequence([], undefined);
       position = sequence.origin;

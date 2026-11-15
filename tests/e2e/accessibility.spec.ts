@@ -35,6 +35,16 @@ async function expectNoWcagViolations(page: Page, context: string, disabledRules
   ).toEqual([]);
 }
 
+test('Highway selector and musical feedback are accessible', async ({ page }) => {
+  await page.goto('/');
+  const highway = page.getByRole('button', { name: 'Highway', exact: true });
+  await highway.focus();
+  await page.keyboard.press('Enter');
+  await expect(highway).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.highway-note').first()).toHaveAttribute('aria-label', /snare.*expected/);
+  await expectNoWcagViolations(page, 'Highway');
+});
+
 test('loop control names include the selected visible option', async ({ page }) => {
   await page.goto('/');
   const loops = page.getByRole('combobox', { name: /Loops/ });

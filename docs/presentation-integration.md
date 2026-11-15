@@ -16,16 +16,16 @@ exercise/scoring state machine.
 
 The controller projects the selected bars, including noncontiguous bars and
 repetitions, into a beat-based visible range. The immutable snapshot contains
-lanes, note IDs, source and sequence positions, durations, sticking, accents,
+lanes, note IDs, source and sequence positions, durations, sticking, accents, grace flags,
 bar/beat boundaries, playback phase and tempo, selection and loop iteration,
 and the app's supplied judgements. Bar membership uses the same written-onset
 rule as Rust's expanded sequence; note timing still uses the original MIDI
 onset. Rust supplies the matched repetition from the actual scored expected ID,
 so early hits belonging to the next loop need not be guessed by a renderer.
 
-## Future renderer
+## SVG Highway renderer
 
-A future SVG, Canvas or PixiJS implementation can call
+A renderer implementation can call
 `rudiment.mountPresentationRenderer(renderer, lanes)` after app startup. The
 renderer supplies `initialize()`, `update(presentation)`, `resize(viewport)`
 and `dispose()`. The returned handle forwards `resize(viewport)` and `dispose()`;
@@ -40,9 +40,13 @@ exercise with unsupported instruments fails explicitly. If a later exercise is
 unsupported, the optional renderer is detached. Future lanes require
 configuration and rendering support, not another MIDI parser or clock.
 
-This is not a highway implementation. The current live assessment path emits
-physical hit outcomes but does not emit live missed-note judgements; a future
-milestone must integrate those from authoritative scoring rather than infer
-them in the renderer. The present snapshot construction while mounted has not
-been profiled as an SVG highway workload, and simulated browser tests do not
-establish physical MIDI or audible latency.
+The built-in SVG Highway mounts only when selected and uses the existing host.
+It draws bounded, keyed note and grid elements under a fixed centred playhead;
+resize observation is owned and disconnected by the mount. The current live
+assessment path emits physical hit outcomes but does not emit live missed-note
+judgements. The renderer does not invent them; final session results still
+contain authoritative misses. The final scorer uses optimal one-to-one matching,
+so expiring an unmatched live note in the renderer would not necessarily agree
+with the final result. A future live-miss integration must originate in the
+assessment lifecycle and account for matching windows, latency and repetitions.
+Simulated browser tests do not establish physical MIDI or audible latency.

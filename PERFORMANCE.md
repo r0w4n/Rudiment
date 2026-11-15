@@ -6,12 +6,13 @@ Rudiment profiles its production WASM/Leptos, VexFlow, Tone.js and Web MIDI path
 
 MIDI files are fetched/file-read in `web/js/bridge.js`, parsed and quantised by `crates/core`, stored in Leptos state, then engraved by VexFlow. During practice, Tone.Transport schedules metronome/reference audio independently of `requestAnimationFrame`. Web MIDI or keyboard events cross into the Leptos hit handler, Rust matches and classifies them, a next-frame bridge update paints noteheads/extra-hit markers, and the slower UI tick updates counters and session state. Completion runs the deterministic full-session matcher and persists the summary to IndexedDB.
 
-| Concern                                                                        | Implementation                             |
-| ------------------------------------------------------------------------------ | ------------------------------------------ |
-| MIDI parsing, quantisation, tempo map, scoring                                 | `crates/core/src/lib.rs`                   |
-| App state, repetition, transitions, keyboard input, persistence calls          | `web/src/main.rs`                          |
-| Web MIDI, audio scheduling, notation, playhead, scrolling, feedback, IndexedDB | `web/js/bridge.js`                         |
-| Real-browser workloads and reports                                             | `scripts/performance`, `tests/performance` |
+| Concern                                                                        | Implementation                                            |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------- |
+| MIDI parsing, quantisation, tempo map, scoring                                 | `crates/core/src/lib.rs`                                  |
+| App state, repetition, transitions, keyboard input, persistence calls          | `web/src/main.rs`                                         |
+| Web MIDI, audio scheduling, notation, playhead, scrolling, feedback, IndexedDB | `web/js/bridge.js`                                        |
+| Optional Highway presentation and SVG drawing                                  | `web/js/highway-controller.mjs`, `web/js/highway-svg.mjs` |
+| Real-browser workloads and reports                                             | `scripts/performance`, `tests/performance`                |
 
 ## Commands and tiers
 
@@ -33,6 +34,8 @@ Tier A is suitable for pull requests. Tier B is on-demand and release-facing. Ti
 `scripts/generate-fixtures.mjs` deterministically creates 60, 120, 180 and 240 BPM SMFs: 64-note small, 480-note medium, 2,000-note large, 10,000-note extreme, and a dense 240 BPM exercise containing eighth-subdivision bursts and simultaneous kick/snare hits. The full suite combines those imports with rapid MIDI/keyboard traffic, feedback painting, playhead frames, scrolling, modal use, and pause/resume/restart transitions.
 
 Interaction workloads also select bars 2, 3 and 5, start two repetitions and wait for the jump to bar 5. The recorded `noncontiguous.jumpResponseMs` is a diagnostic musical-duration observation, not a latency budget; it is captured after the existing gated measurements and does not change their baseline workload.
+
+After those existing measurements the harness selects Highway and records the actual SVG renderer's per-update work separately as `highway.renderer_update_ms`. This diagnostic is not a notation or controller-only measurement and is not yet a gated baseline. The dense kick/snare fixture is explicitly reported as unsupported by the snare-only Highway rather than silently measured as a snare exercise.
 
 Directly observed values include callback work, import-to-render, notation rendering, score/feedback work, input-to-DOM-mutation latency, animation intervals, Long Tasks, response times, and Chromium precise heap size. Frame drops are estimated from intervals above 16.7 ms. `AudioContext.getOutputTimestamp()` helps align scheduled visual pulses, but the harness does not measure acoustic output, USB/driver latency, compositor-only work, or GC pauses unavailable through stable browser APIs.
 

@@ -143,7 +143,21 @@ async function runInteractions(page,fixtureId){
   await page.waitForFunction(()=>document.querySelector('#playhead')?.getAttribute('data-bar')==='4',null,{timeout:20_000});
   const noncontiguous={bars:[2,3,5],jumpResponseMs:Date.now()-selectionStart};
   await page.getByRole('button',{name:/Restart/}).click();
-  return {fixtureId,noncontiguous,measurements:{
+  // Measure the actual SVG renderer separately from notation and controller.
+  await page.getByRole('button',{name:'Highway',exact:true}).click();
+  await page.locator('#highway svg, #highway-error:not(.hidden)').first().waitFor();
+  let highway;
+  if(await page.locator('#highway-error').isVisible()){
+    highway={unsupported:await page.locator('#highway-error').innerText()};
+  }else{
+    await page.evaluate(()=>window.rudiment.resetPerformanceDiagnostics());
+    await page.getByRole('button',{name:/Start practice/}).click();
+    await page.waitForTimeout(3000);
+    const samples=await page.evaluate(()=>window.rudiment.performanceDiagnostics().highway_render_ms??[]);
+    highway={renderer_update_ms:summary(samples)};
+    await page.getByRole('button',{name:/Restart/}).click();
+  }
+  return {fixtureId,noncontiguous,highway,measurements:{
     midi_event_to_paint_ms:midiPaint,keyboard_event_to_paint_ms:keyboardPaint,scroll_call_ms:scroll,
     transition_response_ms:transition,modal_response_ms:modal,midi_callback_ms:diagnostics.midi_callback_ms??[],
     score_update_ms:diagnostics.score_update_ms??[],feedback_paint_work_ms:diagnostics.feedback_paint_work_ms??[],

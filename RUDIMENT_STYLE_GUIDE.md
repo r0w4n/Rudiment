@@ -15,8 +15,8 @@ Rudiment is a focused musical-practice application rather than a generic analyti
 
 ### Core principles
 
-1. **Music is primary.** The notation is the main content; surrounding controls should be visually quieter.
-2. **Dark frame, warm score.** Use dark, slightly green-biased chrome around a warm, paper-like notation surface.
+1. **Music is primary.** The selected musical visualisation is the main content; surrounding controls should be visually quieter.
+2. **Musical workspace surfaces.** Notation uses a warm, paper-like score; Highway uses a dark integrated timeline. Both retain the same green-biased shell, typography, spacing and controls.
 3. **One accent language.** Use mint/teal for primary actions, current selection, focus and related affordances; distinguish those roles using fill, stroke and intensity.
 4. **Consistent components.** Dialogs, drawers and popovers should share underlying tokens even when their layouts differ.
 5. **Clear live feedback.** Timing and note judgments must be understandable immediately, without depending solely on colour.
@@ -25,7 +25,7 @@ Rudiment is a focused musical-practice application rather than a generic analyti
 
 ### Scope
 
-Included: app shell, top toolbar, score canvas, notation status, exercise library, configuration drawer, practice-bars and metronome popovers, form controls, bottom action bar, timing legend, responsive behaviour, accessibility, interaction and QA.
+Included: app shell, top toolbar, notation and Highway workspaces, musical status, exercise library, configuration drawer, practice-bars and metronome popovers, form controls, bottom action bar, timing legend, responsive behaviour, accessibility, interaction and QA.
 
 Not established by screenshots: mobile designs, exact font families, implementation frameworks, animation timings, historical charts, error states, every dropdown option, and all practice/performance states. The specifications for these are recommendations or placeholders for source-code confirmation.
 
@@ -143,12 +143,12 @@ Avoid heavy box shadows on dark surfaces. Use restrained shadow only where spati
 
 ### 3.1 App shell
 
-**Observed:** A full-width dark app, with a top header, large ivory notation region, and a dedicated bottom action row.
+**Observed:** A full-width dark app, with a top header, large musical workspace, and a dedicated bottom action row.
 
 Desktop structure:
 
 1. **Header:** left brand mark and wordmark; central current-exercise title and supporting metadata; right MIDI connection indicator and icon actions (library, performance/stats, settings).
-2. **Main score area:** warm ivory canvas, internally containing status, rendered notation and bottom bar/progress indicators.
+2. **Musical workspace:** a warm ivory notation canvas or dark Highway, with shared status and bottom bar/progress indicators.
 3. **Bottom actions:** Restart (secondary), Start performance (dominant primary), and timing legend (supporting information).
 
 Maintain a stable shell as menus open. Background content under modal overlays should not jump or reflow.
@@ -157,7 +157,7 @@ Maintain a stable shell as menus open. Background content under modal overlays s
 
 - Align controls on a shared vertical centreline.
 - Use modest, balanced left/right padding (~24–40px desktop).
-- The current exercise block must remain visually secondary to the notation.
+- The current exercise block must remain visually secondary to the musical workspace.
 - Treat the MIDI-connection pill as a status indicator, **not** as the main CTA. Use an explicit connection state (“No MIDI drums detected”) with an appropriate icon or indicator.
 - Group icon buttons consistently, using equal footprints and gaps.
 - Badge counts, such as the library count, sit consistently on one corner of their icon.
@@ -307,6 +307,14 @@ Observed labels: **Perfect**, **Good**, **Early**, **Late**, **Missed** with gre
 - Treat the legend as informational, not as five actions.
 - Do not let dynamic feedback repaint large portions of the score unnecessarily.
 
+### 4.9 Highway and visualisation selector
+
+- Place a persistent, keyboard- and touch-operable Notation / Highway segmented control in the workspace header. Selected state is both visible and programmatically exposed; switching never changes the run.
+- Highway replaces the ivory score with the existing dark panel, raised lane and restrained border tokens. Keep the metronome, bar selection, progress, loops, transport and timing legend shared.
+- Show only configured instruments, initially one SNARE lane. Explain unsupported instruments explicitly. Keep the centred mint playhead fixed while notes and bar/beat grid move together, using the authoritative transport position.
+- Expected hits are mint, uniformly sized, with supplied sticking and accent marks only. Grace strokes stagger above the lane centre to remain distinct from nearby notes, without changing onset alignment. Assessed markers pair semantic timing-feedback colours with P/G/E/L or × and accessible text; never fabricate a miss or use feedback colours as decoration.
+- Keep bar numbers and beat lines subordinate to notes. Use responsive spacing, readable labels and touch targets without horizontal page overflow. Do not add decorative animation or a second clock.
+
 ---
 
 ## 5. Overlay rules
@@ -338,8 +346,8 @@ Observed labels: **Perfect**, **Good**, **Early**, **Late**, **Missed** with gre
 
 | Viewport | Suggested behaviour |
 |---|---|
-| ≥ 1200px | Full desktop header, broad score canvas, horizontal bottom actions + legend, two-column library cards |
-| 768–1199px | More compact header; score retains priority; bottom legend may move below main controls; library stays 2-column only when cards remain readable |
+| ≥ 1200px | Full desktop header, broad musical workspace, horizontal bottom actions + legend, two-column library cards |
+| 768–1199px | More compact header; music retains priority; bottom legend may move below main controls; library stays 2-column only when cards remain readable |
 | 480–767px | Header switches to a clearly designed compact arrangement; library single-column; drawer width nearly full; popovers constrained to screen and may stack form fields |
 | < 480px | Full-width safe-inset overlays, large accessible controls, notation tuned for narrow width, compact actions without horizontal overflow |
 
@@ -446,11 +454,12 @@ AppShell
 │  ├─ CurrentExerciseSummary
 │  ├─ MidiConnectionStatus
 │  └─ HeaderActions
-├─ NotationCanvas
+├─ MusicalWorkspace
+│  ├─ VisualisationSelector
 │  ├─ MetronomeTrigger
-│  ├─ ScoreViewport
+│  ├─ NotationViewport / HighwayViewport
 │  ├─ BarRangeTrigger
-│  └─ ScoreProgress
+│  └─ WorkspaceProgress
 └─ PerformanceActionBar
    ├─ RestartButton
    ├─ TransportButton
@@ -515,7 +524,8 @@ Choose the **repository's existing naming style** if it already defines equivale
 
 ### Fidelity
 
-- [ ] Main view retains the dark shell, warm score, centred status/metronome and prominent mint action.
+- [ ] Main view retains the dark shell, warm notation or dark Highway, centred status/metronome and prominent mint action.
+- [ ] Highway has a stationary centred playhead, moving beat-aligned notes, readable feedback and the shared workspace controls; switching preserves playback.
 - [ ] Library modal retains dark two-column card layout at desktop with stable pagination.
 - [ ] Drawer retains right-side dark presentation and clearly divided sections.
 - [ ] Both popovers use the same shared light-surface styling while remaining anchored to their triggers.
@@ -537,7 +547,7 @@ Choose the **repository's existing naming style** if it already defines equivale
 - [ ] Header actions never overlap or reorder unpredictably.
 - [ ] Library dialog and drawer remain navigable at narrow widths.
 - [ ] Popovers stay within viewport bounds, including near screen edges.
-- [ ] Main CTA and notation remain usable on tablet and mobile.
+- [ ] Main CTA, notation and Highway remain usable on tablet and mobile.
 - [ ] No settings form generates horizontal scrolling.
 
 ### Accessibility and performance

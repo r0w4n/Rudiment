@@ -2,7 +2,7 @@ import { createHighwayController } from './highway-controller.mjs';
 
 // Optional, synchronous tap into existing application events. No timers,
 // transport subscriptions, DOM observers or independent exercise state.
-export function createPresentationHost(currentPosition) {
+export function createPresentationHost(currentPosition, onError = () => {}) {
   let snapshot = null;
   let active = null;
   let timelineSignature = '';
@@ -23,6 +23,7 @@ export function createPresentationHost(currentPosition) {
     catch (error) {
       dispose();
       console.error('Presentation renderer detached', error);
+      try { onError(error); } catch (notificationError) { console.error('Presentation error notification failed', notificationError); }
     }
   }
 
@@ -49,6 +50,7 @@ export function createPresentationHost(currentPosition) {
       const controller = createHighwayController(renderer, lanes);
       try {
         controller.setExercise(state.exercise);
+        controller.setVisibleSpan(6, 6);
         configure(controller, state.config);
         controller.setJudgements(state.judgements);
       } catch (error) {

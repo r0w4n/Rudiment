@@ -109,3 +109,22 @@ test('forwards viewport changes and disposes exactly once', () => {
   assert.equal(calls.filter(call => call[0] === 'dispose').length, 1);
   assert.throws(() => controller.setPosition(1), /disposed/);
 });
+
+test('grid beats follow the meter denominator', () => {
+  const { controller, latest } = setup();
+  const source = exercise();
+  source.meter_numerator = 6;
+  source.meter_denominator = 8;
+  controller.setExercise(source);
+  assert.ok(latest().boundaries.some(boundary => boundary.position === 0.5 && boundary.kind === 'beat'));
+  assert.ok(latest().boundaries.some(boundary => boundary.position === 3 && boundary.kind === 'bar'));
+});
+
+test('preserves the domain grace-note flag for renderers', () => {
+  const { controller, latest } = setup();
+  const source = exercise();
+  source.hits[1].grace = true;
+  controller.setExercise(source);
+  assert.equal(latest().notes.find(note => note.id === 'note-1').grace, true);
+  assert.equal(latest().notes.find(note => note.id === 'note-0').grace, false);
+});

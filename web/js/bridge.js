@@ -3,6 +3,7 @@ import { WebMidi } from 'webmidi';
 import { openDB } from 'idb';
 import { Renderer, Stave, StaveNote, GraceNote, GraceNoteGroup, Voice, Formatter, Beam, Annotation, AnnotationVerticalJustify, Articulation, BarlineType, Dot, Fraction, Tuplet } from 'vexflow';
 import { createPresentationHost } from './presentation-host.mjs';
+import { createHighwaySvg } from './highway-svg.mjs';
 
 const DB_NAME = 'rudiment';
 const DB_VERSION = 2;
@@ -72,7 +73,34 @@ const performanceProfile={
   reset(){this.samples.clear();},
   snapshot(){return Object.fromEntries([...this.samples].map(([name,values])=>[name,[...values]]));}
 };
-const presentation=createPresentationHost(()=>audio.activeRun?{beat:audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats,tempoBpm:Tone.getTransport().bpm.value}:null);
+const presentation=createPresentationHost(()=>audio.activeRun?{beat:audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats,tempoBpm:Tone.getTransport().bpm.value}:null,highwayError);
+let highwayHandle=null,highwayObserver=null,highwaySelected=false;
+function highwayError(error){
+  highwayObserver?.disconnect();highwayObserver=null;highwayHandle=null;
+  const message=document.getElementById('highway-error');
+  if(message){message.textContent=`Highway unavailable: ${error instanceof Error?error.message:String(error)}. Switch to Notation to view this exercise.`;message.classList.remove('hidden');}
+}
+function mountHighway(){
+  const viewport=document.getElementById('highway-timeline'),message=document.getElementById('highway-error');
+  if(!viewport||highwayHandle)return;
+  if(message){message.textContent='';message.classList.add('hidden');}
+  try{
+    highwayHandle=presentation.mount(createHighwaySvg(viewport,performanceProfile.enabled?value=>performanceProfile.record('highway_render_ms',value):null));
+    const resize=()=>{const rect=viewport.getBoundingClientRect();highwayHandle?.resize({width:rect.width,height:rect.height});};
+    highwayObserver=new ResizeObserver(resize);highwayObserver.observe(viewport);resize();
+  }catch(error){highwayHandle?.dispose();highwayError(error);}
+}
+function setHighwayMode(selected){
+  highwaySelected=selected;
+  if(selected)mountHighway();
+  else{highwayObserver?.disconnect();highwayObserver=null;highwayHandle?.dispose();highwayHandle=null;}
+}
+function highwayExerciseChanged(){
+  presentation.exerciseChanged();
+  if(highwaySelected&&!presentation.isActive())mountHighway();
+}
+function savedHighwayMode(){try{return localStorage.getItem('rudiment-visualisation')==='highway';}catch{return false;}}
+function saveHighwayMode(selected){try{localStorage.setItem('rudiment-visualisation',selected?'highway':'notation');}catch{/* Storage is optional. */}}
 function tempoAtBeat(beat,map,initialBpm){let bpm=initialBpm;for(const change of map){if(change.beat>beat)break;bpm=change.bpm;}return bpm;}
 function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),within=beat-bars*meter;return `${bars}:${within}:0`;}
 
@@ -1026,7 +1054,7 @@ function trapDialogTab(event,selector){
 function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
 window.rudiment={
-  bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>presentation.unbind(),presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:()=>presentation.exerciseChanged(),presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),
+  bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
