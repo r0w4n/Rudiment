@@ -205,7 +205,7 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .loop-control{justify-self:end;box-sizing:border-box;width:auto;max-width:100%;height:26px;padding:0;border:0;background:transparent;color:#56615b;font:700 10px Inter;letter-spacing:.07em;text-align:right;text-align-last:right;cursor:pointer;appearance:none;-webkit-appearance:none}
 .loop-control:hover,.loop-control:focus-visible{color:#287d69}
 .score-measure-number.selected-bar-number{fill:#187c64!important;font-weight:800}
-.score-bar-highlight{fill:transparent;pointer-events:none}
+.score-bar-highlight{fill:transparent;stroke:none;pointer-events:none}
 .score-bar-highlight.selected{fill:#2c9b7c;fill-opacity:.11}
 .score-bar-highlight:focus-visible{stroke:#246c5b;stroke-width:2;outline:none}
 

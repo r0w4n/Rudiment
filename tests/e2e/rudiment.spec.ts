@@ -646,6 +646,21 @@ test('keyboard calibration hits still work with settings open',async({page})=>{
   await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
 });
 
+test('bar selection has no surrounding lines except for keyboard focus',async({page})=>{
+  await page.goto('/');
+  const first=page.getByRole('button',{name:'Select bar 1',exact:true});
+  await expect(first).toHaveCSS('stroke','none');
+  await page.locator('.score-note[data-score-bar="0"]').first().click();
+  await expect(first).toHaveAttribute('aria-pressed','true');
+  await expect(first).toHaveCSS('stroke','none');
+  await expect(first).toHaveCSS('fill-opacity','0.11');
+  await page.keyboard.press('Tab');
+  await first.focus();
+  await expect(first).toBeFocused();
+  await expect(first).toHaveCSS('stroke','rgb(36, 108, 91)');
+  await expect(first).toHaveCSS('stroke-width','2px');
+});
+
 test('notation toggles individual bars and shares selection with the menu', async ({page}) => {
   await page.goto('/');
   await setTempo(page,'240');
