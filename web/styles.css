@@ -186,7 +186,6 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
    Their compact editors float above the footer instead of adding another row. */
 .position-row{grid-template-columns:minmax(150px,auto) minmax(80px,1fr) minmax(92px,auto);overflow:visible}
 .bar-selection-control{position:relative;min-width:0}
-.selection-notice{position:absolute;left:0;bottom:calc(100% + 6px);z-index:10;width:220px;padding:8px;border:1px solid var(--border-light);border-radius:8px;background:var(--surface-light);color:var(--ink-light);font-size:10px;letter-spacing:0;text-transform:none;white-space:normal}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .bar-selection-trigger{display:block;width:100%;min-height:26px;padding:0;overflow:hidden;border:0;background:transparent;color:#56615b;font:inherit;letter-spacing:inherit;text-align:left;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;outline:none}
 .bar-selection-trigger:hover,.bar-selection-trigger:focus-visible{color:#287d69}
@@ -195,7 +194,9 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .bar-selection-popover-head strong{font:700 12px Manrope}
 .bar-selection-popover .bar-selection-close{display:grid;flex:0 0 26px;width:26px;min-height:26px;margin:0;padding:0;place-items:center;border:0;border-radius:6px;background:transparent;color:#65716a}
 .bar-selection-popover .bar-selection-close:hover,.bar-selection-popover .bar-selection-close:focus-visible{background:#e7ece8;color:#24352e}
-.bar-range-fields{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-fields)}
+.bar-checkboxes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;max-height:min(190px,35dvh);overflow:auto}
+.bar-selection-popover .bar-checkboxes label{display:flex;align-items:center;gap:5px;min-height:32px;padding:4px;color:var(--ink-light);font-size:10px}
+.bar-checkboxes input{accent-color:var(--focus-light)}
 .bar-selection-popover label{display:grid;gap:5px;color:#6a756f;font-size:9px;font-weight:700}
 .bar-selection-popover select{width:100%;height:34px;padding:0 8px;border:1px solid var(--border-light);border-radius:var(--radius-control);background:var(--surface-light-input);color:var(--ink-light);font:600 10px var(--font-ui)}
 .bar-selection-popover .select-all-bars{width:100%;min-height:32px;margin-top:9px;border:1px solid var(--border-light);border-radius:var(--radius-control);background:#edf3ef;color:#2c6255;font:700 10px Manrope}
@@ -412,6 +413,7 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .bar-selection-popover :is(button,input,select):focus-visible,.loop-control:focus-visible,.visual-metronome:focus-visible{
   outline:2px solid var(--focus-light);outline-offset:2px
 }
+.loop-control[data-pointer-focus]:focus{outline:none}
 .app :is(button,input,select,summary),.bar-selection-popover-head strong,.metronome-popover .tempo-field,
 .app :is(.drawer-head,.stats-modal-header,.summary-header,.summary-card) :is(h2,h3){font-family:var(--font-ui)}
 .metronome-popover .inline-select button,.start-button small,.restart-button small{font-family:var(--font-ui)}

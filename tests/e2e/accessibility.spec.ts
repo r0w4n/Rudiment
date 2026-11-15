@@ -122,8 +122,14 @@ test('light popover fields use a light native scheme and contrast-safe colors', 
   expect(contrastRatio(previewStyle.foreground, previewStyle.background)).toBeGreaterThanOrEqual(4.5);
   expect(contrastRatio(previewStyle.border, panelColors.background)).toBeGreaterThanOrEqual(3);
   await page.getByLabel('Select bars').click();
-  await expect(page.locator('#bar-selection-popover select')).toHaveCount(2);
-  await expect(page.locator('#bar-selection-popover select').first()).toHaveCSS('color-scheme', 'light');
+  const barFields = page.locator('#bar-selection-popover input[type="checkbox"]');
+  await expect(barFields).toHaveCount(4);
+  await expect(barFields.first()).toHaveCSS('color-scheme', 'light');
+  const barColors = await barFields.first().evaluate((element) => ({
+    foreground: getComputedStyle(element.closest('label')!).color,
+    background: getComputedStyle(element.closest('.bar-selection-popover')!).backgroundColor,
+  }));
+  expect(contrastRatio(barColors.foreground, barColors.background)).toBeGreaterThanOrEqual(4.5);
 });
 
 test('result chart judgement colors contrast with the track', async ({ page }) => {

@@ -502,6 +502,30 @@ test('historical sessions open their own saved results and return to history', a
   }
 });
 
+test('historical progress includes every earlier session of the same exercise',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(async()=>{
+    for(const [index,score] of [48,62,71,68,85].entries())await (window as any).rudiment.saveSession({
+      id:`progress-${index+1}`,endedAt:`2026-11-10T18:0${index}:00Z`,exerciseId:'same-midi',exerciseTitle:'Shared title',exerciseHash:'midi-hash',bpm:80+index*10,inputMode:'demo',scoringVersion:index===1?'v2':'v3',toleranceMs:60,latencyMs:0,
+      summary:{score,matched:8,expected:10,missed:2,extras:0,wrong_instrument:0,mean_abs_error_ms:20,signed_mean_error_ms:0,timing_consistency_ms:10,scoring_version:'v3',results:[]},observed:[],schemaVersion:1,mode:'performance'
+    });
+    await (window as any).rudiment.saveSession({id:'other',endedAt:'2026-11-10T18:02:30Z',exerciseId:'other-midi',exerciseTitle:'Shared title',exerciseHash:'other-hash',bpm:80,inputMode:'demo',scoringVersion:'v3',toleranceMs:60,latencyMs:0,summary:{score:99,matched:1,expected:1,missed:0,extras:0,wrong_instrument:0,mean_abs_error_ms:null,signed_mean_error_ms:null,scoring_version:'v3',results:[]},observed:[],schemaVersion:1});
+  });
+  await page.reload();
+  await page.getByRole('button',{name:'Stats'}).click();
+  const history=page.getByRole('dialog',{name:'Performance history'});
+  await expect(history.locator('.stats-session')).toHaveCount(6);
+  for(const [score,expected] of [[68,[48,62,71,68]],[85,[48,62,71,68,85]]] as Array<[number,number[]]>){
+    await history.locator('.stats-session').filter({hasText:`${score}/100`}).click();
+    const result=page.getByRole('dialog',{name:'Session Complete'});
+    await expect(result.locator('.summary-score strong')).toHaveText(String(score));
+    await expect(result.locator('.progress-point')).toHaveCount(expected.length);
+    expect(await result.locator('.progress-point').evaluateAll(points=>points.map(point=>Number(point.getAttribute('data-score'))))).toEqual(expected);
+    await expect(result.locator('.progress-point.latest')).toHaveAttribute('data-score',String(score));
+    await result.getByRole('button',{name:'Back to history'}).click();
+  }
+});
+
 test('top controls remain interactive in browser fullscreen', async ({page}) => {
   await page.goto('/');
   await page.evaluate(()=>{
@@ -561,6 +585,26 @@ test('bar popover trigger has no persistent pointer outline and keeps keyboard f
   expect(await trigger.evaluate(element=>element.matches(':focus-visible')&&getComputedStyle(element).outlineStyle!=='none')).toBe(true);
 });
 
+test('loop count pointer focus does not leave an outline but keyboard focus remains visible',async({page})=>{
+  await page.goto('/');
+  const loop=page.locator('.loop-control');
+  await loop.click();
+  const state=await loop.evaluate(element=>({outline:getComputedStyle(element).outlineStyle,focusVisible:element.matches(':focus-visible'),focused:document.activeElement===element}));
+  expect(state.outline).toBe('none');
+  await loop.selectOption('2');
+  await expect(loop).toHaveCSS('outline-style','none');
+  await loop.click();
+  await page.locator('#notation').click({position:{x:4,y:4}});
+  await expect(loop).toHaveCSS('outline-style','none');
+  await loop.click();
+  await page.keyboard.press('Escape');
+  await expect(loop).toBeFocused();
+  await expect(loop).toHaveCSS('outline-style','solid');
+  await page.keyboard.press('Tab');
+  await loop.focus();
+  expect(await loop.evaluate(element=>element.matches(':focus-visible')&&getComputedStyle(element).outlineStyle!=='none')).toBe(true);
+});
+
 test('practice time persists active playback but excludes pauses and settings', async ({page}) => {
   await page.goto('/');
   await page.getByRole('button',{name:'Open settings'}).click();
@@ -602,7 +646,7 @@ test('keyboard calibration hits still work with settings open',async({page})=>{
   await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
 });
 
-test('notation selection shares the bar range and follows resizing and keyboard input', async ({page}) => {
+test('notation toggles individual bars and shares selection with the menu', async ({page}) => {
   await page.goto('/');
   await setTempo(page,'240');
   await page.getByRole('button',{name:'Open settings'}).click();
@@ -613,14 +657,15 @@ test('notation selection shares the bar range and follows resizing and keyboard 
   await page.locator('.score-note[data-score-bar="2"]').first().click();
   await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(2);
   await page.getByLabel('Select bars').click();
-  await expect(page.getByLabel('First selected bar')).toHaveValue('1');
-  await expect(page.getByLabel('Last selected bar')).toHaveValue('2');
-  await page.getByLabel('Last selected bar').selectOption('3');
+  await expect(page.getByLabel('Bar 2',{exact:true})).toBeChecked();
+  await expect(page.getByLabel('Bar 3',{exact:true})).toBeChecked();
+  await page.getByLabel('Bar 4',{exact:true}).check();
   await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(3);
+  await page.getByRole('button',{name:'All bars'}).click();
   await page.getByLabel('Close bar selection').click();
   await page.setViewportSize({width:800,height:700});
   await expect.poll(()=>page.locator('#notation').evaluate(element=>Math.abs(Number(element.querySelector('svg')?.getAttribute('width'))-element.clientWidth))).toBeLessThanOrEqual(1);
-  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(3);
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(0);
   const first=page.getByRole('button',{name:'Select bar 1',exact:true});
   await first.focus();
   await page.keyboard.press('Enter');
@@ -628,8 +673,9 @@ test('notation selection shares the bar range and follows resizing and keyboard 
   await page.keyboard.press('Enter');
   await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(2);
   await page.getByLabel('Select bars').click();
-  await expect(page.getByLabel('First selected bar')).toHaveValue('0');
-  await expect(page.getByLabel('Last selected bar')).toHaveValue('1');
+  await expect(page.getByLabel('Bar 1',{exact:true})).toBeChecked();
+  await expect(page.getByLabel('Bar 2',{exact:true})).toBeChecked();
+  await expect(page.getByLabel('Bar 3',{exact:true})).not.toBeChecked();
   await page.getByLabel('Close bar selection').click();
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(0);
@@ -639,7 +685,94 @@ test('notation selection shares the bar range and follows resizing and keyboard 
   expect(stopped).toBeLessThan(8.3);
 });
 
-test('selecting notation during a run pauses without discarding its feedback',async({page})=>{
+test('non-contiguous selected bars play in score order and accept the first hit after every jump',async({page})=>{
+  await page.addInitScript(()=>{
+    const input={id:'sequence-kit',name:'Sequence Kit',manufacturer:'Rudiment',type:'input',state:'connected',connection:'open',onmidimessage:null as null|((event:unknown)=>void),onstatechange:null,open:async()=>input,close:async()=>input,addEventListener:()=>{},removeEventListener:()=>{},dispatch:(data:number[],timestamp:number)=>input.onmidimessage?.({data:new Uint8Array(data),timeStamp:timestamp})};
+    const access={inputs:new Map([[input.id,input]]),outputs:new Map(),sysexEnabled:false,onstatechange:null,addEventListener:()=>{},removeEventListener:()=>{}};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
+    Object.assign(window,{__sequenceInput:input});
+  });
+  await page.goto('/');
+  await expect(page.getByRole('button',{name:/MIDI connection/})).toContainText('Sequence Kit');
+  await page.evaluate(()=>(window as any).rudiment.loadBundledFromLibrary('public/exercises/performance/medium.mid','Performance Medium'));
+  await expect(page.locator('.score-note')).toHaveCount(480);
+  await setTempo(page,'240');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.locator('.score-note[data-score-bar="1"]').first().click();
+  await page.locator('.score-note[data-score-bar="2"]').first().click();
+  await page.evaluate(()=>(window as any).rudiment.scrollScoreToBeat(16));
+  await page.locator('.score-note[data-score-bar="4"]').first().click();
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(3);
+  await page.getByLabel('Select bars').click();
+  await expect(page.getByLabel('Bar 2',{exact:true})).toBeChecked();
+  await expect(page.getByLabel('Bar 3',{exact:true})).toBeChecked();
+  await expect(page.getByLabel('Bar 5',{exact:true})).toBeChecked();
+  await page.getByLabel('Close bar selection').click();
+  await page.getByLabel('Loops').selectOption('2');
+  await page.evaluate(()=>{
+    const bridge=(window as any).rudiment,original=bridge.startAudio;
+    bridge.startAudio=(options:unknown,frame:(beat:number,now:number,start:number)=>void,done:()=>void)=>original(options,(beat:number,now:number,start:number)=>{(window as any).__sequenceStart=start;frame(beat,now,start);},done);
+  });
+  const recordRun=async(bars:number[])=>{
+    await page.evaluate((bars)=>{
+    (window as any).__sequenceCheck=new Promise(resolve=>{
+      const transitions:Array<{bar:number,time:number}>=[],hits:Array<{bar:number,judgement:string|null}>=[];
+      const targets=[...bars,...bars].map((bar,index)=>({beat:4+index*4,bar,source:bar*4}));
+      let started=false,index=0,pending:(typeof targets[number]&{deadline:number})|null=null;
+      const deadline=performance.now()+12000;
+      const frame=()=>{
+        const diagnostics=(window as any).rudiment.audioDiagnostics();
+        if(diagnostics.activeRun){
+          started=true;
+          const bar=Number(document.querySelector('#playhead')?.getAttribute('data-bar'));
+          if(Number.isFinite(bar)&&transitions.at(-1)?.bar!==bar)transitions.push({bar,time:performance.now()});
+          if(pending){
+            const judgement=document.querySelector(`.score-note[data-beat="${pending.source}"]`)?.getAttribute('data-judgement')??null;
+            if(judgement||performance.now()>=pending.deadline){hits.push({bar:pending.bar,judgement});pending=null;}
+          }
+          const target=targets[index];
+          if(target&&!pending&&diagnostics.currentBeat>=target.beat+.02){
+            const timestamp=(window as any).__sequenceStart+(target.beat-4)*250;
+            (window as any).__sequenceInput.dispatch([0x99,38,108],timestamp);
+            pending={...target,deadline:performance.now()+200};index++;
+          }
+        }
+        if((started&&!diagnostics.activeRun)||performance.now()>deadline){resolve({transitions,hits});return;}
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    });
+    },bars);
+    await page.getByRole('button',{name:/Start practice/}).click();
+    const result=await page.evaluate(()=>(window as any).__sequenceCheck as Promise<{transitions:Array<{bar:number,time:number}>,hits:Array<{bar:number,judgement:string|null}>}>);
+    expect(result.transitions.map(item=>item.bar)).toEqual([...bars,...bars]);
+    for(let index=1;index<result.transitions.length;index++){
+      expect(result.transitions[index].time-result.transitions[index-1].time).toBeGreaterThan(850);
+      expect(result.transitions[index].time-result.transitions[index-1].time).toBeLessThan(1150);
+    }
+    expect(result.hits).toHaveLength(bars.length*2);
+    for(const hit of result.hits)expect(hit.judgement!==null&&/perfect|good|early|late/.test(hit.judgement),JSON.stringify(result)).toBe(true);
+  };
+  await recordRun([1,2,4]);
+  await page.evaluate(()=>(window as any).rudiment.scrollScoreToBeat(8));
+  await page.locator('.score-note[data-score-bar="2"]').first().click();
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(2);
+  await page.getByLabel('Select bars').click();
+  await expect(page.getByLabel('Bar 3',{exact:true})).not.toBeChecked();
+  await page.getByLabel('Close bar selection').click();
+  await recordRun([1,4]);
+  await page.getByLabel('Loops').selectOption('1');
+  await page.getByLabel('Select bars').click();
+  await page.getByRole('button',{name:'All bars'}).click();
+  await page.getByLabel('Close bar selection').click();
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/Start performance/})).toBeVisible();
+});
+
+test('selecting notation during a run pauses and preserves feedback until the new selection is started',async({page})=>{
   await page.goto('/');
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
@@ -649,22 +782,35 @@ test('selecting notation during a run pauses without discarding its feedback',as
   await page.keyboard.press('j');
   await expect(page.locator('.score-note[data-judgement], .unmatched-hit-marker').first()).toBeVisible();
   await page.locator('.score-note[data-score-bar="0"]').first().click();
-  await expect(page.getByRole('button',{name:'Resume'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Start selected bars'})).toBeVisible();
   await expect(page.locator('.score-note[data-judgement], .unmatched-hit-marker').first()).toBeVisible();
-  await expect(page.locator('.selection-notice')).toBeVisible();
-  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(4);
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(1);
+  await page.getByRole('button',{name:'Start selected bars'}).click();
+  await expect(page.getByRole('button',{name:'Pause'})).toBeVisible();
+  await expect(page.locator('.score-note[data-judgement], .unmatched-hit-marker')).toHaveCount(0);
 });
 
 test.describe('touch notation selection',()=>{
   test.use({hasTouch:true,viewport:{width:412,height:915}});
-  test('tapping two bars selects their inclusive range',async({page})=>{
+  test('tapping two bars toggles individual selections',async({page})=>{
     await page.goto('/');
     await page.locator('.score-note[data-score-bar="0"]').first().tap();
     await page.locator('.score-note[data-score-bar="1"]').first().tap();
     await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(2);
     await page.getByLabel('Select bars').tap();
-    await expect(page.getByLabel('First selected bar')).toHaveValue('0');
-    await expect(page.getByLabel('Last selected bar')).toHaveValue('1');
+    await expect(page.getByLabel('Bar 1',{exact:true})).toBeChecked();
+    await expect(page.getByLabel('Bar 2',{exact:true})).toBeChecked();
+  });
+  test('loop count retains no pointer outline after touch selection',async({page})=>{
+    await page.goto('/');
+    const loop=page.locator('.loop-control');
+    for(const value of ['2','4']){
+      await loop.tap();
+      await loop.selectOption(value);
+      await expect(loop).toHaveCSS('outline-style','none');
+    }
+    await page.locator('#notation').tap({position:{x:4,y:4}});
+    await expect(loop).toHaveCSS('outline-style','none');
   });
 });
 
@@ -1157,8 +1303,8 @@ test('score popovers stay inside the viewport and footer controls remain compact
 
     await page.getByLabel('Select bars').click();
     await expect(page.locator('#bar-selection-popover')).toBeVisible();
-    await page.getByLabel('First selected bar').selectOption('1');
-    await page.getByLabel('Last selected bar').selectOption('2');
+    await page.getByLabel('Bar 2',{exact:true}).check();
+    await page.getByLabel('Bar 3',{exact:true}).check();
     await expect(page.locator('#bar-selection-popover')).toBeVisible();
     await expect(page.locator('.score-measure-number.selected-bar-number')).toHaveCount(2);
     expect(await page.locator('#bar-selection-popover').evaluate(element => {
@@ -1724,8 +1870,7 @@ test('count-in for a selected bar never traverses the preceding bar', async ({ p
   await page.goto('/');
   await setTempo(page, '240');
   await page.getByLabel('Select bars').click();
-  await page.getByLabel('First selected bar').selectOption('3');
-  await page.getByLabel('Last selected bar').selectOption('3');
+  await page.getByLabel('Bar 4',{exact:true}).check();
   await page.getByLabel('Close bar selection').click();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('1');
@@ -1748,8 +1893,7 @@ test('early first downbeat and later loop hits stay on the selected bar', async 
   await page.goto('/');
   await setTempo(page, '240');
   await page.getByLabel('Select bars').click();
-  await page.getByLabel('First selected bar').selectOption('1');
-  await page.getByLabel('Last selected bar').selectOption('1');
+  await page.getByLabel('Bar 2',{exact:true}).check();
   await page.getByLabel('Close bar selection').click();
   await page.getByLabel('Loops').selectOption('4');
   await page.getByRole('button', { name: /Start practice/ }).click();
@@ -2257,8 +2401,7 @@ test('loop and restart leave practice stopped until started again', async ({ pag
   await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByLabel('Select bars').click();
-  await page.getByLabel('First selected bar').selectOption('0');
-  await page.getByLabel('Last selected bar').selectOption('0');
+  await page.getByLabel('Bar 1',{exact:true}).check();
   await page.getByLabel('Close bar selection').click();
   await page.getByLabel('Loops').selectOption('2');
   await page.getByRole('button', { name: /Start practice/ }).click();
@@ -2329,8 +2472,7 @@ test('single-bar repetition preserves the visible score and reuses its SVG', asy
   await page.goto('/');
   await setTempo(page, '240');
   await page.getByLabel('Select bars').click();
-  await page.getByLabel('First selected bar').selectOption('2');
-  await page.getByLabel('Last selected bar').selectOption('2');
+  await page.getByLabel('Bar 3',{exact:true}).check();
   await page.getByLabel('Close bar selection').click();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
@@ -2354,7 +2496,7 @@ test('single-bar repetition preserves the visible score and reuses its SVG', asy
   });
 
   await page.getByRole('button', { name: /Start practice/ }).click();
-  await expect(page.getByText(/BAR 3 \/ 3 · TRY 2/)).toBeVisible({ timeout: 4_000 });
+  await expect(page.getByText(/BAR 3 \/ 4 · TRY 2/)).toBeVisible({ timeout: 4_000 });
   await expect.poll(() => page.evaluate(() => (window as any).__repeatViewport.after)).toBeGreaterThanOrEqual(0);
   const viewport = await page.evaluate(() => (window as any).__repeatViewport as { before: number; after: number; sameSvg: boolean; playheadBeat: number });
   expect(viewport.before).toBeGreaterThan(0);

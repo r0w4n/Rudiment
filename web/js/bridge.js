@@ -96,6 +96,15 @@ document.addEventListener('click',event=>{
 });
 window.addEventListener('resize',positionMetronomePopover);
 
+// Native selects can match :focus-visible even when opened by a pointer.
+// Keep keyboard focus visible, but do not retain that ring after mouse/touch.
+document.addEventListener('pointerdown',event=>{
+  if(event.target instanceof Element)event.target.closest('.loop-control')?.setAttribute('data-pointer-focus','');
+},true);
+document.addEventListener('keydown',event=>{
+  if(event.key==='Tab'||event.target instanceof Element&&event.target.closest('.loop-control'))document.querySelector('.loop-control')?.removeAttribute('data-pointer-focus');
+},true);
+
 // A glanceable drummer-style display: the sweep borrows the left/right motion
 // of a digital needle, while the LEDs show beat position and a stronger
 // downbeat. Pulses are queued from the same Tone callback and output timestamp
@@ -399,7 +408,14 @@ const audio = {
       // Count-in beats are transport time, not playable exercise beats. For a
       // later selected range they numerically overlap the preceding bar, so
       // keep the playhead hidden until the selected playback offset begins.
-      const scoreBeat=beat>=offset?rangeStart+((beat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats:-1;
+      const position=((beat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats;
+      const bars=options.displayBars,barIndex=Math.floor(position/options.meter);
+      const scoreBeat=beat<offset?-1:Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+position-barIndex*options.meter:rangeStart+position;
+      if(scoreBeat>=0&&Array.isArray(bars)&&bars.length){
+        const displayBar=Math.floor(scoreBeat/options.meter),previous=this.activeRun?.lastDisplayBar;
+        if(Number.isInteger(previous)&&displayBar!==previous&&displayBar!==previous+1)scrollScoreToBeat(scoreBeat);
+        if(this.activeRun)this.activeRun.lastDisplayBar=displayBar;
+      }
       updateScore(scoreBeat,undefined,true);
       visualMetronome.render(beat,options.meter,subdivision,now);
       // UI counters and scoring state do not need 60 updates per second. Keep
@@ -429,20 +445,20 @@ catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
 let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
 let pendingScoreFeedback=[],pendingScoreFeedbackFrame=0;
-let selectedBarRange={start:0,end:Number.MAX_SAFE_INTEGER};
+let selectedBars=new Set();
 let scoreSelectionCallback=null;
 function applySelectedBarRange(){
   if(!scoreData.svg)return;
   for(const label of scoreData.svg.querySelectorAll('.score-measure-number[data-score-bar]')){
     const bar=Number(label.dataset.scoreBar);
-    label.classList.toggle('selected-bar-number',bar>=selectedBarRange.start&&bar<=selectedBarRange.end);
+    label.classList.toggle('selected-bar-number',selectedBars.has(bar));
   }
   for(const area of scoreData.svg.querySelectorAll('.score-bar-highlight')){
-    const bar=Number(area.dataset.scoreBar),selected=bar>=selectedBarRange.start&&bar<=selectedBarRange.end;
+    const bar=Number(area.dataset.scoreBar),selected=selectedBars.has(bar);
     area.classList.toggle('selected',selected);area.setAttribute('aria-pressed',String(selected));
   }
 }
-function setSelectedBars(start,end){selectedBarRange={start:Number(start)||0,end:Number.isFinite(Number(end))?Number(end):Number.MAX_SAFE_INTEGER};applySelectedBarRange();}
+function setSelectedBars(bars){selectedBars=new Set(Array.isArray(bars)?bars.map(Number):[]);applySelectedBarRange();}
 function bindScoreSelection(callback){scoreSelectionCallback=callback;}
 let scoreResizeObserver=null;
 const handText = hand => hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·';
@@ -671,8 +687,9 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     for(const bar of barLayouts){
       const area=document.createElementNS('http://www.w3.org/2000/svg','rect');
       area.setAttribute('class','score-bar-highlight');area.dataset.scoreBar=String(bar.index);
-      area.setAttribute('x',String(Math.max(0,bar.xStart-12)));area.setAttribute('y',String(scoreTopMargin+bar.row*scoreRowHeight-12));
-      area.setAttribute('width',String(Math.min(width-Math.max(0,bar.xStart-12),barWidth+12)));area.setAttribute('height',String(scoreRowHeight-4));
+      const left=bar.index%barsPerLine===0?14:Math.max(14,bar.xStart-12),right=Math.min(width-14,bar.xEnd);
+      area.setAttribute('x',String(left));area.setAttribute('y',String(scoreTopMargin+bar.row*scoreRowHeight-12));
+      area.setAttribute('width',String(Math.max(0,right-left)));area.setAttribute('height',String(scoreRowHeight-4));
       area.setAttribute('rx','6');area.setAttribute('role','button');area.setAttribute('tabindex',bar.index===(focusBar??0)?'0':'-1');area.setAttribute('aria-label',`Select bar ${bar.index+1}`);
       area.addEventListener('keydown',event=>{
         if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();scoreSelectionCallback?.(bar.index,event.shiftKey);}
@@ -690,7 +707,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
       const point=svg.createSVGPoint(),matrix=svg.getScreenCTM();if(!matrix)return;
       point.x=event.clientX;point.y=event.clientY;const local=point.matrixTransform(matrix.inverse());
       const row=Math.floor((local.y-(scoreTopMargin-12))/scoreRowHeight);
-      const bar=barLayouts.find(item=>item.row===row&&local.x>=Math.max(0,item.xStart-12)&&local.x<=Math.min(width,item.xEnd));
+      const bar=barLayouts.find(item=>item.row===row&&local.x>=(item.index%barsPerLine===0?14:Math.max(14,item.xStart-12))&&local.x<=Math.min(width-14,item.xEnd));
       if(bar)scoreSelectionCallback?.(bar.index,event.shiftKey);
     });
   }

@@ -91,6 +91,8 @@ async function configurePractice(page){
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   await page.getByRole('button',{name:/Pause/}).waitFor({timeout:15_000});
+  await page.waitForFunction(()=>window.rudiment.audioDiagnostics().activeRun,null,{timeout:15_000});
+  await page.waitForFunction(()=>typeof window.__rudimentPerfInput.onmidimessage==='function',null,{timeout:15_000});
 }
 
 async function measurePaintLatency(page,dispatch){
@@ -130,7 +132,18 @@ async function runInteractions(page,fixtureId){
   }
   const diagnostics=await page.evaluate(()=>window.rudiment.performanceDiagnostics());
   const observed=await page.evaluate(()=>window.__rudimentObserved);
-  return {fixtureId,measurements:{
+  // Keep the existing gated measurements unchanged; record the new selected-
+  // bar workload separately until a comparable baseline has been collected.
+  await page.getByLabel('Select bars').click();
+  for(const bar of [2,3,5])await page.getByLabel(`Bar ${bar}`,{exact:true}).check();
+  await page.getByLabel('Close bar selection').click();
+  await page.getByLabel('Loops').selectOption('2');
+  const selectionStart=Date.now();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await page.waitForFunction(()=>document.querySelector('#playhead')?.getAttribute('data-bar')==='4',null,{timeout:20_000});
+  const noncontiguous={bars:[2,3,5],jumpResponseMs:Date.now()-selectionStart};
+  await page.getByRole('button',{name:/Restart/}).click();
+  return {fixtureId,noncontiguous,measurements:{
     midi_event_to_paint_ms:midiPaint,keyboard_event_to_paint_ms:keyboardPaint,scroll_call_ms:scroll,
     transition_response_ms:transition,modal_response_ms:modal,midi_callback_ms:diagnostics.midi_callback_ms??[],
     score_update_ms:diagnostics.score_update_ms??[],feedback_paint_work_ms:diagnostics.feedback_paint_work_ms??[],

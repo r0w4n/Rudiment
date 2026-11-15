@@ -46,7 +46,7 @@ scheduling behavior.
 
 ## Range selection, practice time and fullscreen
 
-- Click or tap two bars, or focus a bar and use the arrow keys plus Enter/Space, to select an inclusive range. Check the bar menu and highlight agree after resize. Selecting the score during a run pauses it and preserves feedback; restart is currently required before choosing a new score range. Changing the range or loop count through the existing menu still clears a paused run.
+- Click or tap individual bars, or focus a bar and use the arrow keys plus Enter/Space, to toggle them. Check the bar menu and highlight agree after resize, and that non-adjacent bars play in score order. No selection means the whole exercise. Changing bars or loop count during a run pauses and preserves its feedback until the user explicitly starts the new selection.
 - Practice time counts transport playback rather than count-in or pauses. It is checkpointed every five seconds and on normal stop/backgrounding. An abrupt browser termination may lose the last uncheckpointed interval; durations of sessions recorded before this feature cannot be recovered.
 - Test the top controls in ordinary browsing, actual browser fullscreen, and the MIDI Web full-page presentation on the relevant mobile/tablet devices. Check hit-testing and whether a host overlay intercepts the controls before changing stacking styles. The local automated Chrome fullscreen request returned `TypeError: not granted` in both headless and headed runs, so that regression test skips in this environment. MIDI Web itself was not available for reproduction; neither its cause nor a fullscreen fix has been established.
 

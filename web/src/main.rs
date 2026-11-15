@@ -26,6 +26,8 @@ type DoneCallback = Closure<dyn FnMut()>;
 type CallbackSlot<T> = Rc<RefCell<Option<T>>>;
 type LaunchRun = Rc<dyn Fn(f64, u8, bool)>;
 type LaunchSlot = Rc<RefCell<Option<LaunchRun>>>;
+type StartRun = Rc<dyn Fn(u8)>;
+type StartSlot = CallbackSlot<StartRun>;
 type HitInput = Rc<dyn Fn(f64, Instrument, u8, InputSource, Option<u8>, Option<u8>)>;
 type MidiFileCallback = Closure<dyn FnMut(Uint8Array, String, String, JsValue)>;
 
@@ -185,7 +187,7 @@ extern "C" {
     #[wasm_bindgen(js_namespace = rudiment, js_name = renderScore)]
     fn render_score(exercise: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = setSelectedBars)]
-    fn set_selected_bars(start: usize, end: usize);
+    fn set_selected_bars(bars: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = bindScoreSelection)]
     fn bind_score_selection(callback: &Function);
     #[wasm_bindgen(js_namespace = rudiment, js_name = scrollScoreToBeat)]
@@ -266,6 +268,7 @@ struct Settings {
     repeat_tolerance: Option<RepeatTolerance>,
     selection_start_bar: Option<usize>,
     selection_end_bar: Option<usize>,
+    selected_bars: Option<Vec<usize>>,
     latency_ms: Option<f64>,
     on_time_ms: Option<f64>,
     excellent_ms: Option<f64>,
@@ -327,6 +330,7 @@ struct SessionRecord {
     ended_at: String,
     exercise_id: String,
     exercise_title: String,
+    #[serde(default)]
     exercise_hash: String,
     bpm: f64,
     input_mode: InputSource,
@@ -502,13 +506,19 @@ fn achievement_copy(summary: &SessionSummary) -> (&'static str, &'static str) {
     }
 }
 
-fn progress_scores(current: &SessionRecord, history: &[SessionRecord]) -> Vec<f64> {
+fn same_exercise(left: &SessionRecord, right: &SessionRecord) -> bool {
+    if !left.exercise_hash.is_empty() && !right.exercise_hash.is_empty() {
+        left.exercise_hash == right.exercise_hash
+    } else {
+        !left.exercise_id.is_empty() && left.exercise_id == right.exercise_id
+    }
+}
+
+fn progress_sessions(current: &SessionRecord, history: &[SessionRecord]) -> Vec<(String, f64)> {
     let mut matching = history
         .iter()
         .filter(|session| {
-            session.exercise_hash == current.exercise_hash
-                && (session.bpm - current.bpm).abs() < 0.01
-                && session.scoring_version == current.scoring_version
+            same_exercise(session, current)
                 && session.summary.score.is_some()
                 && (session.ended_at.as_str(), session.id.as_str())
                     <= (current.ended_at.as_str(), current.id.as_str())
@@ -521,15 +531,17 @@ fn progress_scores(current: &SessionRecord, history: &[SessionRecord]) -> Vec<f6
     });
     let mut scores = matching
         .into_iter()
-        .filter_map(|session| session.summary.score)
+        .filter_map(|session| {
+            session
+                .summary
+                .score
+                .map(|score| (session.id.clone(), score))
+        })
         .collect::<Vec<_>>();
     if !history.iter().any(|session| session.id == current.id)
         && let Some(score) = current.summary.score
     {
-        scores.push(score);
-    }
-    if scores.len() > 10 {
-        scores.drain(..scores.len() - 10);
+        scores.push((current.id.clone(), score));
     }
     scores
 }
@@ -560,19 +572,59 @@ fn exercise_beats(exercise: &Exercise) -> f64 {
     ((last + 0.001) / bar_beats).ceil().max(1.0) * bar_beats
 }
 
-fn selected_bar_range(
-    exercise: &Exercise,
-    requested_start: usize,
-    requested_end: usize,
-) -> (usize, usize, f64, f64) {
-    let bar_beats = beats_per_bar(exercise);
-    let exercise_length = exercise_beats(exercise);
-    let bar_count = (exercise_length / bar_beats).ceil().max(1.0) as usize;
-    let start_bar = requested_start.min(bar_count - 1);
-    let end_bar = requested_end.min(bar_count - 1).max(start_bar);
-    let start_beat = start_bar as f64 * bar_beats;
-    let end_beat = ((end_bar + 1) as f64 * bar_beats).min(exercise_length);
-    (start_bar, end_bar, start_beat, end_beat)
+#[derive(Debug, Clone, PartialEq)]
+struct BarSequence {
+    bars: Vec<usize>,
+    bar_beats: f64,
+    origin: f64,
+    total_bars: usize,
+}
+
+impl BarSequence {
+    fn new(exercise: &Exercise, selected: &[usize]) -> Self {
+        let bar_beats = beats_per_bar(exercise);
+        let count = (exercise_beats(exercise) / bar_beats).ceil().max(1.0) as usize;
+        let mut bars = selected
+            .iter()
+            .copied()
+            .filter(|bar| *bar < count)
+            .collect::<Vec<_>>();
+        bars.sort_unstable();
+        bars.dedup();
+        if bars.is_empty() {
+            bars = (0..count).collect();
+        }
+        let origin = bars[0] as f64 * bar_beats;
+        Self {
+            bars,
+            bar_beats,
+            origin,
+            total_bars: count,
+        }
+    }
+
+    fn length(&self) -> f64 {
+        self.bars.len() as f64 * self.bar_beats
+    }
+
+    fn display_beat(&self, beat: f64) -> f64 {
+        let within = (beat - self.origin).rem_euclid(self.length());
+        let index = ((within / self.bar_beats).floor() as usize).min(self.bars.len() - 1);
+        self.bars[index] as f64 * self.bar_beats + within - index as f64 * self.bar_beats
+    }
+}
+
+fn legacy_selected_bars(exercise: &Exercise, start: usize, end: usize) -> Vec<usize> {
+    let count = (exercise_beats(exercise) / beats_per_bar(exercise))
+        .ceil()
+        .max(1.0) as usize;
+    let start = start.min(count - 1);
+    let end = end.min(count - 1).max(start);
+    if start == 0 && end + 1 == count {
+        Vec::new()
+    } else {
+        (start..=end).collect()
+    }
 }
 
 fn expanded_tempo_map(exercise: &Exercise, loops: u8) -> Vec<TempoChange> {
@@ -605,42 +657,46 @@ fn scaled_tempo_map(exercise: &Exercise, loops: u8, bpm: f64) -> Vec<TempoChange
         .collect()
 }
 
-fn expanded_range_tempo_map(
+fn expanded_sequence_tempo_map(
     exercise: &Exercise,
-    start_beat: f64,
-    end_beat: f64,
+    sequence: &BarSequence,
     loops: u8,
 ) -> Vec<TempoChange> {
-    let length = (end_beat - start_beat).max(0.001);
-    let start_bpm = exercise
-        .tempo_map
-        .iter()
-        .take_while(|change| change.beat <= start_beat + 0.000_001)
-        .last()
-        .map(|change| change.bpm)
-        .unwrap_or(exercise.tempo_bpm);
     let mut result = Vec::new();
     for repetition in 0..loops {
-        let repetition_start = start_beat + repetition as f64 * length;
-        result.push(TempoChange {
-            tick: (repetition_start * exercise.ticks_per_beat as f64).round() as u64,
-            beat: repetition_start,
-            bpm: start_bpm,
-        });
-        result.extend(
-            exercise
+        for (index, bar) in sequence.bars.iter().enumerate() {
+            let source_start = *bar as f64 * sequence.bar_beats;
+            let timeline_start = sequence.origin
+                + repetition as f64 * sequence.length()
+                + index as f64 * sequence.bar_beats;
+            let first_after = exercise
                 .tempo_map
-                .iter()
-                .filter(|change| {
-                    change.beat > start_beat + 0.000_001 && change.beat < end_beat - 0.000_001
-                })
-                .cloned()
-                .map(|mut change| {
-                    change.beat = repetition_start + change.beat - start_beat;
-                    change.tick = (change.beat * exercise.ticks_per_beat as f64).round() as u64;
-                    change
-                }),
-        );
+                .partition_point(|change| change.beat <= source_start + 0.000_001);
+            let start_bpm = first_after
+                .checked_sub(1)
+                .map(|index| exercise.tempo_map[index].bpm)
+                .unwrap_or(exercise.tempo_bpm);
+            let changes = std::iter::once((timeline_start, start_bpm)).chain(
+                exercise.tempo_map[first_after..]
+                    .iter()
+                    .take_while(|change| {
+                        change.beat < source_start + sequence.bar_beats - 0.000_001
+                    })
+                    .map(|change| (timeline_start + change.beat - source_start, change.bpm)),
+            );
+            for (beat, bpm) in changes {
+                if result
+                    .last()
+                    .is_none_or(|last: &TempoChange| (last.bpm - bpm).abs() > 0.000_001)
+                {
+                    result.push(TempoChange {
+                        tick: (beat * exercise.ticks_per_beat as f64).round() as u64,
+                        beat,
+                        bpm,
+                    });
+                }
+            }
+        }
     }
     result
 }
@@ -648,11 +704,12 @@ fn expanded_range_tempo_map(
 fn retime_tempo_map(
     existing: &[TempoChange],
     exercise: &Exercise,
+    sequence: &BarSequence,
     loops: u8,
     beat: f64,
     bpm: f64,
 ) -> Vec<TempoChange> {
-    let source = expanded_tempo_map(exercise, loops);
+    let source = expanded_sequence_tempo_map(exercise, sequence, loops);
     let scale = bpm / exercise.tempo_bpm.max(1.0);
     let source_current = source
         .iter()
@@ -686,23 +743,36 @@ fn json_compatible<T: Serialize>(value: &T) -> Result<JsValue, serde_wasm_bindge
     value.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
 }
 
-fn expanded_range_hits(
+fn expanded_sequence_hits(
     exercise: &Exercise,
-    start_beat: f64,
-    end_beat: f64,
+    sequence: &BarSequence,
     loops: u8,
 ) -> Vec<ExpectedHit> {
-    let length = (end_beat - start_beat).max(0.0);
-    let source = hits_in_bar(&exercise.hits, start_beat, end_beat);
-    let mut result = Vec::with_capacity(source.len() * loops as usize);
-    for repetition in 0..loops {
-        for hit in &source {
-            let mut copy = hit.clone();
-            copy.id = format!("{}-loop{}", copy.id, repetition + 1);
-            copy.beat += repetition as f64 * length;
-            result.push(copy);
+    let mut source_by_bar = vec![Vec::new(); sequence.bars.last().copied().unwrap_or(0) + 1];
+    for hit in &exercise.hits {
+        let bar = ((hit.notation_beat + 0.000_001) / sequence.bar_beats)
+            .floor()
+            .max(0.0) as usize;
+        if let Some(hits) = source_by_bar.get_mut(bar) {
+            hits.push(hit);
         }
     }
+    let mut result = Vec::new();
+    for repetition in 0..loops {
+        for (index, bar) in sequence.bars.iter().enumerate() {
+            let source_start = *bar as f64 * sequence.bar_beats;
+            let timeline_start = sequence.origin
+                + repetition as f64 * sequence.length()
+                + index as f64 * sequence.bar_beats;
+            for hit in &source_by_bar[*bar] {
+                let mut copy = (*hit).clone();
+                copy.id = format!("{}-loop{}", copy.id, repetition + 1);
+                copy.beat = timeline_start + hit.beat - source_start;
+                result.push(copy);
+            }
+        }
+    }
+    result.sort_by(|left, right| left.beat.total_cmp(&right.beat));
     result
 }
 
@@ -848,14 +918,9 @@ struct LiveTimingContext<'a> {
     session_start_ms: f64,
     bpm: f64,
     tempo_map: &'a [TempoChange],
-    range_start: f64,
-    range_length: f64,
+    sequence: &'a BarSequence,
     latency_ms: f64,
     config: ScoringConfig,
-}
-
-fn display_beat_in_range(beat: f64, start: f64, length: f64) -> f64 {
-    start + (beat - start).rem_euclid(length.max(0.001))
 }
 
 fn live_judgement_for_hit(
@@ -901,16 +966,8 @@ fn live_judgement_for_hit(
         let judgement = context.config.classify(error_ms);
         return LiveJudgement {
             expected_id: Some(display_expected_id(&hit.id)),
-            expected_beat: Some(display_beat_in_range(
-                hit.beat,
-                context.range_start,
-                context.range_length,
-            )),
-            actual_beat: Some(display_beat_in_range(
-                actual_beat,
-                context.range_start,
-                context.range_length,
-            )),
+            expected_beat: Some(context.sequence.display_beat(hit.beat)),
+            actual_beat: Some(context.sequence.display_beat(actual_beat)),
             instrument: observed.instrument,
             judgement,
             error_ms,
@@ -928,11 +985,11 @@ fn live_judgement_for_hit(
     LiveJudgement {
         expected_id: None,
         expected_beat: None,
-        actual_beat: Some(display_beat_in_range(
-            actual_beat.max(context.range_start),
-            context.range_start,
-            context.range_length,
-        )),
+        actual_beat: Some(
+            context
+                .sequence
+                .display_beat(actual_beat.max(context.sequence.origin)),
+        ),
         instrument: observed.instrument,
         judgement: if wrong_instrument {
             Judgement::WrongInstrument
@@ -1201,10 +1258,11 @@ fn App() -> impl IntoView {
     let loops = RwSignal::new(1u8);
     let repeat_bar_until_good = RwSignal::new(false);
     let repeat_tolerance = RwSignal::new(RepeatTolerance::Standard);
-    let selection_start_bar = RwSignal::new(0usize);
-    let selection_end_bar = RwSignal::new(usize::MAX);
-    let selection_anchor = RwSignal::new(None::<usize>);
-    let selection_notice = RwSignal::new(false);
+    let selected_bars = RwSignal::new(Vec::<usize>::new());
+    let pending_legacy_selection = RwSignal::new(None::<(String, usize, usize)>);
+    let bar_sequence =
+        Memo::new(move |_| Arc::new(BarSequence::new(&exercise.get(), &selected_bars.get())));
+    let selection_changed = RwSignal::new(false);
     let context_popup = RwSignal::new(None::<ContextPopup>);
     let progress = RwSignal::new(-1.0);
     let run_start_ms = RwSignal::new(0.0);
@@ -1269,8 +1327,9 @@ fn App() -> impl IntoView {
             loops: Some(loops.get_untracked()),
             repeat_bar_until_good: Some(repeat_bar_until_good.get_untracked()),
             repeat_tolerance: Some(repeat_tolerance.get_untracked()),
-            selection_start_bar: Some(selection_start_bar.get_untracked()),
-            selection_end_bar: Some(selection_end_bar.get_untracked()),
+            selection_start_bar: None,
+            selection_end_bar: None,
+            selected_bars: Some(selected_bars.get_untracked()),
             latency_ms: Some(latency_ms.get_untracked()),
             on_time_ms: Some(on_time_ms.get_untracked()),
             excellent_ms: Some(excellent_ms.get_untracked()),
@@ -1379,17 +1438,14 @@ fn App() -> impl IntoView {
             let current_exercise = exercise.get_untracked();
             let bar_beats = beats_per_bar(&current_exercise);
             let exercise_length = exercise_beats(&current_exercise);
-            let (_, _, range_start, range_end) = selected_bar_range(
-                &current_exercise,
-                selection_start_bar.get_untracked(),
-                selection_end_bar.get_untracked(),
-            );
+            let sequence = bar_sequence.get_untracked();
+            let range_start = sequence.origin;
             let configured_loops = if loops.get_untracked() == 0 {
                 CONTINUOUS_LOOP_CHUNK
             } else {
                 loops.get_untracked()
             };
-            let total = range_start + (range_end - range_start) * configured_loops as f64;
+            let total = range_start + sequence.length() * configured_loops as f64;
             let repeat_enabled = repeat_bar_until_good.get_untracked();
             let (segment_start, segment_end) = if repeat_enabled {
                 repeat_bar_segment(offset, bar_beats, total)
@@ -1397,12 +1453,8 @@ fn App() -> impl IntoView {
                 (offset, total)
             };
             active_segment_start.set(segment_start);
-            let tempo_map = expanded_range_tempo_map(
-                &current_exercise,
-                range_start,
-                range_end,
-                configured_loops,
-            );
+            let tempo_map =
+                expanded_sequence_tempo_map(&current_exercise, &sequence, configured_loops);
             if !immediate {
                 let scale = bpm.get_untracked() / current_exercise.tempo_bpm.max(1.0);
                 runtime_tempo_map.set(
@@ -1427,10 +1479,10 @@ fn App() -> impl IntoView {
             } else {
                 Vec::new()
             };
-            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":bar_beats,"exerciseBeats":exercise_length,"displayRangeStart":range_start,"displayRangeBeats":range_end-range_start,"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes})).unwrap_or(JsValue::NULL);
+            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":bar_beats,"exerciseBeats":exercise_length,"displayRangeStart":range_start,"displayRangeBeats":sequence.length(),"displayBars":sequence.bars,"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes})).unwrap_or(JsValue::NULL);
             let origin_set = Rc::new(Cell::new(false));
             let tracking_started = Rc::new(Cell::new(false));
-            let range_length = (range_end - range_start).max(0.001);
+            let range_length = sequence.length();
             let initial_visible_loop =
                 ((offset - range_start).max(0.0) / range_length).floor() as usize;
             visible_loop_index.set(initial_visible_loop);
@@ -1480,8 +1532,7 @@ fn App() -> impl IntoView {
                     let visible = live.get_untracked();
                     let judgement_values =
                         serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
-                    let display_beat = range_start
-                        + (beat - range_start).rem_euclid((range_end - range_start).max(0.001));
+                    let display_beat = sequence.display_beat(beat);
                     update_score(display_beat, judgement_values);
                 }
             }) as Box<dyn FnMut(f64, f64, f64)>);
@@ -1580,11 +1631,7 @@ fn App() -> impl IntoView {
 
     let pause_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
-        let (_, _, range_start, _) = selected_bar_range(
-            &exercise.get_untracked(),
-            selection_start_bar.get_untracked(),
-            selection_end_bar.get_untracked(),
-        );
+        let range_start = bar_sequence.get_untracked().origin;
         let position = if phase.get_untracked() == "starting" {
             progress.get_untracked()
         } else {
@@ -1597,19 +1644,26 @@ fn App() -> impl IntoView {
         stop_audio();
         phase.set("paused".into());
     });
+    let start_holder: StartSlot = Rc::new(RefCell::new(None));
     let resume_run: Rc<dyn Fn()> = {
         let launch = launch_run.clone();
+        let start_holder = start_holder.clone();
         Rc::new(move || {
             if phase.get_untracked() == "paused" {
-                selection_notice.set(false);
-                launch(progress.get_untracked().max(0.0), 0, true);
+                if selection_changed.get_untracked() {
+                    if let Some(start) = start_holder.borrow().as_ref() {
+                        start(count_in.get_untracked());
+                    }
+                } else {
+                    launch(progress.get_untracked().max(0.0), 0, true);
+                }
             }
         })
     };
 
     let reset_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
-        selection_notice.set(false);
+        selection_changed.set(false);
         stop_audio();
         result_modal_open.set(false);
         observed.set(vec![]);
@@ -1632,6 +1686,7 @@ fn App() -> impl IntoView {
             phase.get_untracked().as_str(),
             "running" | "count_in" | "starting" | "paused"
         ) {
+            selection_changed.set(false);
             set_practice_active(false);
             stop_audio();
             observed.set(vec![]);
@@ -1651,10 +1706,10 @@ fn App() -> impl IntoView {
         }
     });
 
-    {
+    let toggle_bar: Rc<dyn Fn(usize)> = {
         let pause = pause_run.clone();
         let save = save_current_settings.clone();
-        let selection = Closure::wrap(Box::new(move |bar: u32, extend: bool| {
+        Rc::new(move |bar| {
             if matches!(
                 phase.get_untracked().as_str(),
                 "running" | "count_in" | "starting"
@@ -1662,24 +1717,22 @@ fn App() -> impl IntoView {
                 pause();
             }
             if phase.get_untracked() == "paused" {
-                selection_notice.set(true);
-                return;
+                selection_changed.set(true);
             }
-            selection_notice.set(false);
-            let bar = bar as usize;
-            let anchor = selection_anchor
-                .get_untracked()
-                .or_else(|| extend.then_some(selection_start_bar.get_untracked()));
-            if let Some(anchor) = anchor {
-                selection_start_bar.set(anchor.min(bar));
-                selection_end_bar.set(anchor.max(bar));
-                selection_anchor.set(if extend { Some(anchor) } else { None });
-            } else {
-                selection_start_bar.set(bar);
-                selection_end_bar.set(bar);
-                selection_anchor.set(Some(bar));
-            }
+            selected_bars.update(|bars| match bars.binary_search(&bar) {
+                Ok(index) => {
+                    bars.remove(index);
+                }
+                Err(index) => bars.insert(index, bar),
+            });
             save();
+        })
+    };
+    let toggle_bar = StoredValue::new_local(toggle_bar);
+    {
+        let toggle = toggle_bar.get_value();
+        let selection = Closure::wrap(Box::new(move |bar: u32, _extend: bool| {
+            toggle(bar as usize);
         }) as Box<dyn FnMut(u32, bool)>);
         bind_score_selection(selection.as_ref().unchecked_ref());
         selection.forget();
@@ -1694,10 +1747,16 @@ fn App() -> impl IntoView {
         ) {
             let current_exercise = exercise.get_untracked();
             let beat = progress.get_untracked().max(0.0);
+            let sequence = bar_sequence.get_untracked();
             runtime_tempo_map.set(retime_tempo_map(
                 &runtime_tempo_map.get_untracked(),
                 &current_exercise,
-                loops.get_untracked(),
+                &sequence,
+                if loops.get_untracked() == 0 {
+                    CONTINUOUS_LOOP_CHUNK
+                } else {
+                    loops.get_untracked()
+                },
                 beat,
                 value,
             ));
@@ -1709,17 +1768,12 @@ fn App() -> impl IntoView {
         let launch = launch_run.clone();
         Rc::new(move |count_bars| {
             result_modal_open.set(false);
+            selection_changed.set(false);
             let current_exercise = exercise.get_untracked();
-            let bar_count = (exercise_beats(&current_exercise) / beats_per_bar(&current_exercise))
-                .ceil()
-                .max(1.0) as usize;
-            let (start_bar, end_bar, start_beat, end_beat) = selected_bar_range(
-                &current_exercise,
-                selection_start_bar.get_untracked(),
-                selection_end_bar.get_untracked(),
-            );
+            let sequence = bar_sequence.get_untracked();
+            let start_beat = sequence.origin;
             app_mode.set(
-                if start_bar == 0 && end_bar + 1 == bar_count && loops.get_untracked() == 1 {
+                if sequence.bars.len() == sequence.total_bars && loops.get_untracked() == 1 {
                     AppMode::Performance
                 } else {
                     AppMode::Practice
@@ -1730,10 +1784,9 @@ fn App() -> impl IntoView {
             } else {
                 loops.get_untracked()
             };
-            run_expected.set(Arc::new(expanded_range_hits(
+            run_expected.set(Arc::new(expanded_sequence_hits(
                 &current_exercise,
-                start_beat,
-                end_beat,
+                &sequence,
                 configured_loops,
             )));
             observed.set(vec![]);
@@ -1753,6 +1806,7 @@ fn App() -> impl IntoView {
             launch(start_beat, count_bars, false);
         })
     };
+    *start_holder.borrow_mut() = Some(start_new_run.clone());
 
     let save_for_hit = save_current_settings.clone();
     let start_for_hit = start_new_run.clone();
@@ -1815,13 +1869,11 @@ fn App() -> impl IntoView {
                 }
                 // The first downbeat may be struck slightly early, before the
                 // next animation frame changes count-in to running.
-                let current_exercise = exercise.get_untracked();
-                let first_beat = selected_bar_range(
-                    &current_exercise,
-                    selection_start_bar.get_untracked(),
-                    selection_end_bar.get_untracked(),
-                )
-                .2;
+                let first_beat = if repeat_bar_until_good.get_untracked() {
+                    active_segment_start.get_untracked()
+                } else {
+                    bar_sequence.get_untracked().origin
+                };
                 let tempo_map = runtime_tempo_map.get_untracked();
                 let scoring_bpm = tempo_map
                     .first()
@@ -1870,19 +1922,14 @@ fn App() -> impl IntoView {
                 good_ms: on_time_ms.get_untracked(),
                 ..ScoringConfig::default()
             };
-            let (_, _, range_start, range_end) = selected_bar_range(
-                &current_exercise,
-                selection_start_bar.get_untracked(),
-                selection_end_bar.get_untracked(),
-            );
+            let sequence = bar_sequence.get_untracked();
             let mut matched_expected = live_matched_expected.get_untracked();
             let previously_matched = matched_expected.clone();
             let timing = LiveTimingContext {
                 session_start_ms: session_start,
                 bpm: scoring_bpm,
                 tempo_map: &tempo_map,
-                range_start,
-                range_length: range_end - range_start,
+                sequence: &sequence,
                 latency_ms: latency_ms.get_untracked(),
                 config,
             };
@@ -1902,9 +1949,8 @@ fn App() -> impl IntoView {
                         timing.tempo_map,
                     )
                 });
-                let loop_index = ((absolute_beat - range_start).max(0.0)
-                    / (range_end - range_start).max(0.001))
-                .floor() as usize;
+                let loop_index = ((absolute_beat - sequence.origin).max(0.0) / sequence.length())
+                    .floor() as usize;
                 if loop_index > visible_loop_index.get_untracked() {
                     visible_loop_index.set(loop_index);
                     live.set(vec![]);
@@ -2011,8 +2057,18 @@ fn App() -> impl IntoView {
                         });
                     }
                     context_popup.set(None);
-                    selection_anchor.set(None);
-                    selection_notice.set(false);
+                    selection_changed.set(false);
+                    if let Some((hash, start, end)) = pending_legacy_selection.get_untracked()
+                        && hash == parsed.content_hash
+                    {
+                        selected_bars.set(legacy_selected_bars(&parsed, start, end));
+                        pending_legacy_selection.set(None);
+                    } else {
+                        let count = (exercise_beats(&parsed) / beats_per_bar(&parsed))
+                            .ceil()
+                            .max(1.0) as usize;
+                        selected_bars.update(|bars| bars.retain(|bar| *bar < count));
+                    }
                     exercise.set(parsed);
                     result_modal_open.set(false);
                     phase.set("idle".into());
@@ -2136,13 +2192,10 @@ fn App() -> impl IntoView {
         });
     }
     Effect::new(move |_| {
-        let current_exercise = exercise.get();
-        let (start, end, _, _) = selected_bar_range(
-            &current_exercise,
-            selection_start_bar.get(),
-            selection_end_bar.get(),
-        );
-        set_selected_bars(start, end);
+        let _ = exercise.get();
+        if let Ok(value) = json_compatible(&selected_bars.get()) {
+            set_selected_bars(value);
+        }
     });
     {
         let callback = midi_callback.clone();
@@ -2274,11 +2327,25 @@ fn App() -> impl IntoView {
                     if let Some(v) = saved.repeat_tolerance {
                         repeat_tolerance.set(v);
                     }
-                    if let Some(v) = saved.selection_start_bar {
-                        selection_start_bar.set(v);
-                    }
-                    if let Some(v) = saved.selection_end_bar {
-                        selection_end_bar.set(v);
+                    if let Some(mut bars) = saved.selected_bars {
+                        bars.sort_unstable();
+                        bars.dedup();
+                        selected_bars.set(bars);
+                    } else if let (Some(start), Some(end)) =
+                        (saved.selection_start_bar, saved.selection_end_bar)
+                    {
+                        if let Some(hash) = saved
+                            .last_import_hash
+                            .filter(|hash| selected_import.get_untracked().as_ref() != Some(hash))
+                        {
+                            pending_legacy_selection.set(Some((hash, start, end)));
+                        } else {
+                            selected_bars.set(legacy_selected_bars(
+                                &exercise.get_untracked(),
+                                start,
+                                end,
+                            ));
+                        }
                     }
                     if let Some(v) = saved.latency_ms {
                         latency_ms.set(v);
@@ -2350,7 +2417,7 @@ fn App() -> impl IntoView {
         }
     }) as Box<dyn FnMut(web_sys::Event)>);
     if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-        for name in ["click", "pointerdown"] {
+        for name in ["click", "pointerdown", "change"] {
             let _ = document.add_event_listener_with_callback_and_bool(
                 name,
                 control_interaction.as_ref().unchecked_ref(),
@@ -2599,8 +2666,6 @@ fn App() -> impl IntoView {
     let save_loops = save_current_settings.clone();
     let save_repeat_bar = save_current_settings.clone();
     let save_repeat_tolerance = save_current_settings.clone();
-    let save_selection_start = save_current_settings.clone();
-    let save_selection_end = save_current_settings.clone();
     let save_selection_all = save_current_settings.clone();
     let save_cal_reset = save_current_settings.clone();
     let save_cal_manual = save_current_settings.clone();
@@ -2652,20 +2717,16 @@ fn App() -> impl IntoView {
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
               <div class="position-row">
                 <div class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-control open"}else{"bar-selection-control"}>
-                  <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-controls="bar-selection-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Bars)).to_string() on:click=move |_|{selection_notice.set(false);context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Bars){None}else{Some(ContextPopup::Bars)});}><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let bar_beats=beats_per_bar(&exercise.get());let total=(exercise_beats(&exercise.get())/bar_beats).ceil().max(1.0) as usize;let raw=(progress.get().max(0.0)/bar_beats).floor() as usize;let start=selection_start_bar.get().min(total.saturating_sub(1));let end=selection_end_bar.get().min(total.saturating_sub(1)).max(start);let full_performance=start==0&&end+1==total&&app_mode.get()==AppMode::Performance;let current=if full_performance{raw.min(total.saturating_sub(1))+1}else{start+raw.saturating_sub(start)%(end-start+1)+1};let range_total=end+1;if repeat_bar_until_good.get(){format!("BAR {current} / {range_total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {range_total}")}}}</span></button>
-                  <span class=move || if selection_notice.get(){"selection-notice"}else{"selection-notice hidden"} role="status">"Restart the current run before choosing different bars on the score."</span>
+                  <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-controls="bar-selection-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Bars)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Bars){None}else{Some(ContextPopup::Bars)})><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let sequence=bar_sequence.get();let total=sequence.total_bars;let current=(sequence.display_beat(progress.get().max(sequence.origin))/sequence.bar_beats).floor() as usize+1;if repeat_bar_until_good.get(){format!("BAR {current} / {total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {total}")}}}</span></button>
                   <div id="bar-selection-popover" class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-popover"}else{"bar-selection-popover hidden"} role="dialog" aria-label="Bar selection">
                     <div class="bar-selection-popover-head"><strong>"Practise bars"</strong><button class="bar-selection-close" type="button" aria-label="Close bar selection" on:click=move |_|{context_popup.set(None);focus_popup_trigger(ContextPopup::Bars);}><X size=15/></button></div>
-                    <div class="bar-range-fields">
-                      <label>"From"<select aria-label="First selected bar" prop:value=move || selection_start_bar.get().to_string() on:change={let stop=stop_for_navigation.clone();move |event|{stop();selection_anchor.set(None);let value=event_target_value(&event).parse().unwrap_or(0);selection_start_bar.set(value);if selection_end_bar.get_untracked()<value{selection_end_bar.set(value);}save_selection_start();}}>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;(0..count).map(|bar|view!{<option value=bar.to_string()>{format!("Bar {}",bar+1)}</option>}).collect_view()}}</select></label>
-                      <label>"To"<select aria-label="Last selected bar" prop:value=move || selection_end_bar.get().min((exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize-1).to_string() on:change={let stop=stop_for_navigation.clone();move |event|{stop();selection_anchor.set(None);let value=event_target_value(&event).parse().unwrap_or(selection_start_bar.get_untracked());selection_end_bar.set(value.max(selection_start_bar.get_untracked()));save_selection_end();}}>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;(0..count).map(|bar|view!{<option value=bar.to_string()>{format!("Bar {}",bar+1)}</option>}).collect_view()}}</select></label>
-                    </div>
-                    <button class="select-all-bars" type="button" on:click={let stop=stop_for_navigation.clone();move |_|{stop();selection_anchor.set(None);selection_start_bar.set(0);selection_end_bar.set(usize::MAX);save_selection_all();}}>"All bars"</button>
-                    <small>{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;let start=selection_start_bar.get().min(count-1);let end=selection_end_bar.get().min(count-1).max(start);if start==0&&end+1==count{"All bars · Performance when played once".into()}else if start==end{format!("Bar {} selected · Practice",start+1)}else{format!("Bars {}–{} selected · Practice",start+1,end+1)}}}</small>
+                    <div class="bar-checkboxes" role="group" aria-label="Individual practice bars">{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;let toggle=toggle_bar.get_value();(0..count).map(|bar|{let toggle=toggle.clone();view!{<label><input type="checkbox" aria-label=format!("Bar {}",bar+1) prop:checked=move || selected_bars.get().binary_search(&bar).is_ok() on:change=move |_|toggle(bar)/><span>{format!("Bar {}",bar+1)}</span></label>}}).collect_view()}}</div>
+                    <button class="select-all-bars" type="button" on:click=move |_|{if phase.get_untracked()=="paused" && !selected_bars.get_untracked().is_empty(){selection_changed.set(true);}selected_bars.set(vec![]);save_selection_all();}>"All bars"</button>
+                    <small>{move || {let bars=selected_bars.get();if bars.is_empty(){"All bars · Performance when played once".into()}else{format!("{} selected · Practice",bars.iter().map(|bar|format!("{}",bar+1)).collect::<Vec<_>>().join(", "))}}}</small>
                   </div>
                 </div>
-                <div class="timeline"><i style=move || format!("width:{:.2}%",(progress.get().max(0.0)/exercise_beats(&exercise.get())*100.0).rem_euclid(100.0).clamp(0.0,100.0))></i></div>
-                <select class="loop-control" aria-label=move || format!("Loops: {}", match loops.get(){2=>"2 LOOPS",4=>"4 LOOPS",0=>"∞ LOOP",_=>"1 / 1 LOOP"}) title="Choose how many times to play the selected bars" prop:value=move || loops.get().to_string() on:change={let save=save_loops.clone();let stop=stop_for_navigation.clone();move |event|{stop();loops.set(event_target_value(&event).parse().unwrap_or(1));save();}}><option value="1">"1 / 1 LOOP"</option><option value="2">"2 LOOPS"</option><option value="4">"4 LOOPS"</option><option value="0">"∞ LOOP"</option></select>
+                <div class="timeline"><i style=move || {let sequence=bar_sequence.get();format!("width:{:.2}%",((progress.get().max(sequence.origin)-sequence.origin)/sequence.length()*100.0).rem_euclid(100.0).clamp(0.0,100.0))}></i></div>
+                <select class="loop-control" aria-label=move || format!("Loops: {}", match loops.get(){2=>"2 LOOPS",4=>"4 LOOPS",0=>"∞ LOOP",_=>"1 / 1 LOOP"}) title="Choose how many times to play the selected bars" prop:value=move || loops.get().to_string() on:change={let save=save_loops.clone();move |event|{let value=event_target_value(&event).parse().unwrap_or(1);if phase.get_untracked()=="paused" && value!=loops.get_untracked(){selection_changed.set(true);}loops.set(value);save();}}><option value="1">"1 / 1 LOOP"</option><option value="2">"2 LOOPS"</option><option value="4">"4 LOOPS"</option><option value="0">"∞ LOOP"</option></select>
               </div>
               <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>
               <section id="result-dialog" class="stats-modal results-modal" role="dialog" aria-modal="true" aria-labelledby="result-title" on:click=|event|event.stop_propagation() on:keydown=move |event:web_sys::KeyboardEvent|{
@@ -2697,12 +2758,12 @@ fn App() -> impl IntoView {
                 </div>
                 <section class="summary-card progress-card">
                   <h3>"Your Progress"</h3><p>"Session score over time"</p>
-                  {move || displayed_result.get().map(|session|{let scores=progress_scores(&session,&history.get());let points=progress_chart_points(&scores);let line=points.iter().map(|(x,y)|format!("{x:.1},{y:.1}")).collect::<Vec<_>>().join(" ");let latest=points.last().copied().zip(scores.last().copied());view!{
-                    <svg class="progress-chart" viewBox="0 0 760 190" role="img" aria-label=format!("Scores for the last {} sessions",scores.len())>
-                      <title>{format!("Last {} scores for this exercise at {:.0} BPM",scores.len(),session.bpm)}</title>
+                  {move || displayed_result.get().map(|session|{let entries=progress_sessions(&session,&history.get());let scores=entries.iter().map(|(_,score)|*score).collect::<Vec<_>>();let points=progress_chart_points(&scores);let selected=entries.iter().position(|(id,_)|id==&session.id);let line=points.iter().map(|(x,y)|format!("{x:.1},{y:.1}")).collect::<Vec<_>>().join(" ");let latest=selected.and_then(|index|points.get(index).copied().zip(scores.get(index).copied()));view!{
+                    <svg class="progress-chart" viewBox="0 0 760 190" role="img" aria-label=format!("Scores for {} sessions through the selected session",scores.len())>
+                      <title>{format!("{} scores for this exercise through the selected session",scores.len())}</title>
                       {[100_u8,75,50,25,0].into_iter().map(|value|{let y=146.0-132.0*value as f64/100.0;view!{<g class="progress-grid"><line x1="48" y1=y.to_string() x2="712" y2=y.to_string()/><text x="36" y=(y+4.0).to_string()>{value}</text></g>}}).collect_view()}
                       <polyline class="progress-line" points=line/>
-                      {points.iter().enumerate().map(|(index,(x,y))|view!{<g><circle class=if index+1==points.len(){"progress-point latest"}else{"progress-point"} cx=x.to_string() cy=y.to_string() r=if index+1==points.len(){"5"}else{"3"}/><text class="progress-session-label" x=x.to_string() y="170">{index+1}</text></g>}).collect_view()}
+                      {points.iter().enumerate().map(|(index,(x,y))|view!{<g><circle class=if Some(index)==selected{"progress-point latest"}else{"progress-point"} data-session-id=entries[index].0.clone() data-score=entries[index].1.to_string() cx=x.to_string() cy=y.to_string() r=if Some(index)==selected{"5"}else{"3"}/><text class="progress-session-label" x=x.to_string() y="170">{index+1}</text></g>}).collect_view()}
                       {latest.map(|((x,y),score)|{let label_x=(x-22.0).clamp(4.0,712.0);let label_y=(y-31.0).max(1.0);view!{<g class="progress-latest-label"><rect x=label_x.to_string() y=label_y.to_string() width="44" height="22" rx="6"/><text x=(label_x+22.0).to_string() y=(label_y+15.0).to_string()>{format!("{score:.0}")}</text></g>}})}
                       <text class="progress-axis-label" x="380" y="188">"Session"</text>
                     </svg>
@@ -2715,7 +2776,7 @@ fn App() -> impl IntoView {
             <section class="practice-controls">
               <div class="transport">
                 <button class="restart-button" on:click={let reset=reset_run.clone();move |_|reset()}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true"><RotateCcw size=24/></span><span>"Restart"</span></span><small>"Clear current run"</small></button>
-                <button class="primary start-button" aria-label=move || match phase.get().as_str(){"running"|"count_in"|"starting"=>String::from("Pause"),"paused"=>String::from("Resume"),_=>{let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;if selection_start_bar.get()==0&&selection_end_bar.get().min(count-1)+1==count&&loops.get()==1{String::from("Start performance Hit your drum or press J to start Start practice")}else{String::from("Start practice Hit your drum or press J to start Start performance")}}} on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"|"starting"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"|"starting"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"|"starting"=>"Pause","paused"=>"Resume",_=>{let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;if selection_start_bar.get()==0&&selection_end_bar.get().min(count-1)+1==count&&loops.get()==1{"Start performance "}else{"Start practice "}}}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
+                <button class="primary start-button" aria-label=move || match phase.get().as_str(){"running"|"count_in"|"starting"=>String::from("Pause"),"paused" if selection_changed.get()=>String::from("Start selected bars"),"paused"=>String::from("Resume"),_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{String::from("Start performance Hit your drum or press J to start Start practice")}else{String::from("Start practice Hit your drum or press J to start Start performance")}}} on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"|"starting"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"|"starting"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"|"starting"=>"Pause","paused" if selection_changed.get()=>"Start selected bars","paused"=>"Resume",_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{"Start performance "}else{"Start practice "}}}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
                 <aside class="timing-key" aria-label="Timing feedback key">
                   <span class="perfect"><i aria-hidden="true"></i>"Perfect"</span>
                   <span class="good"><i aria-hidden="true"></i>"Good"</span>
@@ -2903,7 +2964,7 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment performance history and practice time from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{match JsFuture::from(promise).await{Ok(_)=>{history.set(vec![]);incomplete_history.set(0);practice_time_ms.set(Some(0.0));},Err(error)=>import_error.set(Some(format!("History could not be cleared: {error:?}")))}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selection_start_bar.set(0);selection_end_bar.set(usize::MAX);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment performance history and practice time from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{match JsFuture::from(promise).await{Ok(_)=>{history.set(vec![]);incomplete_history.set(0);practice_time_ms.set(Some(0.0));},Err(error)=>import_error.set(Some(format!("History could not be cleared: {error:?}")))}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" tabindex="-1" on:click=move |_|{settings_open.set(false);restore_settings_focus();}></button>
       </main>
@@ -2999,6 +3060,7 @@ mod tests {
 
     fn live_feedback(expected: &[ExpectedHit], timestamps: &[f64]) -> Vec<LiveJudgement> {
         let mut matched = HashSet::new();
+        let sequence = BarSequence::new(&paradiddle(), &[0]);
         timestamps
             .iter()
             .map(|timestamp| {
@@ -3010,8 +3072,7 @@ mod tests {
                         session_start_ms: 0.0,
                         bpm: 60.0,
                         tempo_map: &[],
-                        range_start: 0.0,
-                        range_length: 4.0,
+                        sequence: &sequence,
                         latency_ms: 0.0,
                         config: ScoringConfig::default(),
                     },
@@ -3057,7 +3118,8 @@ mod tests {
     fn live_tempo_change_preserves_elapsed_history_and_retimes_future_beats() {
         let exercise = paradiddle();
         let original = scaled_tempo_map(&exercise, 1, 60.0);
-        let changed = retime_tempo_map(&original, &exercise, 1, 4.0, 120.0);
+        let sequence = BarSequence::new(&exercise, &[]);
+        let changed = retime_tempo_map(&original, &exercise, &sequence, 1, 4.0, 120.0);
         let base = changed[0].bpm;
         assert!((elapsed_ms_at_beat(4.0, base, &changed) - 4_000.0).abs() < 0.01);
         assert!((elapsed_ms_at_beat(8.0, base, &changed) - 6_000.0).abs() < 0.01);
@@ -3098,6 +3160,7 @@ mod tests {
         let attempt = hits_for_bar_attempt(&expected, 0.0, 4.0);
         let target = elapsed_ms_at_beat(3.9, 120.0, &[]);
         let mut matched = HashSet::new();
+        let sequence = BarSequence::new(&paradiddle(), &[0]);
         let judgement = live_judgement_for_hit(
             &attempt,
             &mut matched,
@@ -3109,8 +3172,7 @@ mod tests {
                 session_start_ms: 0.0,
                 bpm: 120.0,
                 tempo_map: &[],
-                range_start: 0.0,
-                range_length: 4.0,
+                sequence: &sequence,
                 latency_ms: 0.0,
                 config: ScoringConfig::default(),
             },
@@ -3217,6 +3279,12 @@ mod tests {
             ..two_note_bar()[0].clone()
         }];
         let mut matched = HashSet::new();
+        let sequence = BarSequence {
+            bars: vec![7],
+            bar_beats: 4.0,
+            origin: 28.0,
+            total_bars: 8,
+        };
         let result = live_judgement_for_hit(
             &expected,
             &mut matched,
@@ -3225,8 +3293,7 @@ mod tests {
                 session_start_ms: 0.0,
                 bpm: 240.0,
                 tempo_map: &[],
-                range_start: 28.0,
-                range_length: 4.0,
+                sequence: &sequence,
                 latency_ms: 0.0,
                 config: ScoringConfig::default(),
             },
@@ -3253,18 +3320,119 @@ mod tests {
     }
 
     #[test]
-    fn selected_range_repetitions_have_unique_ids_and_contiguous_timing() {
-        let exercise = paradiddle();
-        let (start_bar, end_bar, start_beat, end_beat) = selected_bar_range(&exercise, 1, 2);
-        assert_eq!((start_bar, end_bar), (1, 2));
-        assert_eq!((start_beat, end_beat), (4.0, 12.0));
-        let hits = expanded_range_hits(&exercise, start_beat, end_beat, 2);
-        assert!(hits.iter().all(|hit| (4.0..20.0).contains(&hit.beat)));
+    fn selected_bars_keep_score_order_and_contiguous_scoring_time() {
+        let mut exercise = paradiddle();
+        let mut fifth = exercise.hits[0].clone();
+        fifth.id = "fifth-bar".into();
+        fifth.beat = 16.0;
+        fifth.notation_beat = 16.0;
+        exercise.hits.push(fifth);
+        let sequence = BarSequence::new(&exercise, &[4, 1, 2]);
+        assert_eq!(sequence.bars, vec![1, 2, 4]);
+        assert_eq!(sequence.origin, 4.0);
+        for (timeline, score) in [
+            (4.0, 4.0),
+            (8.0, 8.0),
+            (12.0, 16.0),
+            (16.0, 4.0),
+            (20.0, 8.0),
+            (24.0, 16.0),
+        ] {
+            assert_eq!(sequence.display_beat(timeline), score);
+        }
+        let hits = expanded_sequence_hits(&exercise, &sequence, 2);
+        assert!(hits.iter().all(|hit| (4.0..28.0).contains(&hit.beat)));
         assert_eq!(
             hits.iter().map(|hit| &hit.id).collect::<HashSet<_>>().len(),
             hits.len()
         );
-        assert!(hits.iter().any(|hit| hit.beat >= 12.0));
+        assert!(
+            hits.iter()
+                .any(|hit| hit.id == "fifth-bar-loop1" && hit.beat == 12.0)
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit.id == "fifth-bar-loop2" && hit.beat == 24.0)
+        );
+        let observed = hits
+            .iter()
+            .map(|hit| observed_at(1_000.0 + hit.beat * 250.0))
+            .collect::<Vec<_>>();
+        let summary = score_session_with_tempo_map(
+            &hits,
+            &observed,
+            240.0,
+            1_000.0,
+            0.0,
+            ScoringConfig::default(),
+            &[],
+        );
+        assert_eq!(summary.matched, hits.len());
+        assert_eq!(summary.missed, 0);
+        assert_eq!(summary.extras, 0);
+        assert_eq!(BarSequence::new(&exercise, &[]).bars, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn selected_bar_jumps_preserve_source_tempos_and_grace_offsets() {
+        let mut exercise = paradiddle();
+        let mut principal = exercise.hits[0].clone();
+        principal.id = "principal".into();
+        principal.beat = 16.0;
+        principal.notation_beat = 16.0;
+        let mut grace = principal.clone();
+        grace.id = "grace".into();
+        grace.beat = 15.875;
+        grace.grace = true;
+        exercise.hits.extend([grace, principal]);
+        exercise.tempo_map = [(0.0, 60.0), (4.0, 120.0), (8.0, 90.0), (16.0, 180.0)]
+            .into_iter()
+            .map(|(beat, bpm)| TempoChange {
+                tick: (beat * exercise.ticks_per_beat as f64) as u64,
+                beat,
+                bpm,
+            })
+            .collect();
+        let sequence = BarSequence::new(&exercise, &[1, 2, 4]);
+        let tempo = expanded_sequence_tempo_map(&exercise, &sequence, 2);
+        assert_eq!(
+            tempo
+                .iter()
+                .map(|change| (change.beat, change.bpm))
+                .collect::<Vec<_>>(),
+            vec![
+                (4.0, 120.0),
+                (8.0, 90.0),
+                (12.0, 180.0),
+                (16.0, 120.0),
+                (20.0, 90.0),
+                (24.0, 180.0)
+            ]
+        );
+        let hits = expanded_sequence_hits(&exercise, &sequence, 2);
+        assert!(
+            hits.iter()
+                .any(|hit| hit.id == "grace-loop1" && hit.beat == 11.875)
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit.id == "principal-loop1" && hit.beat == 12.0)
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit.id == "grace-loop2" && hit.beat == 23.875)
+        );
+    }
+
+    #[test]
+    fn legacy_bar_ranges_migrate_to_individual_selections() {
+        let exercise = paradiddle();
+        assert_eq!(legacy_selected_bars(&exercise, 1, 2), vec![1, 2]);
+        assert_eq!(
+            legacy_selected_bars(&exercise, 1, usize::MAX),
+            vec![1, 2, 3]
+        );
+        assert!(legacy_selected_bars(&exercise, 0, usize::MAX).is_empty());
     }
 
     #[test]
@@ -3363,7 +3531,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_uses_the_latest_ten_scores_for_the_same_file_and_tempo() {
+    fn progress_includes_all_prior_scores_for_the_same_exercise() {
         let mut history = (0..12)
             .map(|index| {
                 let mut session = session_record(
@@ -3379,17 +3547,30 @@ mod tests {
         let current = history.last().unwrap().clone();
         let mut other_tempo = session_record("other-tempo", "same-file", SCORING_VERSION, 99.0);
         other_tempo.bpm = 120.0;
+        other_tempo.ended_at = "2026-11-11T18:05:30Z".into();
         history.push(other_tempo);
-        assert_eq!(
-            progress_scores(&current, &history),
-            (2..12).map(|value| value as f64).collect::<Vec<_>>()
-        );
+        let progress = progress_sessions(&current, &history);
+        assert_eq!(progress.len(), 13);
+        assert_eq!(progress[6], ("other-tempo".into(), 99.0));
+        assert_eq!(progress.last().unwrap().0, current.id);
 
         let lone = session_record("lone", "new-file", SCORING_VERSION, 78.0);
-        assert_eq!(progress_scores(&lone, &[]), vec![78.0]);
+        assert_eq!(progress_sessions(&lone, &[]), vec![("lone".into(), 78.0)]);
         assert_eq!(progress_chart_points(&[78.0]).len(), 1);
         assert_eq!(progress_chart_points(&[60.0, 80.0]).len(), 2);
-        assert_eq!(progress_scores(&history[2], &history), vec![0.0, 1.0, 2.0]);
+        assert_eq!(
+            progress_sessions(&history[2], &history)
+                .iter()
+                .map(|(_, score)| *score)
+                .collect::<Vec<_>>(),
+            vec![0.0, 1.0, 2.0]
+        );
+        let mut unrelated = session_record("unrelated", "different-file", SCORING_VERSION, 100.0);
+        unrelated.exercise_title = current.exercise_title.clone();
+        assert!(!same_exercise(&current, &unrelated));
+        let mut legacy = current.clone();
+        legacy.exercise_hash.clear();
+        assert!(same_exercise(&current, &legacy));
     }
 
     #[test]

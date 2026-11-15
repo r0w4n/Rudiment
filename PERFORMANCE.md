@@ -32,6 +32,8 @@ Tier A is suitable for pull requests. Tier B is on-demand and release-facing. Ti
 
 `scripts/generate-fixtures.mjs` deterministically creates 60, 120, 180 and 240 BPM SMFs: 64-note small, 480-note medium, 2,000-note large, 10,000-note extreme, and a dense 240 BPM exercise containing eighth-subdivision bursts and simultaneous kick/snare hits. The full suite combines those imports with rapid MIDI/keyboard traffic, feedback painting, playhead frames, scrolling, modal use, and pause/resume/restart transitions.
 
+Interaction workloads also select bars 2, 3 and 5, start two repetitions and wait for the jump to bar 5. The recorded `noncontiguous.jumpResponseMs` is a diagnostic musical-duration observation, not a latency budget; it is captured after the existing gated measurements and does not change their baseline workload.
+
 Directly observed values include callback work, import-to-render, notation rendering, score/feedback work, input-to-DOM-mutation latency, animation intervals, Long Tasks, response times, and Chromium precise heap size. Frame drops are estimated from intervals above 16.7 ms. `AudioContext.getOutputTimestamp()` helps align scheduled visual pulses, but the harness does not measure acoustic output, USB/driver latency, compositor-only work, or GC pauses unavailable through stable browser APIs.
 
 ## Findings and optimisations
