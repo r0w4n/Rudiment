@@ -312,7 +312,7 @@ Observed labels: **Perfect**, **Good**, **Early**, **Late**, **Missed** with gre
 - Place a persistent, keyboard- and touch-operable Notation / Highway segmented control in the workspace header. Selected state is both visible and programmatically exposed; switching never changes the run.
 - Highway replaces the ivory score with the existing dark panel, raised lane and restrained border tokens. Keep the metronome, bar selection, progress, loops, transport and timing legend shared.
 - Show only configured instruments, initially one SNARE lane. Explain unsupported instruments explicitly. Keep the centred mint playhead fixed while notes and bar/beat grid move together, using the authoritative transport position.
-- Expected hits are mint, uniformly sized, with supplied sticking and accent marks only. Grace strokes stagger above the lane centre to remain distinct from nearby notes, without changing onset alignment. Assessed markers pair semantic timing-feedback colours with P/G/E/L or × and accessible text; never fabricate a miss or use feedback colours as decoration.
+- Expected hits are mint, uniformly sized, with supplied sticking and accent marks only. Grace strokes stagger above the lane centre to remain distinct from nearby notes, without changing onset alignment. Assessed markers pair semantic timing-feedback colours with non-letter shapes and accessible text; the timing key identifies those shapes. Never fabricate a miss or use feedback colours as decoration.
 - Keep bar numbers and beat lines subordinate to notes. Use responsive spacing, readable labels and touch targets without horizontal page overflow. Do not add decorative animation or a second clock.
 
 ---

@@ -74,6 +74,83 @@ test('Highway uses the transport position beneath a fixed centre playhead', asyn
   expect(Math.abs(faster.note - (faster.centre + (faster.expected - faster.beat) * faster.width / 10))).toBeLessThan(8);
 });
 
+test('Highway rests at the count-in position without jumping on start', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  const position = () => page.evaluate(() => {
+    const svg = document.querySelector<SVGSVGElement>('.highway-svg')!;
+    const moving = svg.querySelector<SVGGElement>('.highway-moving')!;
+    const width = svg.viewBox.baseVal.width;
+    const x = moving.transform.baseVal.consolidate()!.matrix.e;
+    return (width / 2 - x) / Math.max(80, width / 10);
+  });
+  await expect.poll(position).toBeCloseTo(-4, 3);
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  const countIn = page.locator('#settings-dialog').getByLabel('Count-in');
+  await countIn.selectOption('2');
+  await expect.poll(position).toBeCloseTo(-8, 3);
+  await countIn.selectOption('0');
+  await expect.poll(position).toBeCloseTo(0, 3);
+  await countIn.selectOption('1');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByLabel('Select bars').click();
+  await page.getByLabel('Bar 3', { exact: true }).check();
+  await page.getByLabel('Close bar selection').click();
+  await expect.poll(position).toBeCloseTo(4, 3);
+  await page.evaluate(() => {
+    const svg = document.querySelector<SVGSVGElement>('.highway-svg')!;
+    const moving = svg.querySelector<SVGGElement>('.highway-moving')!;
+    const positions: number[] = [];
+    (window as any).__highwayStartPositions = positions;
+    const observer = new MutationObserver(() => {
+      const width = svg.viewBox.baseVal.width;
+      const x = moving.transform.baseVal.consolidate()!.matrix.e;
+      positions.push((width / 2 - x) / Math.max(80, width / 10));
+    });
+    observer.observe(moving, { attributes: true, attributeFilter: ['transform'] });
+    (window as any).__highwayStartObserver = observer;
+  });
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  await page.waitForTimeout(100);
+  const observed = await page.evaluate(() => {
+    (window as any).__highwayStartObserver.disconnect();
+    return (window as any).__highwayStartPositions as number[];
+  });
+  expect(observed.length).toBeGreaterThan(0);
+  expect(Math.min(...observed)).toBeGreaterThan(3.9);
+  expect(Math.max(...observed)).toBeLessThan(5);
+  await page.getByRole('button', { name: /Restart/ }).click();
+  await expect.poll(position).toBeCloseTo(4, 3);
+});
+
+test('Highway hit judgements use non-letter shapes and remain accessible', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  const note = page.locator('.highway-note[data-note-id="p-0-0"][data-iteration="0"]');
+  await expect(note).toBeAttached();
+  const shapes = new Set<string>();
+  for (const judgement of ['perfect', 'good', 'early', 'late', 'missed']) {
+    // Supply presentation data directly to exercise all renderer states; this
+    // does not claim that the current live scorer emits missed-note events.
+    await page.evaluate(value => (window as any).rudiment.presentationJudgements([{ expected_id: 'p-0-0', iteration: 0, judgement: value }]), judgement);
+    await expect(note).toHaveAttribute('data-judgement', judgement);
+    await expect(note).toHaveAttribute('aria-label', new RegExp(judgement));
+    const symbol = note.locator('path.highway-judgement');
+    const shape = await symbol.getAttribute('d');
+    expect(shape).toBeTruthy();
+    shapes.add(shape!);
+    await expect(note.locator('text.highway-judgement')).toHaveCount(0);
+    if (judgement !== 'missed') {
+      const rect = (await note.locator('rect').boundingBox())!;
+      const marker = (await symbol.boundingBox())!;
+      expect(marker.y).toBeGreaterThanOrEqual(rect.y + rect.height);
+    }
+  }
+  expect(shapes.size).toBe(5);
+  await expect(note.locator('.highway-hand')).toHaveText('R');
+});
+
 test('Highway colours only the scored repetition and disposes when switched away', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Open settings' }).click();
@@ -96,7 +173,10 @@ test('Highway colours only the scored repetition and disposes when switched away
   await hit(1);
   const first = page.locator('.highway-note[data-note-id="p-0-2"][data-iteration="0"]');
   await expect(first).toHaveAttribute('data-judgement', /perfect|good|early|late/);
-  await expect(first.locator('.highway-judgement')).toHaveText(/P|G|E|L/);
+  const marker = (await first.locator('rect').boundingBox())!;
+  const label = (await first.locator('.highway-judgement').boundingBox())!;
+  expect(label.y).toBeGreaterThanOrEqual(marker.y + marker.height);
+  await expect(first).toHaveAttribute('aria-label', /perfect|good|early|late/);
   const second = page.locator('.highway-note[data-note-id="p-0-2"][data-iteration="1"]');
   await expect(second).toHaveAttribute('data-judgement', 'expected');
   await hit(5);
@@ -141,6 +221,10 @@ test('Highway header and timing legend remain usable at narrow widths', async ({
 
 test('Highway repositions stable note IDs when a noncontiguous selection changes', async ({ page }) => {
   await page.goto('/');
+  // Keep the later selected bar in the visible range while testing mapping.
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByRole('button', { name: 'Highway', exact: true }).click();
   await page.getByLabel('Select bars').click();
   await page.getByLabel('Bar 1', { exact: true }).check();
@@ -175,6 +259,13 @@ test('grace strokes remain distinct without changing their onset positions', asy
     expect(pair.xGap).toBeGreaterThan(0);
     expect(pair.verticalGap).toBeGreaterThanOrEqual(0);
   }
+  const graceNote = page.locator('.highway-note[data-grace="true"]').first();
+  const graceId = await graceNote.getAttribute('data-note-id');
+  await page.evaluate(id => (window as any).rudiment.presentationJudgements([{ expected_id: id, iteration: 0, judgement: 'good' }]), graceId);
+  await expect(graceNote).toHaveAttribute('data-judgement', 'good');
+  const graceMarker = (await graceNote.locator('rect').boundingBox())!;
+  const graceLabel = (await graceNote.locator('.highway-judgement').boundingBox())!;
+  expect(graceLabel.y + graceLabel.height).toBeLessThanOrEqual(graceMarker.y);
   await page.screenshot({ path: testInfo.outputPath('highway-flams.png') });
   await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('public/exercises/rudiments/09_single_drag.mid', 'Single Drag'));
   await expect(page.locator('.exercise-heading strong')).toHaveText('Single Drag');

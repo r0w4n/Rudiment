@@ -1350,11 +1350,22 @@ fn App() -> impl IntoView {
             loops.get_untracked()
         };
         let position = progress.get_untracked();
+        let current_phase = phase.get_untracked();
+        // Before a new run, show the same count-in position that Tone will
+        // report on its first frame, rather than jumping there on Start.
+        let presentation_position =
+            if current_phase == "idle" || (current_phase == "count_in" && position < 0.0) {
+                sequence.origin - sequence.bar_beats * f64::from(count_in.get_untracked())
+            } else if position < 0.0 && current_phase != "count_in" {
+                sequence.origin
+            } else {
+                position
+            };
         serde_json::json!({
             "bars": sequence.bars,
             "endBeat": sequence.origin + sequence.length() * f64::from(repetitions),
-            "position": if position < 0.0 { sequence.origin } else { position },
-            "phase": phase.get_untracked(),
+            "position": presentation_position,
+            "phase": current_phase,
             "tempoBpm": bpm.get_untracked(),
             "loops": loops.get_untracked(),
             "repeatUntilGood": repeat_bar_until_good.get_untracked(),
@@ -1387,6 +1398,7 @@ fn App() -> impl IntoView {
         bar_attempt.track();
         phase.track();
         bpm.track();
+        count_in.track();
         if presentation_active()
             && let Ok(value) = json_compatible(&presentation_config())
         {

@@ -482,8 +482,14 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .highway-note[data-judgement=early] rect{fill:var(--feedback-early);stroke:var(--feedback-early)}
 .highway-note[data-judgement=late] rect{fill:var(--feedback-late);stroke:var(--feedback-late)}
 .highway-note[data-judgement=missed] rect{fill:none;stroke:var(--feedback-missed);stroke-width:2;stroke-dasharray:3 2}
-.highway-judgement{fill:var(--bg);font:800 10px var(--font-ui);pointer-events:none}
+.highway-judgement{fill:var(--ink);pointer-events:none}
 .highway-note[data-judgement=missed] .highway-judgement{fill:var(--feedback-missed)}
+.highway-workspace .timing-key i{position:relative;width:12px;height:12px}
+.highway-workspace .timing-key i::after{content:"";position:absolute;inset:2px;background:var(--bg)}
+.highway-workspace .timing-key .perfect i::after{border-radius:50%}
+.highway-workspace .timing-key .early i::after{clip-path:polygon(100% 0,0 50%,100% 100%)}
+.highway-workspace .timing-key .late i::after{clip-path:polygon(0 0,100% 50%,0 100%)}
+.highway-workspace .timing-key .unmatched i::after{clip-path:polygon(0 15%,15% 0,50% 35%,85% 0,100% 15%,65% 50%,100% 85%,85% 100%,50% 65%,15% 100%,0 85%,35% 50%)}
 .highway-hand,.highway-accent{fill:var(--ink);font:700 11px var(--font-ui)}
 .highway-playhead line{stroke:var(--teal);stroke-width:2;opacity:.85}
 .highway-playhead path{fill:var(--teal)}

@@ -5,6 +5,15 @@ const element = (name, attributes = {}) => {
   for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
   return node;
 };
+// Non-letter symbols preserve a visible alternative to colour. The timing key
+// uses the corresponding circle, square and directional triangles.
+const judgementShapes = {
+  perfect: 'M 0 -4 A 4 4 0 1 1 0 4 A 4 4 0 1 1 0 -4 Z',
+  good: 'M -4 -4 H 4 V 4 H -4 Z',
+  early: 'M 3 -5 L -3 0 L 3 5 Z',
+  late: 'M -3 -5 L 3 0 L -3 5 Z',
+  missed: 'M -4 -5 L 0 -1 L 4 -5 L 5 -4 L 1 0 L 5 4 L 4 5 L 0 1 L -4 5 L -5 4 L -1 0 L -5 -4 Z',
+};
 
 export function createHighwaySvg(viewport, record = null) {
   let svg, moving, grid, notes, playhead, width = 1, height = 1, scale = 1, model;
@@ -68,7 +77,7 @@ export function createHighwaySvg(viewport, record = null) {
       if (!group) {
         group = element('g', { class: 'highway-note', role: 'img', 'data-note-id': note.id, 'data-iteration': note.iteration, 'data-signature': signature, 'data-grace': note.grace });
         group.append(element('rect', { x: -9, y: -11, width: 18, height: 22, rx: 5 }));
-        group.append(element('text', { class: 'highway-judgement', x: 0, y: 4, 'text-anchor': 'middle', 'aria-hidden': 'true' }));
+        group.append(element('path', { class: 'highway-judgement', 'aria-hidden': 'true' }));
         if (note.accent) {
           const accent = element('text', { class: 'highway-accent', x: 0, y: note.grace ? -30 : -20, 'text-anchor': 'middle' });
           accent.textContent = '>';
@@ -93,7 +102,11 @@ export function createHighwaySvg(viewport, record = null) {
       const judgement = note.judgement || 'expected';
       if (group.getAttribute('data-judgement') !== judgement) {
         group.setAttribute('data-judgement', judgement);
-        group.querySelector('.highway-judgement').textContent = ({ perfect: 'P', good: 'G', early: 'E', late: 'L', missed: '×' })[judgement] ?? '';
+        // Keep the non-letter symbols outside hit blocks. Grace symbols sit
+        // above their accents; normal symbols sit below the sticking labels.
+        const symbol = group.querySelector('.highway-judgement');
+        symbol.setAttribute('transform', `translate(0 ${judgement === 'missed' ? 0 : note.grace ? -49 : 43})`);
+        symbol.setAttribute('d', judgementShapes[judgement] ?? '');
         group.lastChild.textContent = `${note.instrument}${note.grace ? ' grace' : ''} · ${judgement}${note.hand ? ` · ${note.hand}` : ''}`;
         group.setAttribute('aria-label', group.lastChild.textContent);
       }

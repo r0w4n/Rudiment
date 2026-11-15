@@ -42,7 +42,10 @@ configuration and rendering support, not another MIDI parser or clock.
 
 The built-in SVG Highway mounts only when selected and uses the existing host.
 It draws bounded, keyed note and grid elements under a fixed centred playhead;
-resize observation is owned and disconnected by the mount. The current live
+resize observation is owned and disconnected by the mount. When idle, the
+timeline rests at the configured count-in start for the selected bars, avoiding
+a jump on Start. Hit feedback uses non-letter shapes outside the note blocks,
+with a matching key and accessible labels; R/L sticking is unchanged. The current live
 assessment path emits physical hit outcomes but does not emit live missed-note
 judgements. The renderer does not invent them; final session results still
 contain authoritative misses. The final scorer uses optimal one-to-one matching,
