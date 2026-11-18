@@ -1553,7 +1553,7 @@ fn App() -> impl IntoView {
     let welcome = RwSignal::new(true);
     let import_error = RwSignal::new(None::<String>);
     let metronome_preview_error = RwSignal::new(None::<String>);
-    let midi_status = RwSignal::new("Not connected".to_string());
+    let midi_status = RwSignal::new("Checking for MIDI drums…".to_string());
     let midi_ports = RwSignal::new(Vec::<MidiPort>::new());
     let selected_midi = RwSignal::new(None::<String>);
     let diagnostics = RwSignal::new(Vec::<String>::new());
@@ -2606,10 +2606,10 @@ fn App() -> impl IntoView {
                         );
                     } else if event.disconnected_id.is_some() {
                         midi_status.set("Drums disconnected — reconnecting when available".into());
-                    } else if event.permission.as_deref() == Some("prompt") {
-                        midi_status.set("MIDI ready · connect to grant access".into());
                     } else if event.permission.as_deref() == Some("unsupported") {
                         midi_status.set("Web MIDI unavailable in this browser".into());
+                    } else if !event.ports.is_empty() {
+                        midi_status.set("Choose a MIDI input".into());
                     } else {
                         midi_status.set("No MIDI drums detected".into());
                     }
@@ -3243,7 +3243,7 @@ fn App() -> impl IntoView {
           <a class="brand" href="#" aria-label="Rudiment"><span class="brand-mark" aria-hidden="true"></span><span>"Rudiment"</span></a>
           <div class="exercise-heading"><span class="eyebrow">"CURRENT EXERCISE"</span><strong>{move || exercise.get().title}</strong><small>"4/4 · sticking and accents"</small></div>
           <button id="settings-trigger" class="stats-trigger settings-trigger" aria-label="Open settings" title="Rudiment settings" aria-haspopup="dialog" aria-expanded=move || settings_open.get().to_string() on:click=move |_|{settings_open.set(true);focus_settings_close();}><SettingsIcon size=19/></button>
-          <button class=move || if selected_midi.get().is_some(){"status-pill connected"}else{"status-pill"} aria-label=move || format!("MIDI connection: {}",midi_status.get()) on:click={let connect=connect_action.clone();move |_|connect()}><span class="status-dot"></span>{move || midi_status.get()}</button>
+          <button class=move || if selected_midi.get().is_some_and(|id|midi_ports.get().iter().any(|port|port.id==id&&port.state=="connected"&&port.connection=="open")){"status-pill connected"}else{"status-pill"} aria-label=move || format!("MIDI connection: {}",midi_status.get()) on:click={let connect=connect_action.clone();move |_|connect()}><span class="status-dot"></span>{move || midi_status.get()}</button>
         </header>
 
           <section class=move || if highway.get(){"workspace highway-workspace"}else{"workspace"}>
@@ -3526,8 +3526,8 @@ fn App() -> impl IntoView {
               <label class="toggle-row"><span>"Repeat until successful"<small>"A failed bar is tried again; every failed attempt still reduces the final performance score."</small></span><input aria-label="Repeat bar until Good" type="checkbox" prop:checked=move || repeat_bar_until_good.get() on:change={let save=save_repeat_bar.clone();move |event|{repeat_bar_until_good.set(event_target_checked(&event));save();}}/></label>
               <label>"Required accuracy"<select aria-label="Repeat tolerance" prop:value=move || match repeat_tolerance.get(){RepeatTolerance::Relaxed=>"relaxed",RepeatTolerance::Standard=>"standard",RepeatTolerance::Strict=>"strict"} on:change=move |event|{repeat_tolerance.set(match event_target_value(&event).as_str(){"relaxed"=>RepeatTolerance::Relaxed,"strict"=>RepeatTolerance::Strict,_=>RepeatTolerance::Standard});save_repeat_tolerance();}><option value="relaxed">"Relaxed · no misses"</option><option value="standard">"Standard · Good or Perfect"</option><option value="strict">"Strict · Perfect only"</option></select><small class="help">"Extra hits and wrong drums always fail the current attempt. This setting does not change the timing windows."</small></label>
             </section>
-            <section><h3>"MIDI drums"</h3><p class="help">"Use the MIDI status control in the top bar to connect or rescan. Rudiment never uploads your events."</p><p class="midi-state">{move || midi_status.get()}</p>
-              <label class=move || if midi_ports.get().is_empty(){"hidden"}else{""}>"Input device"<select prop:value=move || selected_midi.get().unwrap_or_default() on:change=move |event|select_midi(&event_target_value(&event))>{move || midi_ports.get().into_iter().map(|port|view!{<option value=port.id.clone()>{format!("{} · {}",port.manufacturer,port.name)}</option>}).collect_view()}</select></label>
+            <section><h3>"MIDI drums"</h3><p class="help">"Rudiment connects automatically. Use the MIDI status control to retry or rescan. Rudiment never uploads your events."</p><p class="midi-state">{move || midi_status.get()}</p>
+              <label class=move || if midi_ports.get().is_empty(){"hidden"}else{""}>"Input device"<select prop:value=move || selected_midi.get().unwrap_or_default() on:change=move |event|select_midi(&event_target_value(&event))><option value="" disabled=true hidden=true>"Choose a MIDI input"</option>{move || midi_ports.get().into_iter().map(|port|view!{<option value=port.id.clone()>{format!("{} · {}",port.manufacturer,port.name)}</option>}).collect_view()}</select></label>
               <div class="learn-card midi-mapping-card">
                 <strong>{move || midi_learn.get().map(|instrument|format!("Hit your {} now…",instrument_label(instrument))).unwrap_or_else(||"Quick MIDI Learn".into())}</strong>
                 <p class="help">"Map each pad independently. Unchanged General MIDI notes remain available as fallbacks."</p>

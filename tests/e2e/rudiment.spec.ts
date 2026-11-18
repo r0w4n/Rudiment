@@ -1568,14 +1568,15 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
       reconnect: () => { access.inputs.set(input.id,input); input.state = 'connected'; input.connection = 'open'; const event = { port: input, timeStamp: performance.now() }; access.onstatechange?.(event); stateListeners.forEach(callback => callback(event)); },
     };
     Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
+    Object.defineProperty(navigator, 'permissions', { configurable: true, value: { query: async () => ({ state: 'prompt', onchange: null }) } });
     Object.assign(window, { __rudimentFakeInput: input, __rudimentFakeAccess: access });
   });
   await page.goto('/');
   const audioDiagnostics = () => page.evaluate(() =>
     (window as unknown as { rudiment: { audioDiagnostics(): { contextState: string; sampleLayers: number; snareStarts: number } } }).rudiment.audioDiagnostics()
   );
-  await page.getByRole('button', { name: 'MIDI connection' }).click();
   await expect(page.locator('.status-pill')).toContainText('Acceptance Kit · connected');
+  await page.getByRole('button', { name: 'MIDI connection' }).click();
   await expect.poll(async () => (await audioDiagnostics()).contextState).toBe('running');
   await expect.poll(async () => (await audioDiagnostics()).sampleLayers).toBe(4);
   await page.getByRole('button', { name: 'Stats' }).click();
@@ -1646,8 +1647,8 @@ test('MIDI monitoring does not generate a substitute snare when sample decoding 
     Object.assign(window,{__rudimentMidiWebInput:input});
   });
   await page.goto('/');
-  await page.getByRole('button',{name:'MIDI connection'}).click();
   await expect(page.locator('.status-pill')).toContainText('MIDIWeb Kit · connected');
+  await page.getByRole('button',{name:'MIDI connection'}).click();
   await page.evaluate(()=>(window as unknown as {__rudimentMidiWebInput:{dispatch(data:number[]):void}}).__rudimentMidiWebInput.dispatch([0x99,38,96]));
   await page.waitForTimeout(100);
   const diagnostics=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
@@ -1678,7 +1679,7 @@ test('multiple MIDI inputs remain silent until one device is selected', async ({
     Object.assign(window, { __rudimentMidiInputs: { first, second } });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'MIDI connection' }).click();
+  await expect(page.locator('.status-pill')).toContainText('Choose a MIDI input');
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByText('MIDI diagnostics').click();
   await page.evaluate(() => {
@@ -1721,7 +1722,7 @@ test('last selected MIDI input reconnects automatically when several inputs are 
     Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
   });
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('No MIDI drums detected');
+  await expect(page.locator('.status-pill')).toContainText('Choose a MIDI input');
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.getByLabel('Input device').selectOption('kit-b');
   await expect(page.locator('.midi-state')).toContainText('Kit B · connected');
@@ -1781,8 +1782,25 @@ test('multiple MIDI inputs wait for a selection when the remembered input is una
     localStorage.setItem('rudiment-midi-input-identity',JSON.stringify({name:'Stage Drums',manufacturer:'Acme'}));
   });
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('No MIDI drums detected');
+  await expect(page.locator('.status-pill')).toContainText('Choose a MIDI input');
   expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('remembered-kit');
+});
+
+test('a sole MIDI input plugged in after startup connects automatically', async ({ page }) => {
+  await page.addInitScript(() => {
+    const input={id:'late-kit',name:'Late Kit',manufacturer:'Test',type:'input',state:'disconnected',connection:'pending',onmidimessage:null,onstatechange:null,open:async()=>input,close:async()=>input};
+    const access={inputs:new Map(),outputs:new Map(),sysexEnabled:false,onstatechange:null as null|((event:unknown)=>void),
+      connect:()=>{
+        input.state='connected';input.connection='open';access.inputs.set(input.id,input);
+        access.onstatechange?.({port:input,timeStamp:performance.now()});
+      }};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.assign(window,{__lateMidiAccess:access});
+  });
+  await page.goto('/');
+  await expect(page.locator('.status-pill')).toContainText('No MIDI drums detected');
+  await page.evaluate(()=>(window as any).__lateMidiAccess.connect());
+  await expect(page.locator('.status-pill')).toContainText('Late Kit · connected');
 });
 
 test('MIDI hotplug selects the remaining input and pauses only when the selected input disconnects', async ({ page }) => {
@@ -2658,7 +2676,6 @@ test('permission denial and narrow layout remain usable', async ({ page }) => {
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  await page.getByRole('button',{name:'MIDI connection'}).click();
   await page.getByRole('button', { name: 'Open settings' }).click();
   await expect(page.locator('.midi-state')).toContainText('MIDI error · Permission denied by user');
   await expect(page.getByRole('button',{name:'Connect / rescan MIDI'})).toHaveCount(0);

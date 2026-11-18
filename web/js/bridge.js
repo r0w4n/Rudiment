@@ -1069,6 +1069,7 @@ function clearScoreFeedbackPreserveViewport(){clearScoreFeedback(true);}
 const MIDI_INPUT_ID_KEY='rudiment-midi-input',MIDI_INPUT_IDENTITY_KEY='rudiment-midi-input-identity';
 let selectedInput = null, midiCallback = null, midiBound = false;
 const portInfo = input => ({id:input.id,name:input.name||'Unnamed MIDI input',manufacturer:input.manufacturer||'Unknown manufacturer',state:input.state,connection:input.connection});
+const connectedMidiInputs = () => WebMidi.inputs.filter(input=>input.state==='connected'&&input.connection==='open');
 function rememberMidiInput(input){
   if(!input)return;
   localStorage.setItem(MIDI_INPUT_ID_KEY,input.id);
@@ -1093,16 +1094,17 @@ function bindMidiInputs() {
   });}
 }
 function choosePreferredInput(){
+  const inputs=connectedMidiInputs();
   const savedId=localStorage.getItem(MIDI_INPUT_ID_KEY),savedIdentity=rememberedMidiIdentity();
-  const identityMatches=savedIdentity?WebMidi.inputs.filter(input=>(input.name||'')===savedIdentity.name&&(input.manufacturer||'')===savedIdentity.manufacturer):[];
-  selectedInput=WebMidi.inputs.find(input=>input.id===savedId)
+  const identityMatches=savedIdentity?inputs.filter(input=>(input.name||'')===savedIdentity.name&&(input.manufacturer||'')===savedIdentity.manufacturer):[];
+  selectedInput=inputs.find(input=>input.id===savedId)
     ||(identityMatches.length===1?identityMatches[0]:null)
-    ||(selectedInput&&WebMidi.inputs.find(input=>input.id===selectedInput.id))
-    ||(WebMidi.inputs.length===1?WebMidi.inputs[0]:null)
+    ||(selectedInput&&inputs.find(input=>input.id===selectedInput.id))
+    ||(inputs.length===1?inputs[0]:null)
     ||null;
   rememberMidiInput(selectedInput);
 }
-function bindMidiLifecycle(){if(midiBound)return;WebMidi.addListener('connected',()=>{bindMidiInputs();choosePreferredInput();sendMidiState({permission:'granted',reconnected:true});});WebMidi.addListener('disconnected',event=>{const selectedDisconnected=event.port?.id===selectedInput?.id;if(selectedDisconnected)selectedInput=null;bindMidiInputs();choosePreferredInput();sendMidiState({disconnectedId:selectedDisconnected?event.port?.id:null,permission:'granted'});});midiBound=true;}
+function bindMidiLifecycle(){if(midiBound)return;WebMidi.addListener('connected',event=>{if(event.port?.type!=='input')return;bindMidiInputs();choosePreferredInput();sendMidiState({permission:'granted',reconnected:true});});WebMidi.addListener('disconnected',event=>{if(event.port?.type!=='input')return;const selectedDisconnected=event.port.id===selectedInput?.id;if(selectedDisconnected)selectedInput=null;bindMidiInputs();choosePreferredInput();sendMidiState({disconnectedId:selectedDisconnected?event.port.id:null,permission:'granted'});});midiBound=true;}
 async function connectMidi(callback) {
   midiCallback=callback;
   try {
@@ -1110,8 +1112,8 @@ async function connectMidi(callback) {
     bindMidiLifecycle();bindMidiInputs();choosePreferredInput();sendMidiState({permission:'granted'});
   } catch(error) { sendMidiState({error:error?.message||'MIDI permission was denied.',permission:'denied'}); }
 }
-async function autoConnectMidi(callback){midiCallback=callback;if(!navigator.requestMIDIAccess){sendMidiState({error:'Web MIDI is not available in this browser.',permission:'unsupported'});return;}try{if(!navigator.permissions?.query){sendMidiState({permission:'prompt'});return;}const status=await navigator.permissions.query({name:'midi',sysex:false});if(status.state==='granted')await connectMidi(callback);else sendMidiState({permission:status.state});status.onchange=()=>{if(status.state==='granted')connectMidi(callback);else sendMidiState({permission:status.state});};}catch{sendMidiState({permission:'prompt'});}}
-function selectMidi(id){selectedInput=WebMidi.inputs.find(input=>input.id===id)||null;rememberMidiInput(selectedInput);sendMidiState({permission:'granted'});}
+async function autoConnectMidi(callback){midiCallback=callback;if(!navigator.requestMIDIAccess){sendMidiState({permission:'unsupported'});return;}await connectMidi(callback);}
+function selectMidi(id){selectedInput=connectedMidiInputs().find(input=>input.id===id)||null;rememberMidiInput(selectedInput);sendMidiState({permission:'granted'});}
 
 async function readFile(file,callback,maxFileBytes){if(!file)return;if(file.size>maxFileBytes){callback(new Uint8Array(),file.name,`Files larger than ${maxFileBytes/1024/1024} MB are not supported.`);return;}try{callback(new Uint8Array(await file.arrayBuffer()),file.name,'');}catch(error){callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
 function chooseMidi(callback,maxFileBytes){midiFileCallback=callback;const input=document.createElement('input');input.type='file';input.accept='.mid,.midi,audio/midi';input.onchange=()=>readFile(input.files?.[0],callback,maxFileBytes);input.click();}
