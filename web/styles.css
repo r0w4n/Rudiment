@@ -456,10 +456,26 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 /* A single shared workspace, with mutually exclusive musical surfaces. */
 .score-meta{position:relative}
 .notation{grid-row:2;grid-column:1}
-.score-meta>.visualisation-selector{position:absolute;right:48px;top:50%;transform:translateY(-50%);z-index:10;display:flex;align-items:center;gap:0;padding:2px;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
-.visualisation-selector button{min-height:44px;padding:0 12px;border-radius:6px;background:transparent;color:var(--muted);font:700 11px var(--font-ui)}
+.score-meta>.score-view-controls{position:absolute;right:48px;top:50%;transform:translateY(-50%);z-index:10;display:flex;align-items:center;gap:6px}
+.visualisation-selector{display:flex;align-items:center;gap:0;padding:2px;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+.visualisation-selector button,.notation-theme-toggle{min-height:44px;padding:0 12px;border-radius:6px;background:transparent;color:var(--muted);font:700 11px var(--font-ui)}
 .visualisation-selector button.active{background:var(--panel-2);color:var(--ink)}
-.visualisation-selector button:hover{color:var(--ink)}
+.visualisation-selector button:hover,.notation-theme-toggle:hover{color:var(--ink)}
+.notation-theme-toggle{border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+.notation-theme-toggle[aria-pressed=true]{background:var(--panel-2);color:var(--ink)}
+.score-card.notation-dark{background:var(--panel);border-color:var(--line);color:var(--ink);box-shadow:none;color-scheme:dark}
+.notation-dark .score-meta,.notation-dark .position-row{border-color:var(--line);color:var(--muted)}
+.notation-dark .notation svg{fill:var(--ink);stroke:var(--ink)}
+.notation-dark .notation .vf-stave{stroke:var(--muted)}
+.notation-dark .score-barline{stroke:var(--muted)!important}
+.notation-dark .score-measure-number{fill:var(--muted)}
+.notation-dark .score-measure-number.selected-bar-number{fill:var(--teal)!important}
+.notation-dark .score-bar-highlight.selected{fill:var(--teal);fill-opacity:.13}
+.notation-dark .score-bar-highlight:focus-visible{stroke:var(--teal)}
+.notation-dark .score-file-info summary,.notation-dark .metronome-context>.visual-metronome,.notation-dark .visual-metronome-label,.notation-dark .bar-selection-trigger,.notation-dark .loop-control{color:var(--muted)}
+.notation-dark .timeline{background:var(--line)}
+.notation-dark .timeline i{background:var(--teal)}
+.notation-dark .bar-selection-trigger:focus-visible,.notation-dark .loop-control:focus-visible,.notation-dark .visual-metronome:focus-visible{outline-color:var(--teal)}
 .score-card.highway-active{background:var(--panel);border-color:var(--line);color:var(--ink);box-shadow:none}
 .highway-active .score-meta,.highway-active .position-row{border-color:var(--line)}
 .highway-active .notation{visibility:hidden;pointer-events:none}
@@ -496,7 +512,8 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 @media(max-width:600px){
   .score-meta>div.metronome-context{justify-self:start}
   .metronome-context .metronome-popover{left:0;transform:translate(0,var(--metronome-offset-y,0px))}
-  .visualisation-selector button{padding-inline:9px}
+  .score-meta>.score-view-controls{gap:3px}
+  .visualisation-selector button,.notation-theme-toggle{padding-inline:5px;font-size:10px}
   .highway-view{grid-template-columns:52px minmax(0,1fr)}
   .highway-lane-label{font-size:9px}
 }

@@ -205,6 +205,10 @@ extern "C" {
     fn save_highway_mode(selected: bool);
     #[wasm_bindgen(js_namespace = rudiment, js_name = setHighwayMode)]
     fn set_highway_mode(selected: bool);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = savedNotationTheme)]
+    fn saved_notation_theme() -> bool;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = saveNotationTheme)]
+    fn save_notation_theme(dark: bool);
     #[wasm_bindgen(js_namespace = rudiment, js_name = startCalibration)]
     fn start_calibration() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = renderScore)]
@@ -1409,6 +1413,7 @@ fn App() -> impl IntoView {
     let snare_reference_mode = RwSignal::new("hits".to_string());
     let app_mode = RwSignal::new(AppMode::Practice);
     let highway = RwSignal::new(saved_highway_mode());
+    let notation_dark = RwSignal::new(saved_notation_theme());
     let loops = RwSignal::new(1u8);
     let repeat_bar_until_good = RwSignal::new(false);
     let repeat_tolerance = RwSignal::new(RepeatTolerance::Standard);
@@ -2781,7 +2786,9 @@ fn App() -> impl IntoView {
             });
         if let Some(control) = control
             && control
-                .closest(".start-button, .restart-button, .visualisation-selector")
+                .closest(
+                    ".start-button, .restart-button, .visualisation-selector, .notation-theme-toggle",
+                )
                 .ok()
                 .flatten()
                 .is_none()
@@ -3072,11 +3079,14 @@ fn App() -> impl IntoView {
 
           <section class=move || if highway.get(){"workspace highway-workspace"}else{"workspace"}>
               <aside class=move || if welcome.get(){"welcome"}else{"welcome hidden"}><div><strong>              "A paradiddle is ready."</strong><span>"Space pauses; R restarts."</span></div><button aria-label="Got it, dismiss welcome hint" on:click=move |_|{welcome.set(false);save_welcome();}>"Got it"</button></aside>
-            <section id="score-card" class=move || if highway.get(){"score-card highway-active"}else{"score-card"}>
+            <section id="score-card" class=move || if highway.get(){"score-card highway-active"}else if notation_dark.get(){"score-card notation-dark"}else{"score-card"}>
               <div class="score-meta">
-                <div class="visualisation-selector" role="group" aria-label="Musical visualisation">
-                  <button type="button" class=move || if !highway.get(){"active"}else{""} aria-pressed=move || (!highway.get()).to_string() on:click=move |_|{highway.set(false);save_highway_mode(false);}>"Notation"</button>
-                  <button type="button" class=move || if highway.get(){"active"}else{""} aria-pressed=move || highway.get().to_string() on:click=move |_|{highway.set(true);save_highway_mode(true);}>"Highway"</button>
+                <div class="score-view-controls">
+                  <button type="button" class=move || if highway.get(){"notation-theme-toggle hidden"}else{"notation-theme-toggle"} aria-label=move || if notation_dark.get(){"Notation theme: Dark. Switch to Light"}else{"Notation theme: Light. Switch to Dark"} aria-pressed=move || notation_dark.get().to_string() title="Toggle notation theme" on:click=move |_|{let dark=!notation_dark.get_untracked();notation_dark.set(dark);save_notation_theme(dark);}>{move || if notation_dark.get(){"Dark"}else{"Light"}}</button>
+                  <div class="visualisation-selector" role="group" aria-label="Musical visualisation">
+                    <button type="button" class=move || if !highway.get(){"active"}else{""} aria-pressed=move || (!highway.get()).to_string() on:click=move |_|{highway.set(false);save_highway_mode(false);}>"Notation"</button>
+                    <button type="button" class=move || if highway.get(){"active"}else{""} aria-pressed=move || highway.get().to_string() on:click=move |_|{highway.set(true);save_highway_mode(true);}>"Highway"</button>
+                  </div>
                 </div>
                 <div class="metronome-context">
                   <button id="visual-metronome" class="visual-metronome" type="button" aria-label="Metronome settings, READY" aria-haspopup="dialog" aria-controls="metronome-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Metronome)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Metronome){None}else{Some(ContextPopup::Metronome)})>
