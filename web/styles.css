@@ -476,14 +476,13 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .highway-grid-beat line{stroke:var(--line);stroke-width:1}
 .highway-grid-bar line{stroke:var(--muted);stroke-opacity:.55;stroke-width:1}
 .highway-grid-bar text{fill:var(--muted);font:700 10px var(--font-ui);letter-spacing:.08em}
-.highway-note rect{fill:var(--teal);stroke:var(--teal);stroke-width:1}
+.highway-note rect{fill:transparent;stroke:var(--ink);stroke-width:2}
 .highway-note[data-judgement=perfect] rect{fill:var(--feedback-perfect);stroke:var(--feedback-perfect)}
 .highway-note[data-judgement=good] rect{fill:var(--feedback-good);stroke:var(--feedback-good)}
 .highway-note[data-judgement=early] rect{fill:var(--feedback-early);stroke:var(--feedback-early)}
 .highway-note[data-judgement=late] rect{fill:var(--feedback-late);stroke:var(--feedback-late)}
-.highway-note[data-judgement=missed] rect{fill:none;stroke:var(--feedback-missed);stroke-width:2;stroke-dasharray:3 2}
-.highway-judgement{fill:var(--ink);pointer-events:none}
-.highway-note[data-judgement=missed] .highway-judgement{fill:var(--feedback-missed)}
+.highway-note[data-judgement=missed] rect{fill:transparent;stroke:var(--ink);stroke-width:2}
+.highway-unmatched-hit{fill:var(--feedback-missed);stroke:var(--ink);stroke-width:1;filter:drop-shadow(0 1px 2px #6d090966);pointer-events:none}
 .highway-workspace .timing-key i{position:relative;width:12px;height:12px}
 .highway-workspace .timing-key i::after{content:"";position:absolute;inset:2px;background:var(--bg)}
 .highway-workspace .timing-key .perfect i::after{border-radius:50%}

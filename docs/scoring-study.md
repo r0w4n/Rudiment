@@ -1,5 +1,9 @@
 # Incremental scoring study — Stage 1
 
+> Historical note: this rejected prototype remains reproducible, but the
+> production score-first implementation is documented in
+> [`scoring-policy-v4.md`](scoring-policy-v4.md).
+
 **Decision: stop before production integration.** The isolated connected-window
 prototype does not reproduce the current final scorer's tie-breaking and does
 not bound work or confirmation delay for dense continuous passages. This is a

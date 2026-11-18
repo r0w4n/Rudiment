@@ -124,31 +124,108 @@ test('Highway rests at the count-in position without jumping on start', async ({
   await expect.poll(position).toBeCloseTo(4, 3);
 });
 
-test('Highway hit judgements use non-letter shapes and remain accessible', async ({ page }) => {
+test('Highway colours the expected note directly without secondary hit markers', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Highway', exact: true }).click();
   const note = page.locator('.highway-note[data-note-id="p-0-0"][data-iteration="0"]');
   await expect(note).toBeAttached();
-  const shapes = new Set<string>();
+  const rect = note.locator('rect');
+  await expect(rect).toBeAttached();
+  const readStyle = () => rect.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { fill: style.fill, stroke: style.stroke };
+  });
+  await expect.poll(readStyle).toEqual({
+    fill: 'rgba(0, 0, 0, 0)',
+    stroke: 'rgb(244, 240, 231)',
+  });
+  const expectedStyle = await readStyle();
+  expect(expectedStyle.fill).toBe('rgba(0, 0, 0, 0)');
+  expect(expectedStyle.stroke).toBe('rgb(244, 240, 231)');
+  const fills: Record<string, string> = {
+    perfect: 'rgb(47, 207, 136)',
+    good: 'rgb(115, 217, 147)',
+    early: 'rgb(239, 138, 62)',
+    late: 'rgb(168, 121, 221)',
+  };
   for (const judgement of ['perfect', 'good', 'early', 'late', 'missed']) {
-    // Supply presentation data directly to exercise all renderer states; this
-    // does not claim that the current live scorer emits missed-note events.
     await page.evaluate(value => (window as any).rudiment.presentationJudgements([{ expected_id: 'p-0-0', iteration: 0, judgement: value }]), judgement);
     await expect(note).toHaveAttribute('data-judgement', judgement);
     await expect(note).toHaveAttribute('aria-label', new RegExp(judgement));
-    const symbol = note.locator('path.highway-judgement');
-    const shape = await symbol.getAttribute('d');
-    expect(shape).toBeTruthy();
-    shapes.add(shape!);
-    await expect(note.locator('text.highway-judgement')).toHaveCount(0);
-    if (judgement !== 'missed') {
-      const rect = (await note.locator('rect').boundingBox())!;
-      const marker = (await symbol.boundingBox())!;
-      expect(marker.y).toBeGreaterThanOrEqual(rect.y + rect.height);
-    }
+    await expect(note.locator('.highway-judgement')).toHaveCount(0);
+    const style = await rect.evaluate(element => {
+      const computed = getComputedStyle(element);
+      return { fill: computed.fill, stroke: computed.stroke };
+    });
+    if (judgement === 'missed') expect(style).toEqual(expectedStyle);
+    else expect(style).toEqual({ fill: fills[judgement], stroke: fills[judgement] });
   }
-  expect(shapes.size).toBe(5);
   await expect(note.locator('.highway-hand')).toHaveText('R');
+});
+
+test('authoritative misses remain neutral in Highway while Notation receives the same result', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.locator('#visual-metronome').click();
+  await page.locator('#metronome-popover').getByLabel('Tempo in BPM').fill('240');
+  await page.getByLabel('Close metronome settings').click();
+  await page.getByLabel('Select bars').click();
+  await page.getByLabel('Bar 1', { exact: true }).check();
+  await page.getByLabel('Close bar selection').click();
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+
+  const first = page.locator('.highway-note[data-note-id="p-0-0"][data-iteration="0"]');
+  await expect(first).toHaveAttribute('data-judgement', 'missed', { timeout: 3000 });
+  await expect(first).toHaveAttribute('aria-label', /missed/);
+  await expect(first.locator('.highway-judgement')).toHaveCount(0);
+  expect(await first.locator('rect').evaluate(element => {
+    const style = getComputedStyle(element);
+    return { fill: style.fill, stroke: style.stroke };
+  })).toEqual({ fill: 'rgba(0, 0, 0, 0)', stroke: 'rgb(244, 240, 231)' });
+
+  await page.getByRole('button', { name: 'Notation', exact: true }).click();
+  await expect(page.locator('.vf-notehead[data-judgement="missed"]').first()).toBeAttached();
+  expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+});
+
+test('unmatched live strikes render as lane-aligned red dots and clear on restart', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await page.evaluate(async () => {
+    const app = (window as any).rudiment;
+    while (app.audioDiagnostics().currentBeat < 0.24) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+    while (app.audioDiagnostics().currentBeat < 0.28) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+  });
+
+  const dot = page.locator('.highway-unmatched-hit');
+  await expect(dot).toHaveCount(2);
+  await expect(dot.first()).toHaveAttribute('data-judgement', 'extra');
+  await expect(dot.first()).toHaveAttribute('data-instrument', 'snare');
+  await expect(dot.first()).toHaveCSS('fill', 'rgb(216, 61, 53)');
+  const positions = await dot.evaluateAll(elements => elements.map(element => Number(element.getAttribute('data-position'))));
+  expect(positions[0]).toBeGreaterThan(0.2);
+  expect(positions[1]).toBeGreaterThan(positions[0]);
+  expect(positions[1]).toBeLessThan(0.4);
+  const lane = (await page.locator('.highway-lane').boundingBox())!;
+  const marker = (await dot.first().boundingBox())!;
+  expect(marker.y + marker.height / 2).toBeCloseTo(lane.y + lane.height / 2, 0);
+
+  await page.getByRole('button', { name: 'Notation', exact: true }).click();
+  await expect(page.locator('.unmatched-hit-marker')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await expect(dot).toHaveCount(2);
+  await page.getByRole('button', { name: /Restart/ }).click();
+  await expect(dot).toHaveCount(0);
+  await expect(page.locator('.highway-note[data-judgement="expected"]')).not.toHaveCount(0);
 });
 
 test('Highway colours only the scored repetition and disposes when switched away', async ({ page }) => {
@@ -173,9 +250,8 @@ test('Highway colours only the scored repetition and disposes when switched away
   await hit(1);
   const first = page.locator('.highway-note[data-note-id="p-0-2"][data-iteration="0"]');
   await expect(first).toHaveAttribute('data-judgement', /perfect|good|early|late/);
-  const marker = (await first.locator('rect').boundingBox())!;
-  const label = (await first.locator('.highway-judgement').boundingBox())!;
-  expect(label.y).toBeGreaterThanOrEqual(marker.y + marker.height);
+  await expect(first.locator('.highway-judgement')).toHaveCount(0);
+  await expect(page.locator('.highway-unmatched-hit')).toHaveCount(0);
   await expect(first).toHaveAttribute('aria-label', /perfect|good|early|late/);
   const second = page.locator('.highway-note[data-note-id="p-0-2"][data-iteration="1"]');
   await expect(second).toHaveAttribute('data-judgement', 'expected');
@@ -263,9 +339,8 @@ test('grace strokes remain distinct without changing their onset positions', asy
   const graceId = await graceNote.getAttribute('data-note-id');
   await page.evaluate(id => (window as any).rudiment.presentationJudgements([{ expected_id: id, iteration: 0, judgement: 'good' }]), graceId);
   await expect(graceNote).toHaveAttribute('data-judgement', 'good');
-  const graceMarker = (await graceNote.locator('rect').boundingBox())!;
-  const graceLabel = (await graceNote.locator('.highway-judgement').boundingBox())!;
-  expect(graceLabel.y + graceLabel.height).toBeLessThanOrEqual(graceMarker.y);
+  await expect(graceNote.locator('.highway-judgement')).toHaveCount(0);
+  await expect(graceNote.locator('rect')).toHaveCSS('fill', 'rgb(115, 217, 147)');
   await page.screenshot({ path: testInfo.outputPath('highway-flams.png') });
   await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('public/exercises/rudiments/09_single_drag.mid', 'Single Drag'));
   await expect(page.locator('.exercise-heading strong')).toHaveText('Single Drag');
@@ -338,7 +413,9 @@ test('real transport, noncontiguous selection and Rust feedback reach a mounted 
   expect(hit.note.judgement).toMatch(/perfect|good|early|late/);
   expect(hit.note.judgement).toBe(hit.notation);
   await expect.poll(() => page.evaluate(() => (window as any).__presentation.model.timeline.iteration), { timeout: 6000 }).toBe(1);
-  expect(await page.evaluate(() => (window as any).__presentation.model.notes.some((note: any) => note.iteration === 1 && note.judgement))).toBe(false);
+  // The first note in the new loop may already be a legitimate live miss;
+  // feedback from iteration zero must not colour the still-future target.
+  expect(await page.evaluate(() => (window as any).__presentation.model.notes.find((note: any) => note.id === 'p-0-2' && note.iteration === 1)?.judgement)).toBeNull();
   const repeatedHit = await page.evaluate(async () => {
     const app = (window as any).rudiment, state = (window as any).__presentation;
     const next = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));

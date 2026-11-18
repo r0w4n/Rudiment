@@ -73,7 +73,7 @@ const performanceProfile={
   reset(){this.samples.clear();},
   snapshot(){return Object.fromEntries([...this.samples].map(([name,values])=>[name,[...values]]));}
 };
-const presentation=createPresentationHost(()=>audio.activeRun?{beat:audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats,tempoBpm:Tone.getTransport().bpm.value}:null,highwayError);
+const presentation=createPresentationHost(()=>audio.activeRun?{beat:Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats),tempoBpm:Tone.getTransport().bpm.value}:null,highwayError);
 let highwayHandle=null,highwayObserver=null,highwaySelected=false;
 function highwayError(error){
   highwayObserver?.disconnect();highwayObserver=null;highwayHandle=null;
@@ -356,7 +356,7 @@ const audio = {
     }
   },
   stop() {
-    if(this.activeRun){this.lastBeat=this.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-this.activeRun.countBeats;if(presentation.isActive())presentation.position(this.lastBeat,Tone.getTransport().bpm.value);}
+    if(this.activeRun){this.lastBeat=Math.min(this.activeRun.totalBeats,this.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-this.activeRun.countBeats);if(presentation.isActive())presentation.position(this.lastBeat,Tone.getTransport().bpm.value);}
     this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
     const transport = Tone.getTransport(); transport.stop(); transport.cancel(0); transport.seconds = 0;
     for(const source of this.scheduledVoices){
@@ -392,11 +392,11 @@ const audio = {
     }
     if(generation!==this.generation)return {cancelled:true,state:this.state};
     const transport = Tone.getTransport(), tempoMap=(options.tempoMap||[]).slice().sort((a,b)=>a.beat-b.beat),sourceBpm=options.sourceBpm||options.bpm,tempoScale=options.bpm/sourceBpm,offset = options.offsetBeat || 0,initialBpm=tempoAtBeat(offset,tempoMap,sourceBpm)*tempoScale,countBeats = options.countInBars * options.meter;
-    const remaining = Math.max(0, options.totalBeats - offset), startDelay = 0;
+    const remaining = Math.max(0, options.totalBeats - offset), scoringTailBeats=Math.max(0,Number(options.scoringTailBeats)||0), startDelay = 0;
     const countInSeconds=countBeats*60/initialBpm,runAudio = this.raw.currentTime + startDelay + countInSeconds;
     const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
     const referenceNotes=(options.referenceNotes||[]).filter(note=>Number.isFinite(Number(note.beat))&&Number(note.beat)>=offset-.000001&&Number(note.beat)<options.totalBeats-.000001&&Number(note.velocity)>0);
-    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,runPerformance,referenceNoteCount:referenceNotes.length,metronome:options.metronome,timbre:options.timbre};
+    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,totalBeats:options.totalBeats,runPerformance,referenceNoteCount:referenceNotes.length,metronome:options.metronome,timbre:options.timbre};
     transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
     for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.activeRun&&transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time);},position);}
     for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.playSnare(Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time);},position);}
@@ -405,6 +405,9 @@ const audio = {
       const transportBeat=transport.getTicksAtTime(time)/transport.PPQ;
       const beatStep=Math.round((countIn?transportBeat-countBeats:offset+transportBeat-countBeats)*subdivision);
       const beat=beatStep/subdivision;
+      // The transport remains alive for the scoring late-delivery drain, but
+      // that silent tail is not another musical bar and must not click.
+      if(!countIn&&(beat<offset-.000001||beat>=options.totalBeats-.000001))return;
       visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision);
       const barSteps=options.meter*subdivision;
       if(options.metronome)this.click(time,((beatStep%barSteps)+barSteps)%barSteps===0,options.timbre);
@@ -434,29 +437,30 @@ const audio = {
       const now = performance.now(), elapsedBeats=transport.ticks/transport.PPQ;
       performanceProfile.record('animation_frame_interval_ms',now-lastAnimationFrame);lastAnimationFrame=now;
       const beat = offset + elapsedBeats-countBeats;
-      this.lastBeat=beat;
+      const musicalBeat=Math.min(beat,options.totalBeats-.000001);
+      this.lastBeat=Math.min(beat,options.totalBeats);
       const rangeStart=Number(options.displayRangeStart)||0,rangeBeats=Math.max(.001,Number(options.displayRangeBeats)||options.exerciseBeats);
       // Count-in beats are transport time, not playable exercise beats. For a
       // later selected range they numerically overlap the preceding bar, so
       // keep the playhead hidden until the selected playback offset begins.
-      const position=((beat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats;
+      const position=((musicalBeat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats;
       const bars=options.displayBars,barIndex=Math.floor(position/options.meter);
-      const scoreBeat=beat<offset?-1:Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+position-barIndex*options.meter:rangeStart+position;
+      const scoreBeat=musicalBeat<offset?-1:Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+position-barIndex*options.meter:rangeStart+position;
       if(scoreBeat>=0&&Array.isArray(bars)&&bars.length){
         const displayBar=Math.floor(scoreBeat/options.meter),previous=this.activeRun?.lastDisplayBar;
         if(Number.isInteger(previous)&&displayBar!==previous&&displayBar!==previous+1)scrollScoreToBeat(scoreBeat);
         if(this.activeRun)this.activeRun.lastDisplayBar=displayBar;
       }
       updateScore(scoreBeat,undefined,true);
-      if(presentation.isActive())presentation.position(beat,transport.bpm.value);
-      visualMetronome.render(beat,options.meter,subdivision,now);
+      if(presentation.isActive())presentation.position(musicalBeat,transport.bpm.value);
+      visualMetronome.render(musicalBeat,options.meter,subdivision,now);
       // UI counters and scoring state do not need 60 updates per second. Keep
       // the playhead on every display frame, independent of the WASM work.
       if(now-lastStateFrame>=32||beat>=options.totalBeats){
         onFrame(beat,now,this.activeRun?.runPerformance??runPerformance);
         lastStateFrame=now;
       }
-      if (elapsedBeats >= countBeats+remaining) { this.stop(); onDone(); } else this.raf = requestAnimationFrame(frame);
+      if (elapsedBeats >= countBeats+remaining+scoringTailBeats) { this.stop(); onDone(); } else this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
     return { runPerformance, runAudio, state: this.state };
@@ -1055,8 +1059,8 @@ function downloadJson(value,name){const anchor=document.createElement('a');ancho
 
 window.rudiment={
   bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
-  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats:0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
+  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')

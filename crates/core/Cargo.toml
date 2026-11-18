@@ -14,3 +14,11 @@ thiserror = "2.0"
 [[example]]
 name = "scoring_study"
 test = true
+
+[[example]]
+name = "scoring_frontier"
+test = true
+
+[[example]]
+name = "scoring_v4"
+test = false

@@ -5,12 +5,14 @@ use lucide_leptos::{
     RotateCcw, Settings as SettingsIcon, Star, X,
 };
 use rudiment_core::{
-    DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit, HitResult,
-    InputSource, Instrument, Judgement, MAX_MIDI_FILE_BYTES, ObservedHit, PerformanceAward,
-    PerformanceRating, SCORING_VERSION, ScoringConfig, SessionSummary, TempoChange,
-    beat_at_elapsed_ms, elapsed_ms_at_beat, paradiddle, parse_midi, performance_rating,
-    score_session_with_tempo_map,
+    DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit,
+    IncrementalScorer, InputSource, Instrument, Judgement, MAX_MIDI_FILE_BYTES, ObservedHit,
+    PerformanceAward, PerformanceRating, SCORING_VERSION, ScoringConfig, ScoringFeedback,
+    SessionSummary, TempoChange, beat_at_elapsed_ms, elapsed_ms_at_beat, paradiddle, parse_midi,
+    performance_rating, summary_from_results,
 };
+#[cfg(test)]
+use rudiment_core::{HitResult, score_session_with_tempo_map};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
@@ -147,6 +149,9 @@ fn builtin_count(difficulty: Option<Difficulty>) -> usize {
 const LIBRARY_PAGE_SIZE: usize = 6;
 const CONTINUOUS_LOOP_CHUNK: u8 = 240;
 const RESULT_DISMISS_GRACE_MS: f64 = 500.0;
+const SCORING_DELIVERY_GRACE_MS: f64 = 32.0;
+const SCORING_TAIL_MS: f64 = 2.0 * DEFAULT_MATCH_MS + SCORING_DELIVERY_GRACE_MS + 2.0;
+const LIVE_UNMATCHED_FEEDBACK_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -212,8 +217,6 @@ extern "C" {
     fn scroll_score_to_beat(beat: f64);
     #[wasm_bindgen(js_namespace = rudiment, js_name = updateScore)]
     fn update_score(beat: f64, judgements: JsValue);
-    #[wasm_bindgen(js_namespace = rudiment, js_name = appendScoreJudgement)]
-    fn append_score_judgement(judgement: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedback)]
     fn clear_score_feedback();
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedbackPreserveViewport)]
@@ -396,7 +399,7 @@ struct MidiEnvelope {
     disconnected_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct LiveJudgement {
     expected_id: Option<String>,
     #[serde(default)]
@@ -409,6 +412,8 @@ struct LiveJudgement {
     excellent: bool,
     note_score: f64,
     event_id: Option<String>,
+    #[serde(default)]
+    confirmed: bool,
 }
 
 fn beats_per_bar(exercise: &Exercise) -> f64 {
@@ -809,6 +814,7 @@ fn repeat_bar_segment(offset: f64, bar_beats: f64, total_beats: f64) -> (f64, f6
     (start, (start + bar_beats).min(total_beats))
 }
 
+#[cfg(test)]
 fn hits_for_bar_attempt(
     expected: &[ExpectedHit],
     start_beat: f64,
@@ -833,6 +839,7 @@ fn session_start_ms_at_beat(
     start_ms - elapsed_ms_at_beat(offset, bpm, tempo_map)
 }
 
+#[cfg(test)]
 fn bar_attempt_is_good(
     expected_count: usize,
     matched_expected_count: usize,
@@ -856,6 +863,7 @@ fn bar_attempt_is_good(
         })
 }
 
+#[cfg(test)]
 fn include_failed_repeat_attempts(
     summary: &mut SessionSummary,
     attempts: &[(usize, Vec<LiveJudgement>)],
@@ -934,6 +942,122 @@ fn display_expected_id(id: &str) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
+fn live_feedback_from_scoring(
+    feedback: &[ScoringFeedback],
+    sequence: &BarSequence,
+    bpm: f64,
+    tempo_map: &[TempoChange],
+    origin_ms: f64,
+    latency_ms: f64,
+) -> Vec<LiveJudgement> {
+    feedback
+        .iter()
+        .enumerate()
+        .map(|(index, feedback)| {
+            let result = &feedback.result;
+            let expanded_id = result.expected_id.as_deref();
+            let actual_timeline_beat = result.actual_timestamp_ms.map(|timestamp| {
+                beat_at_elapsed_ms(timestamp - latency_ms - origin_ms, bpm, tempo_map)
+            });
+            LiveJudgement {
+                expected_id: expanded_id.map(display_expected_id),
+                iteration: expanded_id
+                    .and_then(|id| id.rsplit_once("-loop"))
+                    .and_then(|(_, suffix)| suffix.parse::<usize>().ok())
+                    .and_then(|value| value.checked_sub(1))
+                    .or_else(|| {
+                        actual_timeline_beat.map(|beat| {
+                            ((beat - sequence.origin).max(0.0) / sequence.length()).floor() as usize
+                        })
+                    }),
+                expected_beat: result.expected_beat.map(|beat| sequence.display_beat(beat)),
+                actual_beat: actual_timeline_beat
+                    .map(|beat| sequence.display_beat(beat.max(sequence.origin))),
+                instrument: result.instrument,
+                judgement: result.judgement,
+                error_ms: result.error_ms.unwrap_or(0.0),
+                excellent: result.excellent,
+                note_score: result.note_score,
+                event_id: Some(format!(
+                    "{}:{}:{}",
+                    expanded_id.unwrap_or("unmatched"),
+                    result
+                        .actual_timestamp_ms
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_else(|| "none".into()),
+                    index
+                )),
+                confirmed: feedback.confirmed,
+            }
+        })
+        .collect()
+}
+
+fn merge_live_feedback(current: &mut Vec<LiveJudgement>, update: Vec<LiveJudgement>) {
+    // Every update carries the complete current provisional projection, so
+    // discard older provisional colours before applying corrections.
+    current.retain(|judgement| judgement.confirmed);
+    for judgement in update {
+        if judgement.expected_id.is_some() {
+            current.retain(|existing| {
+                existing.expected_id != judgement.expected_id
+                    || existing.iteration != judgement.iteration
+            });
+        } else if judgement.event_id.is_some() {
+            current.retain(|existing| existing.event_id != judgement.event_id);
+        }
+        current.push(judgement);
+    }
+    // The scorer retains every confirmed invalid hit for the authoritative
+    // summary. Only bound the visual projection: thousands of overlapping
+    // unmatched markers are no longer readable and would make a long
+    // continuous practice session progressively more expensive to render.
+    let unmatched = current
+        .iter()
+        .filter(|judgement| judgement.expected_id.is_none())
+        .count();
+    let mut discard = unmatched.saturating_sub(LIVE_UNMATCHED_FEEDBACK_LIMIT);
+    current.retain(|judgement| {
+        if judgement.expected_id.is_none() && discard > 0 {
+            discard -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
+
+fn combined_summaries(summaries: &[SessionSummary]) -> SessionSummary {
+    let expected = summaries.iter().map(|summary| summary.expected).sum();
+    let results = summaries
+        .iter()
+        .flat_map(|summary| summary.results.iter().cloned())
+        .collect();
+    summary_from_results(expected, results)
+}
+
+fn confirmed_attempt_is_good(summary: &SessionSummary, tolerance: RepeatTolerance) -> bool {
+    summary.expected > 0
+        && summary.matched == summary.expected
+        && summary.extras == 0
+        && summary.wrong_instrument == 0
+        && summary
+            .results
+            .iter()
+            .filter(|result| result.expected_id.is_some())
+            .all(|result| match tolerance {
+                RepeatTolerance::Relaxed => matches!(
+                    result.judgement,
+                    Judgement::Perfect | Judgement::Good | Judgement::Early | Judgement::Late
+                ),
+                RepeatTolerance::Standard => {
+                    matches!(result.judgement, Judgement::Perfect | Judgement::Good)
+                }
+                RepeatTolerance::Strict => result.judgement == Judgement::Perfect,
+            })
+}
+
+#[cfg(test)]
 struct LiveTimingContext<'a> {
     session_start_ms: f64,
     bpm: f64,
@@ -943,6 +1067,7 @@ struct LiveTimingContext<'a> {
     config: ScoringConfig,
 }
 
+#[cfg(test)]
 fn live_judgement_for_hit(
     expected: &[ExpectedHit],
     matched_expected_ids: &mut HashSet<String>,
@@ -999,6 +1124,7 @@ fn live_judgement_for_hit(
             excellent: judgement == Judgement::Perfect,
             note_score: context.config.note_score(error_ms),
             event_id: Some(format!("{:.3}", observed.timestamp_ms)),
+            confirmed: false,
         };
     }
 
@@ -1026,6 +1152,7 @@ fn live_judgement_for_hit(
         excellent: false,
         note_score: 0.0,
         event_id: Some(format!("{:.3}", observed.timestamp_ms)),
+        confirmed: false,
     }
 }
 
@@ -1303,6 +1430,7 @@ fn App() -> impl IntoView {
     let practice_origin_ms = RwSignal::new(0.0);
     let bar_attempt = RwSignal::new(1usize);
     let failed_repeat_attempts = RwSignal::new(Vec::<(usize, Vec<LiveJudgement>)>::new());
+    let repeat_attempt_summaries = RwSignal::new(Vec::<SessionSummary>::new());
     let live = RwSignal::new(Vec::<LiveJudgement>::new());
     let live_matched_expected = RwSignal::new(HashSet::<String>::new());
     let input_mode = RwSignal::new(InputSource::Demo);
@@ -1338,6 +1466,7 @@ fn App() -> impl IntoView {
     let on_time_ms = RwSignal::new(DEFAULT_GOOD_MS);
     let excellent_ms = RwSignal::new(DEFAULT_PERFECT_MS);
     let runtime_tempo_map = RwSignal::new(scaled_tempo_map(&paradiddle(), 1, 60.0));
+    let scoring_engine = Rc::new(RefCell::new(None::<IncrementalScorer>));
 
     // The optional presentation renderer reads the same state as notation.
     // Its position is supplied by the existing Tone frame in the bridge, not
@@ -1443,29 +1572,29 @@ fn App() -> impl IntoView {
         })
     });
 
+    let scoring_for_finish = scoring_engine.clone();
     let finish_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
         phase.set("finishing".into());
-        let expected = run_expected.get_untracked();
-        let tempo_map = runtime_tempo_map.get_untracked();
-        let scoring_bpm = tempo_map
-            .first()
-            .map(|change| change.bpm)
-            .unwrap_or(bpm.get_untracked());
-        let mut summary = score_session_with_tempo_map(
-            expected.as_ref(),
-            &observed.get_untracked(),
-            scoring_bpm,
-            run_start_ms.get_untracked(),
-            latency_ms.get_untracked(),
-            ScoringConfig {
-                perfect_ms: excellent_ms.get_untracked(),
-                good_ms: on_time_ms.get_untracked(),
-                ..ScoringConfig::default()
-            },
-            &tempo_map,
-        );
-        include_failed_repeat_attempts(&mut summary, &failed_repeat_attempts.get_untracked());
+        let attempts = repeat_attempt_summaries.get_untracked();
+        let summary = if attempts.is_empty() {
+            let mut scoring = scoring_for_finish.borrow_mut();
+            match scoring.as_mut().map(IncrementalScorer::finish) {
+                Some(Ok(summary)) => summary,
+                Some(Err(error)) => {
+                    import_error.set(Some(format!("Scoring could not finish safely: {error}")));
+                    phase.set("error".into());
+                    return;
+                }
+                None => {
+                    import_error.set(Some("Scoring state was unavailable at completion.".into()));
+                    phase.set("error".into());
+                    return;
+                }
+            }
+        } else {
+            combined_summaries(&attempts)
+        };
         let current = SessionRecord {
             id: format!("{}-{:.0}", exercise.get_untracked().id, Date::now()),
             ended_at: Date::new_0().to_iso_string().into(),
@@ -1531,6 +1660,7 @@ fn App() -> impl IntoView {
         let frame_holder = frame_holder.clone();
         let done_holder = done_holder.clone();
         let launch_holder = launch_holder.clone();
+        let scoring_for_launch = scoring_engine.clone();
         Rc::new(move |offset, count_bars, immediate| {
             phase.set(if count_bars > 0 {
                 "count_in".into()
@@ -1554,6 +1684,19 @@ fn App() -> impl IntoView {
             } else {
                 (offset, total)
             };
+            let scoring_expected = if repeat_enabled {
+                hits_in_bar(
+                    run_expected.get_untracked().as_ref(),
+                    segment_start,
+                    segment_end,
+                )
+            } else {
+                run_expected.get_untracked().as_ref().clone()
+            };
+            let resuming = paused_run_start_ms.get_untracked().is_some();
+            if !resuming {
+                scoring_for_launch.borrow_mut().take();
+            }
             active_segment_start.set(segment_start);
             let tempo_map =
                 expanded_sequence_tempo_map(&current_exercise, &sequence, configured_loops);
@@ -1581,13 +1724,25 @@ fn App() -> impl IntoView {
             } else {
                 Vec::new()
             };
-            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":bar_beats,"exerciseBeats":exercise_length,"displayRangeStart":range_start,"displayRangeBeats":sequence.length(),"displayBars":sequence.bars,"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes})).unwrap_or(JsValue::NULL);
+            let final_source_bpm = tempo_map
+                .iter()
+                .take_while(|change| change.beat <= segment_end + 0.000_001)
+                .last()
+                .map(|change| change.bpm)
+                .unwrap_or(current_exercise.tempo_bpm);
+            let final_effective_bpm =
+                final_source_bpm * bpm.get_untracked() / current_exercise.tempo_bpm.max(1.0);
+            let scoring_tail_beats = SCORING_TAIL_MS * final_effective_bpm / 60_000.0;
+            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":bar_beats,"exerciseBeats":exercise_length,"displayRangeStart":range_start,"displayRangeBeats":sequence.length(),"displayBars":sequence.bars,"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes,"scoringTailBeats":scoring_tail_beats})).unwrap_or(JsValue::NULL);
             let origin_set = Rc::new(Cell::new(false));
             let tracking_started = Rc::new(Cell::new(false));
             let range_length = sequence.length();
             let initial_visible_loop =
                 ((offset - range_start).max(0.0) / range_length).floor() as usize;
             visible_loop_index.set(initial_visible_loop);
+            let scoring_for_frame = scoring_for_launch.clone();
+            let frame_sequence = sequence.clone();
+            let last_scoring_revision = Cell::new(u64::MAX);
             let frame = Closure::wrap(Box::new(move |beat: f64, _now: f64, start: f64| {
                 let score_tempo_map = runtime_tempo_map.get_untracked();
                 let scoring_bpm = score_tempo_map
@@ -1599,10 +1754,27 @@ fn App() -> impl IntoView {
                 if let Some(previous_start) = paused_run_start_ms.get_untracked() {
                     observed
                         .update(|hits| rebase_hits_for_resume(hits, previous_start, session_start));
+                    if let Some(scorer) = scoring_for_frame.borrow_mut().as_mut() {
+                        scorer.rebase_origin(session_start);
+                    }
                     paused_run_start_ms.set(None);
                 }
+                if scoring_for_frame.borrow().is_none() {
+                    *scoring_for_frame.borrow_mut() = Some(IncrementalScorer::new(
+                        &scoring_expected,
+                        scoring_bpm,
+                        session_start,
+                        ScoringConfig {
+                            perfect_ms: excellent_ms.get_untracked(),
+                            good_ms: on_time_ms.get_untracked(),
+                            ..ScoringConfig::default()
+                        },
+                        &score_tempo_map,
+                    ));
+                }
                 run_start_ms.set(session_start);
-                progress.set(beat);
+                let visible_beat = beat.min(segment_end - 0.000_001);
+                progress.set(visible_beat);
                 if repeat_enabled
                     && !origin_set.replace(true)
                     && accepted_observed.get_untracked().is_empty()
@@ -1624,9 +1796,70 @@ fn App() -> impl IntoView {
                         && beat < total - 0.000_001
                     {
                         visible_loop_index.set(current_visible_loop);
+                        // The scorer continues across iterations; only reset
+                        // the renderer projection so a previous loop cannot
+                        // leave stale notation colours or unbounded markers.
                         live.set(vec![]);
                         feedback_dirty.set(false);
                         clear_score_feedback_preserve_viewport();
+                    }
+                }
+                if beat >= offset - 0.000_001 {
+                    let watermark = session_start
+                        + elapsed_ms_at_beat(beat, scoring_bpm, &score_tempo_map)
+                        - SCORING_DELIVERY_GRACE_MS;
+                    let scoring_result = {
+                        let mut scoring = scoring_for_frame.borrow_mut();
+                        let scorer = scoring.as_mut().expect("scorer initialized above");
+                        scorer.advance_event_time(watermark).and_then(|_| {
+                            let revision = scorer.revision();
+                            if revision == last_scoring_revision.get() {
+                                Ok(None)
+                            } else {
+                                last_scoring_revision.set(revision);
+                                scorer.take_feedback_update().map(Some)
+                            }
+                        })
+                    };
+                    match scoring_result {
+                        Ok(Some(feedback)) => {
+                            let mut update = live_feedback_from_scoring(
+                                &feedback,
+                                &frame_sequence,
+                                scoring_bpm,
+                                &score_tempo_map,
+                                session_start,
+                                latency_ms.get_untracked(),
+                            );
+                            if !repeat_enabled {
+                                let iteration = visible_loop_index.get_untracked();
+                                update.retain(|judgement| {
+                                    judgement.iteration.is_none_or(|value| value >= iteration)
+                                });
+                            }
+                            let mut visible = live.get_untracked();
+                            merge_live_feedback(&mut visible, update);
+                            if !repeat_enabled {
+                                let iteration = visible_loop_index.get_untracked();
+                                visible.retain(|judgement| {
+                                    judgement.iteration.is_none_or(|value| value == iteration)
+                                });
+                            }
+                            if live.get_untracked() != visible {
+                                live.set(visible);
+                                feedback_dirty.set(true);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            set_practice_active(false);
+                            phase.set("error".into());
+                            import_error.set(Some(format!(
+                                "Scoring stopped to preserve reliable results: {error}"
+                            )));
+                            stop_audio();
+                            return;
+                        }
                     }
                 }
                 if beat >= offset - 0.000_001 && feedback_dirty.get_untracked() {
@@ -1634,12 +1867,13 @@ fn App() -> impl IntoView {
                     let visible = live.get_untracked();
                     let judgement_values =
                         serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
-                    let display_beat = sequence.display_beat(beat);
+                    let display_beat = frame_sequence.display_beat(visible_beat);
                     update_score(display_beat, judgement_values);
                 }
             }) as Box<dyn FnMut(f64, f64, f64)>);
             let done_finish = finish_run.clone();
             let repeat_launch = launch_holder.clone();
+            let scoring_for_done = scoring_for_launch.clone();
             let done = Closure::wrap(Box::new(move || {
                 set_practice_active(false);
                 if !repeat_enabled {
@@ -1647,6 +1881,7 @@ fn App() -> impl IntoView {
                         observed.set(vec![]);
                         live.set(vec![]);
                         live_matched_expected.set(HashSet::new());
+                        scoring_for_done.borrow_mut().take();
                         feedback_dirty.set(true);
                         clear_score_feedback_preserve_viewport();
                         let next = repeat_launch.borrow().as_ref().cloned();
@@ -1658,15 +1893,29 @@ fn App() -> impl IntoView {
                     done_finish();
                     return;
                 }
-                let all_expected = run_expected.get_untracked();
-                let expected = hits_in_bar(all_expected.as_ref(), segment_start, segment_end);
+                let attempt_summary = {
+                    let mut scoring = scoring_for_done.borrow_mut();
+                    match scoring.as_mut().map(IncrementalScorer::finish) {
+                        Some(Ok(summary)) => summary,
+                        Some(Err(error)) => {
+                            phase.set("error".into());
+                            import_error.set(Some(format!(
+                                "Scoring could not finish the practice attempt safely: {error}"
+                            )));
+                            return;
+                        }
+                        None => {
+                            phase.set("error".into());
+                            import_error.set(Some(
+                                "Scoring state was unavailable for the practice attempt.".into(),
+                            ));
+                            return;
+                        }
+                    }
+                };
+                repeat_attempt_summaries.update(|items| items.push(attempt_summary.clone()));
                 let attempt_origin = run_start_ms.get_untracked();
-                if bar_attempt_is_good(
-                    expected.len(),
-                    live_matched_expected.get_untracked().len(),
-                    &live.get_untracked(),
-                    repeat_tolerance.get_untracked(),
-                ) {
+                if confirmed_attempt_is_good(&attempt_summary, repeat_tolerance.get_untracked()) {
                     let canonical_origin = practice_origin_ms.get_untracked();
                     let accepted = observed
                         .get_untracked()
@@ -1681,6 +1930,7 @@ fn App() -> impl IntoView {
                     observed.set(vec![]);
                     feedback_dirty.set(true);
                     live_matched_expected.set(HashSet::new());
+                    scoring_for_done.borrow_mut().take();
                     bar_attempt.set(1);
                     if segment_end >= total - 0.000_001 {
                         observed.set(accepted_observed.get_untracked());
@@ -1695,12 +1945,11 @@ fn App() -> impl IntoView {
                         }
                     }
                 } else {
-                    failed_repeat_attempts
-                        .update(|attempts| attempts.push((expected.len(), live.get_untracked())));
                     observed.set(vec![]);
                     feedback_dirty.set(true);
                     live.set(vec![]);
                     live_matched_expected.set(HashSet::new());
+                    scoring_for_done.borrow_mut().take();
                     bar_attempt.update(|attempt| *attempt += 1);
                     clear_score_feedback_preserve_viewport();
                     let next = repeat_launch.borrow().as_ref().cloned();
@@ -1763,6 +2012,7 @@ fn App() -> impl IntoView {
         })
     };
 
+    let scoring_for_reset = scoring_engine.clone();
     let reset_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
         selection_changed.set(false);
@@ -1775,6 +2025,8 @@ fn App() -> impl IntoView {
         paused_run_start_ms.set(None);
         bar_attempt.set(1);
         failed_repeat_attempts.set(vec![]);
+        repeat_attempt_summaries.set(vec![]);
+        scoring_for_reset.borrow_mut().take();
         live.set(vec![]);
         live_matched_expected.set(HashSet::new());
         result.set(None);
@@ -1783,6 +2035,7 @@ fn App() -> impl IntoView {
         phase.set("idle".into());
     });
 
+    let scoring_for_navigation = scoring_engine.clone();
     let stop_for_navigation: Rc<dyn Fn()> = Rc::new(move || {
         if matches!(
             phase.get_untracked().as_str(),
@@ -1799,6 +2052,8 @@ fn App() -> impl IntoView {
             paused_run_start_ms.set(None);
             bar_attempt.set(1);
             failed_repeat_attempts.set(vec![]);
+            repeat_attempt_summaries.set(vec![]);
+            scoring_for_navigation.borrow_mut().take();
             live.set(vec![]);
             live_matched_expected.set(HashSet::new());
             result.set(None);
@@ -1840,6 +2095,7 @@ fn App() -> impl IntoView {
         selection.forget();
     }
 
+    let scoring_for_tempo = scoring_engine.clone();
     let change_tempo: Rc<dyn Fn(f64)> = Rc::new(move |value| {
         let value = value.clamp(30.0, 240.0);
         bpm.set(value);
@@ -1850,7 +2106,7 @@ fn App() -> impl IntoView {
             let current_exercise = exercise.get_untracked();
             let beat = progress.get_untracked().max(0.0);
             let sequence = bar_sequence.get_untracked();
-            runtime_tempo_map.set(retime_tempo_map(
+            let retimed = retime_tempo_map(
                 &runtime_tempo_map.get_untracked(),
                 &current_exercise,
                 &sequence,
@@ -1861,13 +2117,19 @@ fn App() -> impl IntoView {
                 },
                 beat,
                 value,
-            ));
+            );
+            runtime_tempo_map.set(retimed.clone());
+            let scoring_bpm = retimed.first().map(|change| change.bpm).unwrap_or(value);
+            if let Some(scorer) = scoring_for_tempo.borrow_mut().as_mut() {
+                scorer.retime(scoring_bpm, &retimed);
+            }
             set_audio_tempo(value);
         }
     });
 
     let start_new_run: Rc<dyn Fn(u8)> = {
         let launch = launch_run.clone();
+        let scoring_for_start = scoring_engine.clone();
         Rc::new(move |count_bars| {
             result_modal_open.set(false);
             selection_changed.set(false);
@@ -1875,7 +2137,10 @@ fn App() -> impl IntoView {
             let sequence = bar_sequence.get_untracked();
             let start_beat = sequence.origin;
             app_mode.set(
-                if sequence.bars.len() == sequence.total_bars && loops.get_untracked() == 1 {
+                if sequence.bars.len() == sequence.total_bars
+                    && loops.get_untracked() == 1
+                    && !repeat_bar_until_good.get_untracked()
+                {
                     AppMode::Performance
                 } else {
                     AppMode::Practice
@@ -1899,6 +2164,8 @@ fn App() -> impl IntoView {
             paused_run_start_ms.set(None);
             bar_attempt.set(1);
             failed_repeat_attempts.set(vec![]);
+            repeat_attempt_summaries.set(vec![]);
+            scoring_for_start.borrow_mut().take();
             live.set(vec![]);
             live_matched_expected.set(HashSet::new());
             result.set(None);
@@ -1912,6 +2179,7 @@ fn App() -> impl IntoView {
 
     let save_for_hit = save_current_settings.clone();
     let start_for_hit = start_new_run.clone();
+    let scoring_for_hit = scoring_engine.clone();
     let hit_input: HitInput = Rc::new(
         move |timestamp, instrument, velocity, source, raw_note, raw_channel| {
             if result_modal_open.get_untracked() {
@@ -1999,76 +2267,77 @@ fn App() -> impl IntoView {
                 raw_note,
                 raw_channel,
             };
-            let current_exercise = exercise.get_untracked();
-            let all_expected = run_expected.get_untracked();
-            let expected_in_bar;
-            let expected = if repeat_bar_until_good.get_untracked() {
-                let bar_beats = beats_per_bar(&current_exercise);
-                expected_in_bar = hits_for_bar_attempt(
-                    all_expected.as_ref(),
-                    active_segment_start.get_untracked(),
-                    bar_beats,
-                );
-                expected_in_bar.as_slice()
-            } else {
-                all_expected.as_slice()
-            };
             let session_start = run_start_ms.get_untracked();
             let tempo_map = runtime_tempo_map.get_untracked();
             let scoring_bpm = tempo_map
                 .first()
                 .map(|change| change.bpm)
                 .unwrap_or(bpm.get_untracked());
-            let config = ScoringConfig {
-                perfect_ms: excellent_ms.get_untracked(),
-                good_ms: on_time_ms.get_untracked(),
-                ..ScoringConfig::default()
-            };
             let sequence = bar_sequence.get_untracked();
-            let mut matched_expected = live_matched_expected.get_untracked();
-            let previously_matched = matched_expected.clone();
-            let timing = LiveTimingContext {
-                session_start_ms: session_start,
-                bpm: scoring_bpm,
-                tempo_map: &tempo_map,
-                sequence: &sequence,
-                latency_ms: latency_ms.get_untracked(),
-                config,
+            let scoring_result = {
+                let mut scoring = scoring_for_hit.borrow_mut();
+                let Some(scorer) = scoring.as_mut() else {
+                    import_error.set(Some(
+                        "Scoring was not ready for this strike; restart the attempt.".into(),
+                    ));
+                    phase.set("error".into());
+                    stop_audio();
+                    return;
+                };
+                scorer
+                    .observe(event.clone(), timestamp - latency_ms.get_untracked())
+                    .and_then(|_| scorer.take_feedback_update())
             };
-            let judgement =
-                live_judgement_for_hit(expected, &mut matched_expected, &event, &timing);
-            if !repeat_bar_until_good.get_untracked() {
-                let matched_beat = expected
-                    .iter()
-                    .find(|hit| {
-                        !previously_matched.contains(&hit.id) && matched_expected.contains(&hit.id)
-                    })
-                    .map(|hit| hit.beat);
-                let absolute_beat = matched_beat.unwrap_or_else(|| {
-                    beat_at_elapsed_ms(
-                        timestamp - timing.latency_ms - timing.session_start_ms,
-                        timing.bpm,
-                        timing.tempo_map,
-                    )
-                });
-                let loop_index = ((absolute_beat - sequence.origin).max(0.0) / sequence.length())
-                    .floor() as usize;
-                if loop_index > visible_loop_index.get_untracked() {
-                    visible_loop_index.set(loop_index);
-                    live.set(vec![]);
-                    clear_score_feedback_preserve_viewport();
+            match scoring_result {
+                Ok(feedback) => {
+                    observed.update(|items| items.push(event));
+                    let mut update = live_feedback_from_scoring(
+                        &feedback,
+                        &sequence,
+                        scoring_bpm,
+                        &tempo_map,
+                        session_start,
+                        latency_ms.get_untracked(),
+                    );
+                    if !repeat_bar_until_good.get_untracked() {
+                        let iteration = visible_loop_index.get_untracked();
+                        update.retain(|judgement| {
+                            judgement.iteration.is_none_or(|value| value >= iteration)
+                        });
+                    }
+                    let mut visible = live.get_untracked();
+                    merge_live_feedback(&mut visible, update);
+                    if !repeat_bar_until_good.get_untracked() {
+                        let iteration = visible_loop_index.get_untracked();
+                        visible.retain(|judgement| {
+                            judgement.iteration.is_none_or(|value| value == iteration)
+                        });
+                    }
+                    live.set(visible.clone());
+                    // Paint the authoritative projection in the input turn.
+                    // If a settings or navigation action pauses Tone before
+                    // its next frame, the accepted hit must not remain queued
+                    // in Rust state but absent from Notation.
+                    let judgement_values =
+                        serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
+                    let display_beat =
+                        sequence.display_beat(current_audio_beat().max(sequence.origin));
+                    update_score(display_beat, judgement_values);
+                    feedback_dirty.set(false);
+                }
+                Err(error) => {
+                    set_practice_active(false);
+                    phase.set("error".into());
+                    import_error.set(Some(format!(
+                        "Scoring stopped to preserve reliable results: {error}"
+                    )));
+                    stop_audio();
                 }
             }
-            observed.update(|items| items.push(event.clone()));
-            feedback_dirty.set(true);
-            live_matched_expected.set(matched_expected);
-            if let Ok(value) = json_compatible(&judgement) {
-                append_score_judgement(value);
-            }
-            live.update(|judgements| judgements.push(judgement));
         },
     );
 
+    let scoring_for_file = scoring_engine.clone();
     let file_callback: Rc<MidiFileCallback> = Rc::new(Closure::wrap(Box::new(
         move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
             if library_open.get_untracked() {
@@ -2087,6 +2356,8 @@ fn App() -> impl IntoView {
                 paused_run_start_ms.set(None);
                 bar_attempt.set(1);
                 failed_repeat_attempts.set(vec![]);
+                repeat_attempt_summaries.set(vec![]);
+                scoring_for_file.borrow_mut().take();
                 live.set(vec![]);
                 live_matched_expected.set(HashSet::new());
                 progress.set(-1.0);
@@ -2901,7 +3172,7 @@ fn App() -> impl IntoView {
                   <span class="good"><i aria-hidden="true"></i>"Good"</span>
                   <span class="early"><i aria-hidden="true"></i>"Early"</span>
                   <span class="late"><i aria-hidden="true"></i>"Late"</span>
-                  <span class="unmatched"><i aria-hidden="true"></i>"Missed"</span>
+                  <span class="unmatched"><i aria-hidden="true"></i>"Unmatched"</span>
                 </aside>
               </div>
             </section>
@@ -3261,14 +3532,17 @@ mod tests {
     #[ignore]
     fn scoring_study_live_matcher_benchmark() {
         use std::time::Instant;
-        for (count, spacing) in [
-            (500, 1000.0),
-            (500, 250.0),
-            (500, 125.0),
-            (500, 62.5),
-            (1000, 31.25),
-            (2000, 62.5),
-            (10000, 62.5),
+        for (count, spacing, gap) in [
+            (500, 1000.0, false),
+            (500, 250.0, false),
+            (500, 125.0, false),
+            (500, 62.5, false),
+            (1000, 31.25, false),
+            (2000, 62.5, false),
+            (10000, 62.5, false),
+            (2000, 62.5, true),
+            (10000, 62.5, true),
+            (500, 0.0, false),
         ] {
             let template = two_note_bar()[0].clone();
             let expected: Vec<_> = (0..count)
@@ -3291,6 +3565,9 @@ mod tests {
             let mut matched = HashSet::new();
             let mut samples = Vec::with_capacity(count);
             for i in 0..count {
+                if gap && i == count / 4 {
+                    continue;
+                }
                 let hit = observed_at(i as f64 * spacing + 5.0);
                 let start = Instant::now();
                 std::hint::black_box(live_judgement_for_hit(
@@ -3305,7 +3582,7 @@ mod tests {
             let p =
                 |fraction: f64| samples[((samples.len() - 1) as f64 * fraction).ceil() as usize];
             println!(
-                "live count={count} spacing_ms={spacing:.1} p50_ms={:.4} p95_ms={:.4} p99_ms={:.4} max_ms={:.4}",
+                "live count={count} spacing_ms={spacing:.2} gap={gap} p50_ms={:.4} p95_ms={:.4} p99_ms={:.4} max_ms={:.4}",
                 p(0.5),
                 p(0.95),
                 p(0.99),
@@ -3878,15 +4155,64 @@ mod tests {
     }
 
     #[test]
-    fn full_session_statistics_have_one_production_call_site() {
+    fn live_projection_bounds_unmatched_markers_without_losing_expected_feedback() {
+        let expected = LiveJudgement {
+            expected_id: Some("expected-note".into()),
+            iteration: Some(0),
+            expected_beat: Some(0.0),
+            actual_beat: None,
+            instrument: Instrument::Snare,
+            judgement: Judgement::Missed,
+            error_ms: 0.0,
+            excellent: false,
+            note_score: 0.0,
+            event_id: Some("expected-note:none:0".into()),
+            confirmed: true,
+        };
+        let mut update = vec![expected];
+        update.extend((0..300).map(|index| LiveJudgement {
+            expected_id: None,
+            iteration: None,
+            expected_beat: None,
+            actual_beat: Some(index as f64),
+            instrument: Instrument::Snare,
+            judgement: Judgement::Extra,
+            error_ms: 0.0,
+            excellent: false,
+            note_score: 0.0,
+            event_id: Some(format!("extra-{index}")),
+            confirmed: true,
+        }));
+
+        let mut visible = Vec::new();
+        merge_live_feedback(&mut visible, update);
+
+        assert_eq!(visible.len(), LIVE_UNMATCHED_FEEDBACK_LIMIT + 1);
+        assert!(
+            visible
+                .iter()
+                .any(|judgement| judgement.expected_id.as_deref() == Some("expected-note"))
+        );
+        let unmatched = visible
+            .iter()
+            .filter(|judgement| judgement.expected_id.is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(unmatched.len(), LIVE_UNMATCHED_FEEDBACK_LIMIT);
+        assert_eq!(unmatched[0].event_id.as_deref(), Some("extra-44"));
+        assert_eq!(
+            unmatched.last().unwrap().event_id.as_deref(),
+            Some("extra-299")
+        );
+    }
+
+    #[test]
+    fn production_uses_one_incremental_scorer_constructor() {
         let production_source = include_str!("main.rs")
-            .split("#[cfg(test)]")
+            .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("production source");
         assert_eq!(
-            production_source
-                .matches("score_session_with_tempo_map(")
-                .count(),
+            production_source.matches("IncrementalScorer::new(").count(),
             1
         );
     }

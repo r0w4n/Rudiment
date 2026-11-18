@@ -4,7 +4,7 @@ Rudiment profiles its production WASM/Leptos, VexFlow, Tone.js and Web MIDI path
 
 ## Runtime map
 
-MIDI files are fetched/file-read in `web/js/bridge.js`, parsed and quantised by `crates/core`, stored in Leptos state, then engraved by VexFlow. During practice, Tone.Transport schedules metronome/reference audio independently of `requestAnimationFrame`. Web MIDI or keyboard events cross into the Leptos hit handler, Rust matches and classifies them, a next-frame bridge update paints noteheads/extra-hit markers, and the slower UI tick updates counters and session state. Completion runs the deterministic full-session matcher and persists the summary to IndexedDB.
+MIDI files are fetched/file-read in `web/js/bridge.js`, parsed and quantised by `crates/core`, stored in Leptos state, then engraved by VexFlow. During practice, Tone.Transport schedules metronome/reference audio independently of `requestAnimationFrame`. Web MIDI or keyboard events cross into the Leptos hit handler, the authoritative Rust scorer updates its provisional/confirmed projection, and the bridge paints the changed note or unmatched-strike marker in the input turn. The existing transport frame advances event time for confirmed misses and the slower UI tick updates counters and session state. Completion drains that same scorer and persists its summary to IndexedDB.
 
 | Concern                                                                        | Implementation                                            |
 | ------------------------------------------------------------------------------ | --------------------------------------------------------- |
@@ -56,6 +56,48 @@ See `PERFORMANCE_REPORT.md` for the measured comparison. Large score import stil
 The comparator now also requires the same report schema, tier and scenario signature; missing required metrics, non-finite p95 values and inadequate candidate sample counts fail enforced runs. Relative gates additionally require a matching browser major version. The checked-in fast baseline is macOS/ARM and predates structured browser-version metadata, while GitHub Actions runs Linux/x64. CI therefore enforces the reliable absolute callback and score-update budgets but treats relative changes as diagnostic until a reviewed Linux/x64 baseline is recorded on the same runner/browser workload. Memory growth remains diagnostic because precise Chromium heap size is not controlled-GC leak evidence.
 
 Headless input-to-paint results vary with animation-frame scheduling (16.5–31.9 ms p95 in the final repeated fast runs), so the 16.7 ms objective is reported but not used as a brittle absolute CI gate. Synchronous MIDI callback and score-update budgets remain absolute because they are substantially less scheduler-dependent.
+
+## Isolated scoring feasibility
+
+[`docs/scoring-frontier-study.md`](docs/scoring-frontier-study.md) records the opt-in native and Chrome/WASM frontier experiment, its separate scoring-policy proposal, reproduction commands and failed production gate. Its synthetic measurements are diagnostic only; the candidate is not integrated into the app and does not replace the real MIDI/audio performance harness or its budgets.
+
+## Production scoring v4
+
+[`docs/scoring-policy-v4.md`](docs/scoring-policy-v4.md) describes the bounded
+local engine that replaced the separate live greedy and final global matchers.
+The existing `midi_callback_ms` browser measurement includes Rust/WASM event
+ingestion and provisional scoring; `score_update_ms` and
+`feedback_paint_work_ms` cover the downstream Notation path, while
+`highway.renderer_update_ms` remains the renderer-specific diagnostic. Miss
+confirmation is advanced from the existing Tone frame with a 32 ms delivery
+allowance and is checked in browser tests; no additional timer or animation
+loop is measured. The fast, full and endurance commands remain the production
+acceptance harnesses for callback tails, long tasks, heap use and audio
+scheduling.
+
+An opt-in native diagnostic exercises event ingestion, frontier advancement
+and incremental feedback updates (confirmed deltas plus the current
+provisional projection). One release-mode run on 2026-11-17 used macOS 25.6.0
+arm64, Rust 1.99.1 and Node 22.23.1:
+
+| Workload                       |             v4 p50/p95/p99/max ms | Final drain ms |
+| ------------------------------ | --------------------------------: | -------------: |
+| 500 notes, 250 ms              | 0.0042 / 0.0048 / 0.0097 / 0.0147 |         0.1369 |
+| 500 notes, 62.5 ms             | 0.0119 / 0.0160 / 0.0251 / 0.0310 |         0.0638 |
+| 2,000 notes, 62.5 ms, one gap  | 0.0153 / 0.0262 / 0.0286 / 0.1000 |         0.1273 |
+| 10,000 notes, 62.5 ms, one gap | 0.0299 / 0.0399 / 0.0468 / 0.0655 |         0.3892 |
+
+The historical private live-greedy measurements for the matching 500/250,
+500/62.5, 2,000-gap and 10,000-gap workloads had p95 values of 0.0172,
+0.0129, 0.0257 and 0.1370 ms respectively. These functions do different work:
+the v4 diagnostic includes frontier confirmation and feedback deltas, uses an
+exact raw note, and excludes Leptos signals, serialization, audio and browser
+rendering. The comparison is therefore a native responsiveness check, not an
+end-to-end latency claim. Reproduce with:
+
+```sh
+cargo run -p rudiment-core --locked --release --example scoring_v4
+```
 
 ## Hardware-in-the-loop
 

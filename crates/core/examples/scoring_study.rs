@@ -5,8 +5,9 @@
 //! complete connected groups; it is not a production-ready streaming engine.
 
 use rudiment_core::{
-    ExpectedHit, HitResult, InputSource, Instrument, ObservedHit, SCORING_VERSION, ScoringConfig,
-    SessionSummary, TempoChange, elapsed_ms_at_beat, paradiddle, score_session_with_tempo_map,
+    ExpectedHit, HitResult, InputSource, Instrument, ObservedHit, ScoringConfig, SessionSummary,
+    TempoChange, elapsed_ms_at_beat, paradiddle,
+    score_session_v3_with_tempo_map as score_session_with_tempo_map,
 };
 use std::collections::HashMap;
 use std::time::Instant;
@@ -202,7 +203,7 @@ impl Study {
                 mean_abs_error_ms: None,
                 signed_mean_error_ms: None,
                 timing_consistency_ms: None,
-                scoring_version: SCORING_VERSION.into(),
+                scoring_version: "v3".into(),
                 results: vec![],
             };
         }
@@ -259,7 +260,7 @@ impl Study {
             mean_abs_error_ms,
             signed_mean_error_ms,
             timing_consistency_ms,
-            scoring_version: SCORING_VERSION.into(),
+            scoring_version: "v3".into(),
             results,
         }
     }

@@ -28,13 +28,17 @@ test('presents musical positions, durations, grid and detached feedback', () => 
   const source = exercise();
   controller.setExercise(source);
   controller.setPosition(0.5);
-  controller.setJudgements([{ expected_id: 'note-1', judgement: 'good' }]);
+  controller.setJudgements([
+    { expected_id: 'note-1', judgement: 'good' },
+    { expected_id: null, event_id: 'extra-1', actual_beat: 1.25, iteration: 0, instrument: 'snare', judgement: 'extra' },
+  ]);
   const model = latest();
   assert.equal(model.position, 0.5);
   assert.deepEqual(model.visibleRange, { start: -1.5, end: 6.5 });
   assert.equal(model.notes.find(note => note.id === 'note-1').position, 0.5);
   assert.equal(model.notes.find(note => note.id === 'note-1').duration, 0.25);
   assert.equal(model.notes.find(note => note.id === 'note-1').judgement, 'good');
+  assert.deepEqual(model.unmatched, [{ id: 'extra-1', instrument: 'snare', judgement: 'extra', iteration: 0, position: 1.25 }]);
   assert.ok(model.boundaries.some(boundary => boundary.position === 4 && boundary.kind === 'bar' && boundary.bar === 2));
   assert.ok(model.boundaries.some(boundary => boundary.position === 0.25 && boundary.kind === 'subdivision'));
   assert.throws(() => { model.notes[0].beat = 999; }, TypeError);
@@ -51,6 +55,8 @@ test('maps selected noncontiguous bars to consecutive playback positions and sto
   assert.equal(next.beat, 8);
   assert.equal(next.position, 4);
   assert.ok(model.notes.some(note => note.id === 'note-0' && note.position === 8));
+  controller.setJudgements([{ expected_id: null, event_id: 'selected-extra', actual_beat: 8.25, iteration: 0, instrument: 'snare', judgement: 'extra' }]);
+  assert.equal(latest().unmatched[0].position, 4.25);
   controller.setPosition(16);
   assert.ok(latest().notes.every(note => note.position < 16));
 });

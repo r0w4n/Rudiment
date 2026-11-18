@@ -172,7 +172,15 @@ async function runEndurance(page){
   const samples=[];const deadline=Date.now()+durationMs;let cycle=0;
   while(Date.now()<deadline){
     await page.evaluate(()=>{for(let index=0;index<64;index++)window.__rudimentPerfInput.dispatch([0x99,38,96]);});
-    if(cycle%5===0){await page.getByRole('button',{name:/Pause/}).click();await page.getByRole('button',{name:/Resume/}).click();}
+    if(cycle%5===0){
+      const pause=page.getByRole('button',{name:/Pause/});
+      try{await pause.click();}
+      catch(error){
+        const state=await page.evaluate(()=>({diagnostics:window.rudiment.audioDiagnostics(),error:document.querySelector('.error-row:not(.hidden)')?.textContent?.trim()||null,controls:Array.from(document.querySelectorAll('button')).map(button=>button.textContent?.trim()).filter(Boolean)}));
+        throw new Error(`Endurance lifecycle failed at cycle ${cycle}: ${JSON.stringify(state)}`,{cause:error});
+      }
+      await page.getByRole('button',{name:/Resume/}).click();
+    }
     samples.push(await page.evaluate(()=>({time:performance.now(),heap:performance.memory?.usedJSHeapSize??null,notes:document.querySelectorAll('.score-note').length,markers:document.querySelectorAll('.unmatched-hit-marker').length,audio:window.rudiment.audioDiagnostics()})));
     cycle++;await page.waitForTimeout(1000);
   }

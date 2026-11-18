@@ -27,6 +27,7 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
   let before = 2;
   let after = 6;
   let judgements = new Map();
+  let unmatched = [];
   let playback = Object.freeze({ phase: 'idle', tempoBpm: null });
   let disposed = false;
 
@@ -71,6 +72,7 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
       lanes: Object.freeze(configuredLanes.slice()),
       notes: Object.freeze(notes),
       boundaries: Object.freeze(boundaries),
+      unmatched: Object.freeze(unmatched.filter(hit => hit.position >= start - EPSILON && hit.position <= end + EPSILON).map(hit => Object.freeze({ ...hit }))),
       position,
       playback,
       timeline: Object.freeze({ bars: Object.freeze(sequence.bars.slice()), origin: sequence.origin, endBeat: sequence.endBeat, iteration: Math.max(0, Math.floor((position - sequence.origin) / length)) }),
@@ -125,6 +127,7 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
       // Match the application's exercise_beats convention at bar boundaries.
       exercise = { barBeats, beatUnit: 4 / source.meter_denominator, barCount: Math.max(1, Math.ceil((lastBeat + 0.001) / barBeats)), notes };
       judgements = new Map();
+      unmatched = [];
       setSequence([], undefined);
       position = sequence.origin;
       update();
@@ -144,14 +147,30 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
     setJudgements(results, iteration = sequence ? Math.max(0, Math.floor((position - sequence.origin) / (sequence.bars.length * exercise.barBeats))) : 0) {
       assertActive();
       const next = new Map();
-      for (const result of results) {
-        if (!result.expected_id) continue;
+      const nextUnmatched = [];
+      for (const [index, result] of results.entries()) {
         const cycle = result.iteration ?? iteration;
         if (!Number.isInteger(cycle) || cycle < 0) throw new Error('Invalid judgement iteration');
+        if (!result.expected_id) {
+          if (!Number.isFinite(result.actual_beat) || !['extra', 'wrong_instrument'].includes(result.judgement)) continue;
+          const sourceBar = Math.floor((result.actual_beat + EPSILON) / exercise.barBeats);
+          const selectedIndex = sequence.bars.indexOf(sourceBar);
+          if (selectedIndex < 0) continue;
+          const offset = result.actual_beat - sourceBar * exercise.barBeats;
+          nextUnmatched.push({
+            id: result.event_id ?? `unmatched:${cycle}:${result.actual_beat}:${index}`,
+            instrument: result.instrument,
+            judgement: result.judgement,
+            iteration: cycle,
+            position: sequence.origin + cycle * sequence.bars.length * exercise.barBeats + selectedIndex * exercise.barBeats + offset,
+          });
+          continue;
+        }
         if (!next.has(cycle)) next.set(cycle, new Map());
         next.get(cycle).set(result.expected_id, result.judgement === 'on_time' ? result.excellent ? 'perfect' : 'good' : result.judgement);
       }
       judgements = next;
+      unmatched = nextUnmatched;
       update();
     },
     setVisibleSpan(past, future) {
@@ -160,6 +179,6 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
       before = past; after = future; update();
     },
     resize(viewport) { assertActive(); renderer.resize(Object.freeze({ ...viewport })); },
-    dispose() { if (disposed) return; disposed = true; renderer.dispose(); exercise = null; sequence = null; judgements.clear(); },
+    dispose() { if (disposed) return; disposed = true; renderer.dispose(); exercise = null; sequence = null; judgements.clear(); unmatched = []; },
   });
 }

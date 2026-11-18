@@ -44,12 +44,21 @@ The built-in SVG Highway mounts only when selected and uses the existing host.
 It draws bounded, keyed note and grid elements under a fixed centred playhead;
 resize observation is owned and disconnected by the mount. When idle, the
 timeline rests at the configured count-in start for the selected bars, avoiding
-a jump on Start. Hit feedback uses non-letter shapes outside the note blocks,
-with a matching key and accessible labels; R/L sticking is unchanged. The current live
-assessment path emits physical hit outcomes but does not emit live missed-note
-judgements. The renderer does not invent them; final session results still
-contain authoritative misses. The final scorer uses optimal one-to-one matching,
-so expiring an unmatched live note in the renderer would not necessarily agree
-with the final result. A future live-miss integration must originate in the
-assessment lifecycle and account for matching windows, latency and repetitions.
-Simulated browser tests do not establish physical MIDI or audible latency.
+a jump on Start. Expected notes use a transparent interior and white outline;
+matched notes fill with the same Perfect, Good, Early and Late colours as
+Notation. R/L sticking and accents are unchanged, and accessible labels expose
+the assessment without adding a second hit symbol. Scoring policy v4 supplies
+provisional hit feedback, provisional/confirmed invalid strikes and confirmed
+misses from the authoritative Rust engine. The renderer never expires or
+classifies a note itself. Confirmed misses retain their stable expected ID and
+explicit loop iteration for scoring and accessibility, but remain visually the
+same white outline as an unplayed expected note. Extra and Wrong Instrument
+strikes render as small red dots at their actual beat on the instrument lane;
+matched hits never create a second marker. Notation consumes the same
+replacement snapshot, including provisional corrections and restart clears.
+Loop transitions clear only this renderer projection; the scorer keeps the
+confirmed iteration results. The projection also bounds visually obsolete
+unmatched-hit markers while final scoring retains every event. See
+[`scoring-policy-v4.md`](scoring-policy-v4.md) for the matching, event-time and
+late-drain rules. Simulated browser tests do not establish physical MIDI or
+audible latency.

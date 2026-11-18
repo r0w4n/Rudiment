@@ -79,7 +79,7 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(startButton.locator('svg.lucide')).toHaveCount(1);
   const timingKey=page.getByLabel('Timing feedback key');
   await expect(timingKey).toBeVisible();
-  await expect(timingKey.locator('span')).toHaveText(['Perfect','Good','Early','Late','Missed']);
+  await expect(timingKey.locator('span')).toHaveText(['Perfect','Good','Early','Late','Unmatched']);
   const timingKeyColours=await timingKey.locator('i').evaluateAll(elements=>elements.map(element=>getComputedStyle(element).backgroundColor));
   expect(timingKeyColours).toEqual(['rgb(47, 207, 136)','rgb(115, 217, 147)','rgb(239, 138, 62)','rgb(168, 121, 221)','rgb(216, 61, 53)']);
   await page.waitForTimeout(450);
@@ -977,8 +977,8 @@ test('progress chart uses persisted scores for the same exercise and tempo',asyn
     request.onsuccess=()=>{
       const db=request.result,transaction=db.transaction('sessions','readwrite'),store=transaction.objectStore('sessions');
       for(const [index,score] of [42,58,67].entries())store.put({
-        id:`seed-${index}`,endedAt:`2026-11-10T18:0${index}:00Z`,exerciseId:'single-paradiddle',exerciseTitle:'Single Paradiddle',exerciseHash:'builtin-paradiddle-v1',bpm:240,inputMode:'demo',scoringVersion:'v3',toleranceMs:60,latencyMs:0,
-        summary:{score,matched:32,expected:32,missed:0,extras:0,wrong_instrument:0,mean_abs_error_ms:20,signed_mean_error_ms:0,timing_consistency_ms:10,scoring_version:'v3',results:[]},
+        id:`seed-${index}`,endedAt:`2026-11-10T18:0${index}:00Z`,exerciseId:'single-paradiddle',exerciseTitle:'Single Paradiddle',exerciseHash:'builtin-paradiddle-v1',bpm:240,inputMode:'demo',scoringVersion:'v4',toleranceMs:60,latencyMs:0,
+        summary:{score,matched:32,expected:32,missed:0,extras:0,wrong_instrument:0,mean_abs_error_ms:20,signed_mean_error_ms:0,timing_consistency_ms:10,scoring_version:'v4',results:[]},
         observed:[],schemaVersion:1,mode:'performance'
       });
       transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error);
@@ -1819,7 +1819,7 @@ test('MIDI hotplug selects the remaining input and pauses only when the selected
   await expect(page.locator('.diagnostics')).not.toContainText('velocity 88');
 });
 
-test('unplayed notes stay neutral and the playhead interpolates continuously', async ({ page }) => {
+test('past unplayed notes become missed while future notes stay neutral and the playhead interpolates continuously', async ({ page }) => {
   await page.goto('/');
   await setTempo(page, '240');
   await page.getByRole('button',{name:'Open settings'}).click();
@@ -1836,7 +1836,10 @@ test('unplayed notes stay neutral and the playhead interpolates continuously', a
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element).scrollbarWidth)).toBe('none');
   expect(await page.locator('#notation').evaluate(element=>getComputedStyle(element,'::-webkit-scrollbar').display)).toBe('none');
   await page.waitForTimeout(350);
-  await expect(page.locator('.score-note[data-judgement="missed"]')).toHaveCount(0);
+  const missed = await page.locator('.score-note[data-judgement="missed"]').count();
+  expect(missed).toBeGreaterThan(0);
+  expect(missed).toBeLessThan(32);
+  expect(await page.locator('.score-note:not([data-judgement])').count()).toBeGreaterThan(0);
   expect(await page.locator('#notation').evaluate(element=>element.scrollLeft)).toBe(0);
   const frameStats=await page.evaluate(()=>new Promise<{median:number,p95:number}>(resolve=>{const deltas:number[]=[];let previous=performance.now();const sample=(now:number)=>{deltas.push(now-previous);previous=now;if(deltas.length<40)requestAnimationFrame(sample);else{const sorted=[...deltas.slice(1)].sort((a,b)=>a-b);resolve({median:sorted[Math.floor(sorted.length*.5)],p95:sorted[Math.floor(sorted.length*.95)]});}};requestAnimationFrame(sample);}));
   expect(frameStats.median).toBeLessThan(20);expect(frameStats.p95).toBeLessThan(40);
@@ -2420,6 +2423,7 @@ test('loop and restart leave practice stopped until started again', async ({ pag
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByLabel('Select bars').click();
   await page.getByLabel('Bar 1',{exact:true}).check();
+  await expect(page.getByText('1 selected · Practice', { exact: true })).toBeVisible();
   await page.getByLabel('Close bar selection').click();
   await page.getByLabel('Loops').selectOption('2');
   await page.getByRole('button', { name: /Start practice/ }).click();
@@ -2427,8 +2431,20 @@ test('loop and restart leave practice stopped until started again', async ({ pag
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
   await page.keyboard.press('j');
   await expect(page.locator('.score-note[data-judgement]')).toHaveCount(1);
+  await page.evaluate(() => {
+    (window as any).__sawLoopFeedbackClear = false;
+    const score = document.querySelector('#notation svg')!;
+    const observer = new MutationObserver(() => {
+      if (!score.querySelector('.score-note[data-judgement]')) {
+        (window as any).__sawLoopFeedbackClear = true;
+      }
+    });
+    observer.observe(score, { attributes: true, subtree: true });
+    (window as any).__loopFeedbackObserver = observer;
+  });
   await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(4.1);
-  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as any).__sawLoopFeedbackClear)).toBe(true);
+  await page.evaluate(() => (window as any).__loopFeedbackObserver.disconnect());
   await expect(page.locator('.unmatched-hit-marker')).toHaveCount(0);
   await page.getByRole('button', { name: /Restart/ }).click();
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
@@ -2547,15 +2563,15 @@ test('bar retries stay on tempo and pause/resume preserves position without scor
   for (let attempt = 3; attempt <= 5; attempt += 1) {
     const previous = attempts.find(item => item.attempt === attempt - 1)!;
     const current = attempts.find(item => item.attempt === attempt)!;
-    expect(current.at - previous.at).toBeGreaterThan(3_200);
-    expect(current.at - previous.at).toBeLessThan(3_450);
+    expect(current.at - previous.at).toBeGreaterThan(3_450);
+    expect(current.at - previous.at).toBeLessThan(3_700);
   }
 
   const diagnostics = () => page.evaluate(() => (window as any).rudiment.audioDiagnostics());
   await expect.poll(() => diagnostics().then(value => value.currentBeat)).toBeGreaterThan(1);
-  const feedbackCount = await page.locator('.score-note[data-judgement]').count();
   await page.getByRole('button', { name: /Pause/ }).click();
   await expect(page.getByRole('button', { name: /Resume/ })).toBeVisible();
+  const feedbackCount = await page.locator('.score-note[data-judgement]').count();
   const pausedBeat = await diagnostics().then(value => value.currentBeat);
   await page.waitForTimeout(200);
   expect((await diagnostics()).currentBeat).toBeCloseTo(pausedBeat, 2);

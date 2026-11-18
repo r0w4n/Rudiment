@@ -5,19 +5,9 @@ const element = (name, attributes = {}) => {
   for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
   return node;
 };
-// Non-letter symbols preserve a visible alternative to colour. The timing key
-// uses the corresponding circle, square and directional triangles.
-const judgementShapes = {
-  perfect: 'M 0 -4 A 4 4 0 1 1 0 4 A 4 4 0 1 1 0 -4 Z',
-  good: 'M -4 -4 H 4 V 4 H -4 Z',
-  early: 'M 3 -5 L -3 0 L 3 5 Z',
-  late: 'M -3 -5 L 3 0 L -3 5 Z',
-  missed: 'M -4 -5 L 0 -1 L 4 -5 L 5 -4 L 1 0 L 5 4 L 4 5 L 0 1 L -4 5 L -5 4 L -1 0 L -5 -4 Z',
-};
-
 export function createHighwaySvg(viewport, record = null) {
-  let svg, moving, grid, notes, playhead, width = 1, height = 1, scale = 1, model;
-  const noteNodes = new Map(), gridNodes = new Map();
+  let svg, moving, grid, notes, strikes, playhead, width = 1, height = 1, scale = 1, model;
+  const noteNodes = new Map(), strikeNodes = new Map(), gridNodes = new Map();
 
   function layout() {
     if (!svg) return;
@@ -27,8 +17,9 @@ export function createHighwaySvg(viewport, record = null) {
     playhead.setAttribute('transform', `translate(${width / 2} 0)`);
     // Resize is rare; invalidate only the visible elements, not the clock.
     for (const node of noteNodes.values()) node.remove();
+    for (const node of strikeNodes.values()) node.remove();
     for (const node of gridNodes.values()) node.remove();
-    noteNodes.clear(); gridNodes.clear();
+    noteNodes.clear(); strikeNodes.clear(); gridNodes.clear();
     if (model) draw(model);
   }
 
@@ -77,7 +68,6 @@ export function createHighwaySvg(viewport, record = null) {
       if (!group) {
         group = element('g', { class: 'highway-note', role: 'img', 'data-note-id': note.id, 'data-iteration': note.iteration, 'data-signature': signature, 'data-grace': note.grace });
         group.append(element('rect', { x: -9, y: -11, width: 18, height: 22, rx: 5 }));
-        group.append(element('path', { class: 'highway-judgement', 'aria-hidden': 'true' }));
         if (note.accent) {
           const accent = element('text', { class: 'highway-accent', x: 0, y: note.grace ? -30 : -20, 'text-anchor': 'middle' });
           accent.textContent = '>';
@@ -102,16 +92,29 @@ export function createHighwaySvg(viewport, record = null) {
       const judgement = note.judgement || 'expected';
       if (group.getAttribute('data-judgement') !== judgement) {
         group.setAttribute('data-judgement', judgement);
-        // Keep the non-letter symbols outside hit blocks. Grace symbols sit
-        // above their accents; normal symbols sit below the sticking labels.
-        const symbol = group.querySelector('.highway-judgement');
-        symbol.setAttribute('transform', `translate(0 ${judgement === 'missed' ? 0 : note.grace ? -49 : 43})`);
-        symbol.setAttribute('d', judgementShapes[judgement] ?? '');
         group.lastChild.textContent = `${note.instrument}${note.grace ? ' grace' : ''} · ${judgement}${note.hand ? ` · ${note.hand}` : ''}`;
         group.setAttribute('aria-label', group.lastChild.textContent);
       }
     }
     for (const [key, node] of noteNodes) if (!visibleNotes.has(key)) { node.remove(); noteNodes.delete(key); }
+    const visibleStrikes = new Set();
+    for (const hit of presentation.unmatched ?? []) {
+      const key = String(hit.id);
+      visibleStrikes.add(key);
+      let marker = strikeNodes.get(key);
+      if (!marker) {
+        marker = element('circle', { class: 'highway-unmatched-hit', role: 'img', r: 4, 'data-event-id': key });
+        strikes.append(marker); strikeNodes.set(key, marker);
+      }
+      marker.setAttribute('cx', String(hit.position * scale));
+      marker.setAttribute('cy', String(centre));
+      marker.setAttribute('data-position', String(hit.position));
+      marker.setAttribute('data-iteration', String(hit.iteration));
+      marker.setAttribute('data-instrument', hit.instrument);
+      marker.setAttribute('data-judgement', hit.judgement);
+      marker.setAttribute('aria-label', `${hit.instrument} unmatched strike · ${hit.judgement.replace('_', ' ')}`);
+    }
+    for (const [key, node] of strikeNodes) if (!visibleStrikes.has(key)) { node.remove(); strikeNodes.delete(key); }
     if (record) record(performance.now() - start);
   }
 
@@ -121,13 +124,13 @@ export function createHighwaySvg(viewport, record = null) {
       const lane = element('rect', { class: 'highway-lane', x: 0, y: '30%', width: '100%', height: '40%' });
       const centreline = element('line', { class: 'highway-centreline', x1: 0, x2: '100%', y1: '50%', y2: '50%' });
       moving = element('g', { class: 'highway-moving' });
-      grid = element('g'); notes = element('g'); moving.append(grid, notes);
+      grid = element('g'); notes = element('g'); strikes = element('g', { class: 'highway-unmatched-hits' }); moving.append(grid, notes, strikes);
       playhead = element('g', { class: 'highway-playhead' });
       playhead.append(element('line', { x1: 0, x2: 0, y1: 15, y2: '100%' }), element('path', { d: 'M -6 9 L 6 9 L 0 16 Z' }));
       svg.append(lane, centreline, moving, playhead); viewport.append(svg);
     },
     update: draw,
     resize(size) { width = Math.max(1, size.width); height = Math.max(1, size.height); layout(); },
-    dispose() { svg?.remove(); noteNodes.clear(); gridNodes.clear(); model = null; svg = null; },
+    dispose() { svg?.remove(); noteNodes.clear(); strikeNodes.clear(); gridNodes.clear(); model = null; svg = null; },
   };
 }
