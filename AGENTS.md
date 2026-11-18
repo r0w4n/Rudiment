@@ -108,7 +108,7 @@ Review failures, fix regressions introduced by the change, and rerun affected ch
 
 ## Automatic Git worktree, merge and push workflow
 
-**Default:** For every task that modifies project files (feature, bug fix, refactor, documentation or configuration), create an isolated Git worktree and feature branch, implement and validate there, commit, merge into local `main`, push `main` to `origin/main`, and clean up. Do this without seeking routine approval when the operations are safe and permitted. Explicit user instructions to stop before committing, merging or pushing override this default. Read-only analysis and planning need no worktree.
+**Default:** For every task that modifies project files (feature, bug fix, refactor, documentation or configuration), create an isolated Git worktree and feature branch, implement and validate there, commit, merge into local `main`, push `main` to `origin/main`, then automatically remove the temporary worktree and delete the merged feature branch. Do this without seeking routine approval when the operations are safe and permitted. Explicit user instructions to stop before committing, merging or pushing override this default. Read-only analysis and planning need no worktree.
 
 ### Initial verification and preparation
 
@@ -147,11 +147,13 @@ Review failures, fix regressions introduced by the change, and rerun affected ch
 3. Let the existing pre-push hooks execute normally. If a hook fails, investigate and fix task-related causes safely, rerun the affected checks, and retry only after the cause has changed. Never use `--no-verify` or disable hooks to force success.
 4. If the remote has advanced, re-fetch and reintegrate safely (including revalidation when warranted) before retrying. If the push is restricted by branch protections or cannot complete safely, preserve all work and report the blocker. Never claim a push succeeded until Git confirms it.
 
-### Clean up after successful push
+### Mandatory branch deletion and cleanup after successful merge and push
 
-1. Only after confirming `origin/main` contains the task's final commit, remove the **clean** temporary worktree with Git and delete its merged local feature branch.
-2. Do not delete a worktree with uncommitted work, force-remove it, or delete a branch that has not been safely merged. If cleanup cannot complete, report the remaining worktree/branch without risking work loss.
-3. Leave the primary repository on `main`, clean and synchronised with `origin/main`. If any earlier stage failed, preserve the feature worktree, branch and commits for recovery.
+1. After the feature branch has been successfully merged into local `main` **and** the merged commit has been successfully pushed to `origin/main`, automatically remove its temporary worktree using `git worktree remove <worktree-path>` (only if clean), then **delete the merged local feature branch using `git branch -d <feature-branch>`**. Both steps are mandatory, not optional housekeeping, and require no additional user confirmation.
+2. Verify the worktree and local feature branch no longer exist (`git worktree list` and `git branch --list <feature-branch>`). Do not leave completed, merged feature branches behind. Never use `git branch -D`, force-remove a worktree, or delete an unmerged branch.
+3. Do not push temporary feature branches to GitHub. If a corresponding remote feature branch exists from this task, delete it **only if** it was created by this workflow, is confirmed merged into `origin/main`, and no other agent or user is using it. Never delete pre-existing or shared remote branches automatically.
+4. If the merge succeeds but the push fails, retain the worktree and feature branch for recovery; perform the automatic deletion as soon as that push subsequently succeeds. If cleanup cannot complete safely, report exactly which worktree or branch remains and why.
+5. Leave the primary repository on `main`, clean and synchronised with `origin/main`. If an earlier stage failed, preserve the feature worktree, branch and commits for recovery.
 
 ### Completion report
 
@@ -162,6 +164,6 @@ Report:
 - Feature branch and final commit hash (or why no commit was made).
 - Merge result: **merged**, **local only by request**, or **blocked/not attempted**.
 - Push result: **pushed**, **local only by request**, or **blocked/not attempted**.
-- Worktree cleanup result, including its path if retained.
+- Worktree cleanup and **feature-branch deletion** results (confirm removal, or give the retained path/branch and reason).
 
 Keep this workflow lightweight, using standard Git commands and OpenCode's existing capabilities. Do not add custom orchestration scripts, dependencies or pull-request workflows unless expressly requested. For any step that cannot be completed safely or automatically, stop at that boundary, preserve work and explain the reason.
