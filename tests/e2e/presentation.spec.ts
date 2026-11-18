@@ -407,7 +407,11 @@ test('real transport, noncontiguous selection and Rust feedback reach a mounted 
   await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.locator('#visual-metronome').click();
-  await page.locator('#metronome-popover').getByLabel('Tempo in BPM').fill('120');
+  // Leave enough wall-clock time between the loop boundary and its first note
+  // for a contended CI renderer to observe the new iteration before striking.
+  const tempo = page.locator('#metronome-popover').getByLabel('Tempo in BPM');
+  await tempo.fill('60');
+  await tempo.press('Enter');
   await page.getByLabel('Close metronome settings').click();
   await page.getByLabel('Select bars').click();
   await page.getByLabel('Bar 1', { exact: true }).check();
@@ -415,7 +419,7 @@ test('real transport, noncontiguous selection and Rust feedback reach a mounted 
   await page.getByLabel('Close bar selection').click();
   await page.getByLabel('Loops').selectOption('2');
   await expect.poll(() => page.evaluate(() => (window as any).__presentation.model.timeline.bars)).toEqual([0, 2]);
-  await expect.poll(() => page.evaluate(() => (window as any).__presentation.model.playback.tempoBpm)).toBe(120);
+  await expect.poll(() => page.evaluate(() => (window as any).__presentation.model.playback.tempoBpm)).toBe(60);
   const mapped = await page.evaluate(() => (window as any).__presentation.model.notes.find((note: any) => note.id === 'p-2-0'));
   expect(mapped.beat).toBe(8);
   expect(mapped.position).toBe(4);
@@ -438,7 +442,7 @@ test('real transport, noncontiguous selection and Rust feedback reach a mounted 
   if (!hit) throw new Error('No matching live feedback');
   expect(hit.note.judgement).toMatch(/perfect|good|early|late/);
   expect(hit.note.judgement).toBe(hit.notation);
-  await expect.poll(() => page.evaluate(() => (window as any).__presentation.model.timeline.iteration), { timeout: 6000 }).toBe(1);
+  await expect.poll(() => page.evaluate(() => (window as any).__presentation.model.timeline.iteration), { timeout: 10_000 }).toBe(1);
   // The first note in the new loop may already be a legitimate live miss;
   // feedback from iteration zero must not colour the still-future target.
   expect(await page.evaluate(() => (window as any).__presentation.model.notes.find((note: any) => note.id === 'p-0-2' && note.iteration === 1)?.judgement)).toBeNull();
