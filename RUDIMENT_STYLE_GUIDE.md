@@ -81,7 +81,7 @@ The following values are **proposed visual matches**, not asserted existing CSS 
 | Page/panel title | 24–28px | 600–700 | Serif | Library and major settings titles |
 | Popover title | 15–17px | 600–700 | Serif | “Practice bars”, “Metronome” |
 | App wordmark | 22–26px | 700 | Sans | Rudiment in header |
-| Section heading | 15–16px | 600–700 | Sans | Metronome, Reference snare |
+| Section heading | 15–16px | 600–700 | Sans | Metronome, Reference drums |
 | Primary body | 14–15px | 400–500 | Sans | Descriptions and general content |
 | Control label | 12–14px | 500–600 | Sans | Field names and toggles |
 | Button text | 13–15px | 600–700 | Sans | Actions |
@@ -244,7 +244,7 @@ Specify a shared treatment for:
 
 ### 4.4 Settings drawer — Sound & drums
 
-**Observed:** a dark full-height drawer anchored to the right, backdrop dimming the score. It includes top eyebrow/title/close, section headings, stacked forms and a horizontal divider before Reference snare.
+**Observed:** a dark full-height drawer anchored to the right, backdrop dimming the score. It includes top eyebrow/title/close, section headings, stacked forms and a horizontal divider before Reference drums.
 
 **Recommended:**
 
@@ -311,7 +311,7 @@ Observed labels: **Perfect**, **Good**, **Early**, **Late**, **Missed** with gre
 
 - Place a persistent, keyboard- and touch-operable Notation / Highway segmented control in the workspace header. Selected state is both visible and programmatically exposed; switching never changes the run.
 - Highway replaces the ivory score with the existing dark panel, raised lane and restrained border tokens. Keep the metronome, bar selection, progress, loops, transport and timing legend shared.
-- Show only configured instruments, initially one SNARE lane. Explain unsupported instruments explicitly. Keep the centred mint playhead fixed while notes and bar/beat grid move together, using the authoritative transport position.
+- Show the configured KICK, SNARE and HI-HAT lanes; open and closed hi-hats share a lane while remaining visually distinguishable. Explain unsupported instruments explicitly. Keep the centred mint playhead fixed while notes and bar/beat grid move together, using the authoritative transport position.
 - Expected hits are mint, uniformly sized, with supplied sticking and accent marks only. Grace strokes stagger above the lane centre to remain distinct from nearby notes, without changing onset alignment. Assessed markers pair semantic timing-feedback colours with non-letter shapes and accessible text; the timing key identifies those shapes. Never fabricate a miss or use feedback colours as decoration.
 - Keep bar numbers and beat lines subordinate to notes. Use responsive spacing, readable labels and touch targets without horizontal page overflow. Do not add decorative animation or a second clock.
 

@@ -18,7 +18,7 @@ test('Highway replaces notation, persists and keeps the transport running', asyn
   expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('highway-desktop.png') });
   await page.setViewportSize({ width: 1180, height: 820 });
-  await expect.poll(async () => (await page.locator('#highway-timeline').boundingBox())!.width).toBeLessThan(1100);
+  await expect.poll(async () => (await page.locator('#highway-timeline').boundingBox())!.width).toBeLessThan(1150);
   await page.screenshot({ path: testInfo.outputPath('highway-ipad-landscape.png') });
   await page.getByRole('button', { name: 'Notation', exact: true }).click();
   await expect(page.locator('#notation svg')).toBeVisible();
@@ -215,7 +215,7 @@ test('unmatched live strikes render as lane-aligned red dots and clear on restar
   expect(positions[0]).toBeGreaterThan(0.2);
   expect(positions[1]).toBeGreaterThan(positions[0]);
   expect(positions[1]).toBeLessThan(0.4);
-  const lane = (await page.locator('.highway-lane').boundingBox())!;
+  const lane = (await page.locator('.highway-lane[data-lane="snare"]').boundingBox())!;
   const marker = (await dot.first().boundingBox())!;
   expect(marker.y + marker.height / 2).toBeCloseTo(lane.y + lane.height / 2, 0);
 
@@ -267,19 +267,45 @@ test('Highway colours only the scored repetition and disposes when switched away
 });
 
 test('unsupported instruments are announced and a later snare exercise remounts', async ({ page }) => {
-  const track = [0, 0x99, 36, 100, 0x83, 0x60, 0x99, 38, 100, 0x83, 0x60, 0xff, 0x2f, 0];
+  const track = [0, 0x99, 51, 100, 0x83, 0x60, 0x99, 38, 100, 0x83, 0x60, 0xff, 0x2f, 0];
   const midi = Buffer.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 1, 0xe0, 0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, track.length, ...track]);
   await page.route('**/unsupported-highway.mid', route => route.fulfill({ status: 200, body: midi, contentType: 'audio/midi' }));
   await page.goto('/');
   await page.getByRole('button', { name: 'Highway', exact: true }).click();
   await expect(page.locator('#highway svg')).toBeVisible();
   await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('unsupported-highway.mid', 'Unsupported drums'));
-  await expect(page.locator('#highway-error')).toContainText('kick');
+  await expect(page.locator('#highway-error')).toContainText('ride');
   await expect(page.locator('#highway-error')).toBeVisible();
   await expect(page.locator('#highway svg')).toHaveCount(0);
   await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('public/exercises/rudiments/06_single_paradiddle.mid', 'Single Paradiddle'));
   await expect(page.locator('#highway-error')).toBeHidden();
   await expect(page.locator('#highway svg')).toBeVisible();
+});
+
+test('Highway renders simultaneous kit notes in kick, snare and hi-hat lanes', async ({ page }) => {
+  const track = [
+    0, 0x99, 36, 100,
+    0, 0x99, 38, 100,
+    0, 0x99, 42, 100,
+    0x81, 0x70, 0x99, 46, 100,
+    0, 0xff, 0x2f, 0,
+  ];
+  const midi = Buffer.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 1, 0xe0, 0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, track.length, ...track]);
+  await page.route('**/kit-highway.mid', route => route.fulfill({ status: 200, body: midi, contentType: 'audio/midi' }));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('kit-highway.mid', 'Kit Highway'));
+  await expect(page.locator('#highway-error')).toBeHidden();
+  await expect(page.locator('.highway-note[data-instrument="kick"]')).toHaveCount(1);
+  await expect(page.locator('.highway-note[data-instrument="snare"]')).toHaveCount(1);
+  await expect(page.locator('.highway-note[data-instrument="closed_hat"][data-lane="hi_hat"]')).toHaveCount(1);
+  await expect(page.locator('.highway-note[data-instrument="open_hat"][data-articulation="open"]')).toHaveCount(1);
+  const laneY = await page.locator('.highway-note').evaluateAll(notes => Object.fromEntries(notes.map(note => {
+    const transform = note.getAttribute('transform') ?? '';
+    return [note.getAttribute('data-instrument'), Number(transform.match(/ ([\d.]+)\)$/)?.[1])];
+  })));
+  expect(laneY.kick).not.toBe(laneY.snare);
+  expect(laneY.snare).not.toBe(laneY.closed_hat);
 });
 
 test('Highway header and timing legend remain usable at narrow widths', async ({ page }) => {

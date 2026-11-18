@@ -5,11 +5,11 @@ use lucide_leptos::{
     RotateCcw, Settings as SettingsIcon, Star, Sun, X,
 };
 use rudiment_core::{
-    DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit,
-    IncrementalScorer, InputSource, Instrument, Judgement, MAX_MIDI_FILE_BYTES, ObservedHit,
-    PerformanceAward, PerformanceRating, SCORING_VERSION, ScoringConfig, ScoringFeedback,
-    SessionSummary, TempoChange, beat_at_elapsed_ms, elapsed_ms_at_beat, paradiddle, parse_midi,
-    performance_rating, summary_from_results,
+    Articulation, DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit,
+    IncrementalScorer, InputSource, Instrument, Judgement, MAX_MIDI_FILE_BYTES, MidiBinding,
+    ObservedHit, PerformanceAward, PerformanceRating, SCORING_VERSION, ScoringConfig,
+    ScoringFeedback, SessionSummary, TempoChange, beat_at_elapsed_ms, classify_midi,
+    elapsed_ms_at_beat, paradiddle, parse_midi, performance_rating, summary_from_results,
 };
 #[cfg(test)]
 use rudiment_core::{HitResult, score_session_with_tempo_map};
@@ -30,7 +30,7 @@ type LaunchRun = Rc<dyn Fn(f64, u8, bool)>;
 type LaunchSlot = Rc<RefCell<Option<LaunchRun>>>;
 type StartRun = Rc<dyn Fn(u8)>;
 type StartSlot = CallbackSlot<StartRun>;
-type HitInput = Rc<dyn Fn(f64, Instrument, u8, InputSource, Option<u8>, Option<u8>)>;
+type HitInput = Rc<dyn Fn(f64, Instrument, Articulation, u8, InputSource, Option<u8>, Option<u8>)>;
 type MidiFileCallback = Closure<dyn FnMut(Uint8Array, String, String, JsValue)>;
 
 #[derive(Clone, Copy)]
@@ -175,8 +175,8 @@ extern "C" {
     fn ensure_audio() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = previewClick)]
     fn preview_click(timbre: &str) -> Promise;
-    #[wasm_bindgen(js_namespace = rudiment, js_name = playSnare)]
-    fn play_snare(velocity: u8) -> bool;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = playDrum)]
+    fn play_drum(instrument: &str, articulation: &str, velocity: u8) -> bool;
     #[wasm_bindgen(js_namespace = rudiment, js_name = setVolumes)]
     fn set_volumes(snare: f64, click: f64);
     #[wasm_bindgen(js_namespace = rudiment, js_name = startAudio)]
@@ -259,6 +259,8 @@ extern "C" {
     fn load_settings() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = saveProfile)]
     fn save_profile(value: JsValue) -> Promise;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = loadProfiles)]
+    fn load_profiles() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = resetLocalSetup)]
     fn reset_local_setup() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = saveImport)]
@@ -299,6 +301,7 @@ struct Settings {
     excellent_ms: Option<f64>,
     snare_note: Option<u8>,
     snare_channel: Option<u8>,
+    midi_bindings: Option<Vec<MidiBinding>>,
     welcome_dismissed: Option<bool>,
     last_import_hash: Option<String>,
     auto_show_statistics: Option<bool>,
@@ -314,31 +317,39 @@ struct SavedMidiImport {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct ReferenceSnareNote {
+struct ReferenceDrumNote {
     beat: f64,
     velocity: u8,
+    instrument: Instrument,
+    articulation: Articulation,
 }
 
-fn reference_snare_notes(
+fn reference_drum_notes(
     expected: &[ExpectedHit],
     start_beat: f64,
     end_beat: f64,
-) -> Vec<ReferenceSnareNote> {
+) -> Vec<ReferenceDrumNote> {
     let mut notes = expected
         .iter()
-        .filter(|hit| {
-            hit.instrument == Instrument::Snare
-                && hit.beat >= start_beat - 0.000_001
-                && hit.beat < end_beat - 0.000_001
-        })
-        .map(|hit| ReferenceSnareNote {
+        .filter(|hit| hit.beat >= start_beat - 0.000_001 && hit.beat < end_beat - 0.000_001)
+        .map(|hit| ReferenceDrumNote {
             beat: hit.beat,
             velocity: hit.velocity.max(1),
+            instrument: hit.instrument,
+            articulation: hit.articulation,
         })
         .collect::<Vec<_>>();
-    notes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+    notes.sort_by(|a, b| {
+        a.beat
+            .total_cmp(&b.beat)
+            .then_with(|| (a.instrument as u8).cmp(&(b.instrument as u8)))
+            .then_with(|| (a.articulation as u8).cmp(&(b.articulation as u8)))
+    });
     notes.dedup_by(|later, earlier| {
-        if (later.beat - earlier.beat).abs() < 0.000_001 {
+        if (later.beat - earlier.beat).abs() < 0.000_001
+            && later.instrument == earlier.instrument
+            && later.articulation == earlier.articulation
+        {
             earlier.velocity = earlier.velocity.max(later.velocity);
             true
         } else {
@@ -346,6 +357,82 @@ fn reference_snare_notes(
         }
     });
     notes
+}
+
+fn default_midi_bindings() -> Vec<MidiBinding> {
+    vec![
+        MidiBinding {
+            note: 36,
+            channel: 10,
+            instrument: Instrument::Kick,
+            articulation: Articulation::Center,
+        },
+        MidiBinding {
+            note: 38,
+            channel: 10,
+            instrument: Instrument::Snare,
+            articulation: Articulation::Center,
+        },
+        MidiBinding {
+            note: 42,
+            channel: 10,
+            instrument: Instrument::ClosedHat,
+            articulation: Articulation::Closed,
+        },
+        MidiBinding {
+            note: 46,
+            channel: 10,
+            instrument: Instrument::OpenHat,
+            articulation: Articulation::Open,
+        },
+    ]
+}
+
+fn learned_articulation(instrument: Instrument) -> Articulation {
+    match instrument {
+        Instrument::Kick | Instrument::Snare => Articulation::Center,
+        Instrument::ClosedHat | Instrument::PedalHat => Articulation::Closed,
+        Instrument::OpenHat => Articulation::Open,
+        _ => Articulation::Unspecified,
+    }
+}
+
+fn instrument_label(instrument: Instrument) -> &'static str {
+    match instrument {
+        Instrument::Kick => "kick",
+        Instrument::Snare => "snare",
+        Instrument::ClosedHat | Instrument::PedalHat => "closed hi-hat",
+        Instrument::OpenHat => "open hi-hat",
+        _ => "drum",
+    }
+}
+
+fn instrument_key(instrument: Instrument) -> &'static str {
+    match instrument {
+        Instrument::Kick => "kick",
+        Instrument::Snare => "snare",
+        Instrument::ClosedHat => "closed_hat",
+        Instrument::OpenHat => "open_hat",
+        Instrument::PedalHat => "pedal_hat",
+        Instrument::Ride => "ride",
+        Instrument::Crash => "crash",
+        Instrument::Tom => "tom",
+        Instrument::OtherPercussion => "other_percussion",
+        Instrument::Unknown => "unknown",
+    }
+}
+
+fn articulation_key(articulation: Articulation) -> &'static str {
+    match articulation {
+        Articulation::Unspecified => "unspecified",
+        Articulation::Center => "center",
+        Articulation::Rim => "rim",
+        Articulation::Closed => "closed",
+        Articulation::Open => "open",
+        Articulation::Pedal => "pedal",
+        Articulation::SnareWiresOn => "snare_wires_on",
+        Articulation::SnareWiresOff => "snare_wires_off",
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,6 +488,14 @@ struct MidiEnvelope {
     input_id: Option<String>,
     input_name: Option<String>,
     disconnected_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SavedMidiProfile {
+    id: String,
+    #[serde(default)]
+    bindings: Vec<MidiBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1462,7 +1557,10 @@ fn App() -> impl IntoView {
     let midi_ports = RwSignal::new(Vec::<MidiPort>::new());
     let selected_midi = RwSignal::new(None::<String>);
     let diagnostics = RwSignal::new(Vec::<String>::new());
-    let midi_learn = RwSignal::new(false);
+    let midi_learn = RwSignal::new(None::<Instrument>);
+    let midi_bindings = RwSignal::new(default_midi_bindings());
+    let midi_profiles = RwSignal::new(Vec::<SavedMidiProfile>::new());
+    let settings_loaded = RwSignal::new(false);
     let snare_note = RwSignal::new(38u8);
     let snare_channel = RwSignal::new(10u8);
     let latency_ms = RwSignal::new(0.0);
@@ -1547,6 +1645,21 @@ fn App() -> impl IntoView {
             presentation_judgements(value);
         }
     });
+    Effect::new(move |_| {
+        if !settings_loaded.get() {
+            return;
+        }
+        let Some(id) = selected_midi.get() else {
+            return;
+        };
+        if let Some(profile) = midi_profiles
+            .get()
+            .into_iter()
+            .find(|profile| profile.id == id && !profile.bindings.is_empty())
+        {
+            midi_bindings.set(profile.bindings);
+        }
+    });
 
     let save_current_settings = Rc::new(move || {
         persist_settings(Settings {
@@ -1571,6 +1684,7 @@ fn App() -> impl IntoView {
             excellent_ms: Some(excellent_ms.get_untracked()),
             snare_note: Some(snare_note.get_untracked()),
             snare_channel: Some(snare_channel.get_untracked()),
+            midi_bindings: Some(midi_bindings.get_untracked()),
             welcome_dismissed: Some(!welcome.get_untracked()),
             last_import_hash: selected_import.get_untracked(),
             auto_show_statistics: Some(auto_show_statistics.get_untracked()),
@@ -1725,7 +1839,7 @@ fn App() -> impl IntoView {
             let reference_notes = if !snare_muted.get_untracked()
                 && snare_reference_mode.get_untracked() == "notes"
             {
-                reference_snare_notes(run_expected.get_untracked().as_ref(), offset, segment_end)
+                reference_drum_notes(run_expected.get_untracked().as_ref(), offset, segment_end)
             } else {
                 Vec::new()
             };
@@ -2186,7 +2300,7 @@ fn App() -> impl IntoView {
     let start_for_hit = start_new_run.clone();
     let scoring_for_hit = scoring_engine.clone();
     let hit_input: HitInput = Rc::new(
-        move |timestamp, instrument, velocity, source, raw_note, raw_channel| {
+        move |timestamp, instrument, articulation, velocity, source, raw_note, raw_channel| {
             if result_modal_open.get_untracked() {
                 if timestamp >= result_dismiss_after_ms.get_untracked() {
                     dismiss_result(
@@ -2199,7 +2313,11 @@ fn App() -> impl IntoView {
                 return;
             }
             if !snare_muted.get_untracked() && snare_reference_mode.get_untracked() == "hits" {
-                play_snare(velocity);
+                play_drum(
+                    instrument_key(instrument),
+                    articulation_key(articulation),
+                    velocity,
+                );
             }
             input_mode.set(source);
             if library_open.get_untracked() {
@@ -2267,6 +2385,7 @@ fn App() -> impl IntoView {
             let event = ObservedHit {
                 timestamp_ms: timestamp,
                 instrument,
+                articulation,
                 velocity,
                 source,
                 raw_note,
@@ -2519,15 +2638,39 @@ fn App() -> impl IntoView {
             if velocity == 0 {
                 return;
             }
-            if velocity == 0 {
-                return;
-            }
-            if midi_learn.get_untracked() {
-                snare_note.set(note);
-                snare_channel.set(channel);
-                midi_learn.set(false);
-                midi_status.set(format!("Snare learned · note {note}, channel {channel}"));
-                let profile = serde_json::json!({"id":event.input_id.unwrap_or_else(||"user-device".into()),"name":event.input_name.unwrap_or_else(||"MIDI drums".into()),"schemaVersion":1,"verified":true,"bindings":[{"note":note,"channel":channel,"instrument":"snare"}],"latencyMs":latency_ms.get_untracked()});
+            if let Some(target) = midi_learn.get_untracked() {
+                let binding = MidiBinding {
+                    note,
+                    channel,
+                    instrument: target,
+                    articulation: learned_articulation(target),
+                };
+                midi_bindings.update(|items| {
+                    items.retain(|item| item.instrument != target);
+                    items.push(binding.clone());
+                });
+                if target == Instrument::Snare {
+                    snare_note.set(note);
+                    snare_channel.set(channel);
+                }
+                midi_learn.set(None);
+                midi_status.set(format!(
+                    "{} learned · note {note}, channel {channel}",
+                    instrument_label(target)
+                ));
+                let profile_id = event
+                    .input_id
+                    .clone()
+                    .unwrap_or_else(|| "user-device".into());
+                let bindings = midi_bindings.get_untracked();
+                midi_profiles.update(|profiles| {
+                    profiles.retain(|profile| profile.id != profile_id);
+                    profiles.push(SavedMidiProfile {
+                        id: profile_id.clone(),
+                        bindings: bindings.clone(),
+                    });
+                });
+                let profile = serde_json::json!({"id":profile_id,"name":event.input_name.unwrap_or_else(||"MIDI drums".into()),"schemaVersion":1,"verified":true,"bindings":bindings,"latencyMs":latency_ms.get_untracked()});
                 if let Ok(value) = json_compatible(&profile) {
                     spawn_local(async move {
                         let _ = JsFuture::from(save_profile(value)).await;
@@ -2536,12 +2679,8 @@ fn App() -> impl IntoView {
                 save_for_midi();
                 return;
             }
-            let instrument =
-                if note == snare_note.get_untracked() && channel == snare_channel.get_untracked() {
-                    Instrument::Snare
-                } else {
-                    Instrument::from_gm(note)
-                };
+            let (instrument, articulation) =
+                classify_midi(note, channel, &midi_bindings.get_untracked());
             midi_hit(
                 event.timestamp.unwrap_or_else(|| {
                     web_sys::window()
@@ -2550,6 +2689,7 @@ fn App() -> impl IntoView {
                         .unwrap_or(0.0)
                 }),
                 instrument,
+                articulation,
                 velocity,
                 InputSource::Midi,
                 Some(note),
@@ -2657,6 +2797,18 @@ fn App() -> impl IntoView {
         }
     });
     spawn_local(async move {
+        if let Ok(value) = JsFuture::from(load_profiles()).await {
+            midi_profiles.set(
+                Array::from(&value)
+                    .iter()
+                    .filter_map(|profile| {
+                        serde_wasm_bindgen::from_value::<SavedMidiProfile>(profile).ok()
+                    })
+                    .collect(),
+            );
+        }
+    });
+    spawn_local(async move {
         match JsFuture::from(load_settings()).await {
             Ok(value) => match serde_wasm_bindgen::from_value::<Settings>(value) {
                 Ok(saved) => {
@@ -2740,6 +2892,19 @@ fn App() -> impl IntoView {
                     if let Some(v) = saved.snare_channel {
                         snare_channel.set(v);
                     }
+                    if let Some(bindings) = saved.midi_bindings.filter(|items| !items.is_empty()) {
+                        midi_bindings.set(bindings);
+                    } else if saved.snare_note.is_some() || saved.snare_channel.is_some() {
+                        let mut bindings = default_midi_bindings();
+                        if let Some(snare) = bindings
+                            .iter_mut()
+                            .find(|binding| binding.instrument == Instrument::Snare)
+                        {
+                            snare.note = snare_note.get_untracked();
+                            snare.channel = snare_channel.get_untracked();
+                        }
+                        midi_bindings.set(bindings);
+                    }
                     welcome.set(!saved.welcome_dismissed.unwrap_or(false));
                     set_volumes(
                         if snare_muted.get_untracked() {
@@ -2749,12 +2914,15 @@ fn App() -> impl IntoView {
                         },
                         click_volume.get_untracked(),
                     );
+                    settings_loaded.set(true);
                 }
                 Err(error) => {
+                    settings_loaded.set(true);
                     import_error.set(Some(format!("Saved settings could not load: {error}")))
                 }
             },
             Err(error) => {
+                settings_loaded.set(true);
                 import_error.set(Some(format!("Saved settings storage failed: {error:?}")))
             }
         }
@@ -2962,6 +3130,7 @@ fn App() -> impl IntoView {
                 key_hit(
                     web_sys::window().unwrap().performance().unwrap().now(),
                     Instrument::Snare,
+                    Articulation::Center,
                     108,
                     InputSource::Demo,
                     None,
@@ -3110,8 +3279,8 @@ fn App() -> impl IntoView {
                 </details>
               </div>
               <div id="notation" class="notation" role="region" aria-label="Musical notation" aria-live="off" tabindex="0"></div>
-              <div id="highway" class=move || if highway.get(){"highway-view"}else{"highway-view hidden"} role="region" aria-label="Snare highway">
-                <div class="highway-lane-label">"SNARE"</div><div id="highway-timeline" class="highway-timeline"></div>
+              <div id="highway" class=move || if highway.get(){"highway-view"}else{"highway-view hidden"} role="region" aria-label="Drum highway">
+                <div id="highway-timeline" class="highway-timeline"></div>
                 <p id="highway-error" class="highway-error hidden" role="status"></p>
               </div>
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
@@ -3352,19 +3521,34 @@ fn App() -> impl IntoView {
               <MetronomeSettings bpm=bpm count_in=count_in subdivision=subdivision timbre=timbre metronome=metronome click_volume=click_volume snare_volume=snare_volume snare_muted=snare_muted error=metronome_preview_error change_tempo=change_tempo.clone() save=save_current_settings.clone()/>
             </section>
             <section><h3>"Session statistics"</h3><label class="toggle-row"><span>"Automatically show session statistics"<small>"Results are always saved after a performance."</small></span><input type="checkbox" prop:checked=move || auto_show_statistics.get() on:change=move |event|{auto_show_statistics.set(event_target_checked(&event));save_auto_statistics();}/></label></section>
-            <section><h3>"Reference snare"</h3><label class="toggle-row"><span>"Play app snare"<small>"Mute this if your drum module is audible."</small></span><input type="checkbox" prop:checked=move || !snare_muted.get() on:change=move |event|{snare_muted.set(!event_target_checked(&event));set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},click_volume.get_untracked());save_snare_mute();}/></label><label>"Play snare"<select aria-label="Reference snare timing" prop:value=move || snare_reference_mode.get() on:change=move |event|{let value=event_target_value(&event);snare_reference_mode.set(if value=="notes"{"notes".into()}else{"hits".into()});save_snare_reference_mode();}><option value="hits">"With your hits"</option><option value="notes">"On written notes"</option></select><small class="help">{move || if snare_reference_mode.get()=="notes"{"Plays each written snare note as a reference; your strikes are still scored silently."}else{"Plays immediately when Rudiment receives your keyboard or MIDI strike."}}</small></label><label>"Snare volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || snare_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);snare_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{value},click_volume.get_untracked());save_snare_volume();}/></label></section>
+            <section><h3>"Reference drums"</h3><label class="toggle-row"><span>"Play app drums"<small>"Mute this if your drum module is audible."</small></span><input type="checkbox" prop:checked=move || !snare_muted.get() on:change=move |event|{snare_muted.set(!event_target_checked(&event));set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},click_volume.get_untracked());save_snare_mute();}/></label><label>"Play drums"<select aria-label="Reference drum timing" prop:value=move || snare_reference_mode.get() on:change=move |event|{let value=event_target_value(&event);snare_reference_mode.set(if value=="notes"{"notes".into()}else{"hits".into()});save_snare_reference_mode();}><option value="hits">"With your hits"</option><option value="notes">"On written notes"</option></select><small class="help">{move || if snare_reference_mode.get()=="notes"{"Plays each written drum note as a reference; your strikes are still scored silently."}else{"Plays immediately when Rudiment receives your keyboard or MIDI strike."}}</small></label><label>"Drum volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || snare_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);snare_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{value},click_volume.get_untracked());save_snare_volume();}/></label></section>
             <section><h3>"Practice repeats"</h3>
               <label class="toggle-row"><span>"Repeat until successful"<small>"A failed bar is tried again; every failed attempt still reduces the final performance score."</small></span><input aria-label="Repeat bar until Good" type="checkbox" prop:checked=move || repeat_bar_until_good.get() on:change={let save=save_repeat_bar.clone();move |event|{repeat_bar_until_good.set(event_target_checked(&event));save();}}/></label>
               <label>"Required accuracy"<select aria-label="Repeat tolerance" prop:value=move || match repeat_tolerance.get(){RepeatTolerance::Relaxed=>"relaxed",RepeatTolerance::Standard=>"standard",RepeatTolerance::Strict=>"strict"} on:change=move |event|{repeat_tolerance.set(match event_target_value(&event).as_str(){"relaxed"=>RepeatTolerance::Relaxed,"strict"=>RepeatTolerance::Strict,_=>RepeatTolerance::Standard});save_repeat_tolerance();}><option value="relaxed">"Relaxed · no misses"</option><option value="standard">"Standard · Good or Perfect"</option><option value="strict">"Strict · Perfect only"</option></select><small class="help">"Extra hits and wrong drums always fail the current attempt. This setting does not change the timing windows."</small></label>
             </section>
             <section><h3>"MIDI drums"</h3><p class="help">"Use the MIDI status control in the top bar to connect or rescan. Rudiment never uploads your events."</p><p class="midi-state">{move || midi_status.get()}</p>
               <label class=move || if midi_ports.get().is_empty(){"hidden"}else{""}>"Input device"<select prop:value=move || selected_midi.get().unwrap_or_default() on:change=move |event|select_midi(&event_target_value(&event))>{move || midi_ports.get().into_iter().map(|port|view!{<option value=port.id.clone()>{format!("{} · {}",port.manufacturer,port.name)}</option>}).collect_view()}</select></label>
-              <div class="learn-card"><strong>{move || if midi_learn.get(){"Hit your snare now…"}else{"Quick MIDI Learn"}}</strong><span>{move || format!("Current snare: note {}, channel {}",snare_note.get(),snare_channel.get())}</span><button on:click=move |_|midi_learn.set(true)>{move || if midi_learn.get(){"Listening…"}else{"Learn snare"}}</button></div>
+              <div class="learn-card midi-mapping-card">
+                <strong>{move || midi_learn.get().map(|instrument|format!("Hit your {} now…",instrument_label(instrument))).unwrap_or_else(||"Quick MIDI Learn".into())}</strong>
+                <p class="help">"Map each pad independently. Unchanged General MIDI notes remain available as fallbacks."</p>
+                <For
+                  each=move || vec![Instrument::Kick,Instrument::Snare,Instrument::ClosedHat,Instrument::OpenHat]
+                  key=|instrument|*instrument as u8
+                  children=move |instrument|{
+                    view!{
+                      <div class="midi-mapping-row">
+                        <span>{move || midi_bindings.get().iter().find(|binding|binding.instrument==instrument).map(|binding|format!("{} · note {}, channel {}",instrument_label(instrument),binding.note,binding.channel)).unwrap_or_else(||format!("{} · General MIDI",instrument_label(instrument)))}</span>
+                        <button aria-label=format!("Learn {}",instrument_label(instrument)) on:click=move |_|midi_learn.set(Some(instrument))>{move || if midi_learn.get()==Some(instrument){"Listening…"}else{"Learn"}}</button>
+                      </div>
+                    }
+                  }
+                />
+              </div>
               <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment performance history and practice time from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{match JsFuture::from(promise).await{Ok(_)=>{history.set(vec![]);incomplete_history.set(0);practice_time_ms.set(Some(0.0));},Err(error)=>import_error.set(Some(format!("History could not be cleared: {error:?}")))}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment performance history and practice time from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{match JsFuture::from(promise).await{Ok(_)=>{history.set(vec![]);incomplete_history.set(0);practice_time_ms.set(Some(0.0));},Err(error)=>import_error.set(Some(format!("History could not be cleared: {error:?}")))}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);midi_bindings.set(default_midi_bindings());midi_learn.set(None);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" tabindex="-1" on:click=move |_|{settings_open.set(false);restore_settings_focus();}></button>
       </main>
@@ -3385,6 +3569,7 @@ mod tests {
         ObservedHit {
             timestamp_ms,
             instrument: Instrument::Snare,
+            articulation: Articulation::Center,
             velocity: 100,
             source: InputSource::Demo,
             raw_note: None,
@@ -3402,6 +3587,7 @@ mod tests {
                 raw_duration_ticks: Some(120),
                 notation_duration_beats: 0.25,
                 instrument: Instrument::Snare,
+                articulation: Articulation::Center,
                 velocity: 100,
                 accent: false,
                 grace: false,
@@ -3417,6 +3603,7 @@ mod tests {
                 raw_duration_ticks: Some(120),
                 notation_duration_beats: 0.25,
                 instrument: Instrument::Snare,
+                articulation: Articulation::Center,
                 velocity: 100,
                 accent: false,
                 grace: false,
@@ -3602,7 +3789,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_snare_uses_only_snare_notes_in_the_active_segment() {
+    fn reference_drums_preserve_simultaneous_instruments_in_the_active_segment() {
         let mut expected = two_note_bar();
         expected[0].velocity = 42;
         let mut duplicate = expected[1].clone();
@@ -3613,6 +3800,7 @@ mod tests {
         kick.id = "kick".into();
         kick.beat = 0.5;
         kick.instrument = Instrument::Kick;
+        kick.articulation = Articulation::Center;
         expected.push(kick);
         let mut next_bar = expected[0].clone();
         next_bar.id = "next-bar".into();
@@ -3620,15 +3808,25 @@ mod tests {
         expected.push(next_bar);
 
         assert_eq!(
-            reference_snare_notes(&expected, 0.0, 4.0),
+            reference_drum_notes(&expected, 0.0, 4.0),
             vec![
-                ReferenceSnareNote {
+                ReferenceDrumNote {
                     beat: 0.0,
                     velocity: 42,
+                    instrument: Instrument::Snare,
+                    articulation: Articulation::Center,
                 },
-                ReferenceSnareNote {
+                ReferenceDrumNote {
+                    beat: 0.5,
+                    velocity: 42,
+                    instrument: Instrument::Kick,
+                    articulation: Articulation::Center,
+                },
+                ReferenceDrumNote {
                     beat: 1.0,
                     velocity: 118,
+                    instrument: Instrument::Snare,
+                    articulation: Articulation::Center,
                 },
             ]
         );
@@ -3891,6 +4089,41 @@ mod tests {
         assert_eq!(summary.missed, 0);
         assert_eq!(summary.extras, 0);
         assert_eq!(BarSequence::new(&exercise, &[]).bars, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn notes_immediately_after_a_loop_boundary_keep_distinct_ids_and_match() {
+        let exercise = paradiddle();
+        let sequence = BarSequence::new(&exercise, &[]);
+        let hits = expanded_sequence_hits(&exercise, &sequence, 2);
+        let boundary = hits
+            .iter()
+            .filter(|hit| (hit.beat - 16.0).abs() < 0.001 || (hit.beat - 16.5).abs() < 0.001)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            boundary
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p-0-0-loop2", "p-0-1-loop2"]
+        );
+        let observed = boundary
+            .iter()
+            .map(|hit| observed_at(hit.beat * 1_000.0))
+            .collect::<Vec<_>>();
+        let summary = score_session_with_tempo_map(
+            &boundary,
+            &observed,
+            60.0,
+            0.0,
+            0.0,
+            ScoringConfig::default(),
+            &[],
+        );
+        assert_eq!(summary.matched, 2);
+        assert_eq!(summary.missed, 0);
+        assert_eq!(summary.extras, 0);
     }
 
     #[test]

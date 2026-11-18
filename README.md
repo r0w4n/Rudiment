@@ -1,6 +1,6 @@
 # Rudiment
 
-Rudiment is a client-side drum practice app. It opens directly on a four-bar single paradiddle at 60 BPM with a one-bar count-in, engraved percussion notation, sampled acoustic snare and metronome, keyboard demo input, deterministic scoring, and local practice history. Its MIDI library includes 11 historically rooted, modernised rudiment exercises with reference engravings. USB MIDI, MIDI-file import, MIDI Learn, calibration, looping and score following use the same canonical Rust exercise timeline.
+Rudiment is a client-side drum practice app. It opens directly on a four-bar single paradiddle at 60 BPM with a one-bar count-in, engraved percussion notation, kick/snare/open/closed-hi-hat audio, keyboard demo input, deterministic scoring, and local practice history. Its MIDI library includes 11 historically rooted, modernised rudiment exercises with reference engravings. USB MIDI, MIDI-file import, MIDI Learn, calibration, looping and score following use the same canonical Rust exercise timeline.
 
 ## Run locally
 

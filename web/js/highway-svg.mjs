@@ -6,8 +6,29 @@ const element = (name, attributes = {}) => {
   return node;
 };
 export function createHighwaySvg(viewport, record = null) {
-  let svg, moving, grid, notes, strikes, playhead, width = 1, height = 1, scale = 1, model;
+  let svg, laneLayer, moving, grid, notes, strikes, playhead, width = 1, height = 1, scale = 1, model, laneSignature = '';
   const noteNodes = new Map(), strikeNodes = new Map(), gridNodes = new Map();
+
+  function laneCentre(lane, presentation) {
+    const index = Math.max(0, presentation.lanes.findIndex(item => item.instrument === lane));
+    return (index + .5) * height / Math.max(1, presentation.lanes.length);
+  }
+
+  function drawLanes(presentation) {
+    const signature = `${width}:${height}:${presentation.lanes.map(lane => `${lane.instrument}:${lane.label}`).join('|')}`;
+    if (signature === laneSignature) return;
+    laneSignature = signature;
+    laneLayer.replaceChildren();
+    const laneHeight = height / Math.max(1, presentation.lanes.length);
+    presentation.lanes.forEach((lane, index) => {
+      const y = index * laneHeight;
+      laneLayer.append(element('rect', { class: 'highway-lane', x: 0, y: y + 2, width: '100%', height: Math.max(1, laneHeight - 4), 'data-lane': lane.instrument }));
+      laneLayer.append(element('line', { class: 'highway-centreline', x1: 0, x2: '100%', y1: y + laneHeight / 2, y2: y + laneHeight / 2 }));
+      const label = element('text', { class: 'highway-lane-name', x: 9, y: y + 16 });
+      label.textContent = lane.label;
+      laneLayer.append(label);
+    });
+  }
 
   function layout() {
     if (!svg) return;
@@ -26,7 +47,7 @@ export function createHighwaySvg(viewport, record = null) {
   function draw(presentation) {
     model = presentation;
     const start = record ? performance.now() : 0;
-    const centre = height / 2;
+    drawLanes(presentation);
     moving.setAttribute('transform', `translate(${width / 2 - presentation.position * scale} 0)`);
     const visibleGrid = new Set();
     for (const boundary of presentation.boundaries) {
@@ -35,7 +56,7 @@ export function createHighwaySvg(viewport, record = null) {
       visibleGrid.add(key);
       if (!gridNodes.has(key)) {
         const group = element('g', { transform: `translate(${boundary.position * scale} 0)`, class: `highway-grid-${boundary.kind}` });
-        group.append(element('line', { x1: 0, x2: 0, y1: 26, y2: height - 20 }));
+        group.append(element('line', { x1: 0, x2: 0, y1: 8, y2: height - 8 }));
         if (boundary.kind === 'bar') {
           const label = element('text', { x: 7, y: 22 });
           label.textContent = `BAR ${boundary.bar}`;
@@ -60,14 +81,19 @@ export function createHighwaySvg(viewport, record = null) {
       const key = `${note.iteration}:${note.id}`;
       visibleNotes.add(key);
       let group = noteNodes.get(key);
-      const signature = `${note.hand ?? ''}:${note.accent}:${note.grace}`;
+      const signature = `${note.hand ?? ''}:${note.accent}:${note.grace}:${note.instrument}:${note.articulation}:${note.lane}`;
       if (group && group.getAttribute('data-signature') !== signature) {
         if (group === nextNode) nextNode = group.nextElementSibling;
         group.remove(); noteNodes.delete(key); group = null;
       }
       if (!group) {
-        group = element('g', { class: 'highway-note', role: 'img', 'data-note-id': note.id, 'data-iteration': note.iteration, 'data-signature': signature, 'data-grace': note.grace });
+        group = element('g', { class: 'highway-note', role: 'img', 'data-note-id': note.id, 'data-iteration': note.iteration, 'data-signature': signature, 'data-grace': note.grace, 'data-instrument': note.instrument, 'data-lane': note.lane, 'data-articulation': note.articulation });
         group.append(element('rect', { x: -9, y: -11, width: 18, height: 22, rx: 5 }));
+        if (note.instrument === 'closed_hat' || note.instrument === 'pedal_hat' || note.instrument === 'open_hat') {
+          const articulation = element('text', { class: 'highway-hat-articulation', x: 0, y: 4, 'text-anchor': 'middle' });
+          articulation.textContent = note.instrument === 'open_hat' ? 'O' : 'X';
+          group.append(articulation);
+        }
         if (note.accent) {
           const accent = element('text', { class: 'highway-accent', x: 0, y: note.grace ? -30 : -20, 'text-anchor': 'middle' });
           accent.textContent = '>';
@@ -87,7 +113,9 @@ export function createHighwaySvg(viewport, record = null) {
       if (group.getAttribute('data-position') !== String(note.position) || group.getAttribute('data-grace-row') !== String(graceRow)) {
         group.setAttribute('data-position', String(note.position));
         group.setAttribute('data-grace-row', String(graceRow));
-        group.setAttribute('transform', `translate(${note.position * scale} ${centre - graceRow * 34})`);
+        const laneY = laneCentre(note.lane, presentation);
+        const graceOffset = Math.min(28, Math.max(24, height / Math.max(1, presentation.lanes.length) * .24));
+        group.setAttribute('transform', `translate(${note.position * scale} ${laneY - graceRow * graceOffset})`);
       }
       const judgement = note.judgement || 'expected';
       if (group.getAttribute('data-judgement') !== judgement) {
@@ -107,7 +135,7 @@ export function createHighwaySvg(viewport, record = null) {
         strikes.append(marker); strikeNodes.set(key, marker);
       }
       marker.setAttribute('cx', String(hit.position * scale));
-      marker.setAttribute('cy', String(centre));
+      marker.setAttribute('cy', String(laneCentre(hit.lane, presentation)));
       marker.setAttribute('data-position', String(hit.position));
       marker.setAttribute('data-iteration', String(hit.iteration));
       marker.setAttribute('data-instrument', hit.instrument);
@@ -120,17 +148,16 @@ export function createHighwaySvg(viewport, record = null) {
 
   return {
     initialize() {
-      svg = element('svg', { class: 'highway-svg', role: 'group', 'aria-label': 'Snare timeline. Notes move toward the centred playhead.', preserveAspectRatio: 'none' });
-      const lane = element('rect', { class: 'highway-lane', x: 0, y: '30%', width: '100%', height: '40%' });
-      const centreline = element('line', { class: 'highway-centreline', x1: 0, x2: '100%', y1: '50%', y2: '50%' });
+      svg = element('svg', { class: 'highway-svg', role: 'group', 'aria-label': 'Drum timeline. Notes move toward the centred playhead.', preserveAspectRatio: 'none' });
+      laneLayer = element('g', { class: 'highway-lanes' });
       moving = element('g', { class: 'highway-moving' });
       grid = element('g'); notes = element('g'); strikes = element('g', { class: 'highway-unmatched-hits' }); moving.append(grid, notes, strikes);
       playhead = element('g', { class: 'highway-playhead' });
       playhead.append(element('line', { x1: 0, x2: 0, y1: 15, y2: '100%' }), element('path', { d: 'M -6 9 L 6 9 L 0 16 Z' }));
-      svg.append(lane, centreline, moving, playhead); viewport.append(svg);
+      svg.append(laneLayer, moving, playhead); viewport.append(svg);
     },
     update: draw,
     resize(size) { width = Math.max(1, size.width); height = Math.max(1, size.height); layout(); },
-    dispose() { svg?.remove(); noteNodes.clear(); strikeNodes.clear(); gridNodes.clear(); model = null; svg = null; },
+    dispose() { svg?.remove(); noteNodes.clear(); strikeNodes.clear(); gridNodes.clear(); model = null; laneSignature = ''; svg = null; },
   };
 }

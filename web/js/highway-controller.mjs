@@ -1,6 +1,11 @@
 // Renderer-independent highway presentation. The application supplies beats and
 // judgements; this module neither reads a clock nor changes musical state.
 const EPSILON = 1e-9;
+export const DEFAULT_HIGHWAY_LANES = Object.freeze([
+  Object.freeze({ instrument: 'kick', label: 'KICK', instruments: Object.freeze(['kick']) }),
+  Object.freeze({ instrument: 'snare', label: 'SNARE', instruments: Object.freeze(['snare']) }),
+  Object.freeze({ instrument: 'hi_hat', label: 'HI-HAT', instruments: Object.freeze(['closed_hat', 'open_hat', 'pedal_hat']) }),
+]);
 
 function lowerBound(notes, beat) {
   let low = 0;
@@ -18,9 +23,13 @@ function lowerBound(notes, beat) {
  * dispose(). A renderer receives detached, immutable presentation snapshots.
  * It must not be given the transport or any scoring callbacks.
  */
-export function createHighwayController(renderer, lanes = [{ instrument: 'snare', label: 'SNARE' }]) {
-  const configuredLanes = lanes.map(lane => Object.freeze({ ...lane }));
-  const instruments = new Set(configuredLanes.map(lane => lane.instrument));
+export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES) {
+  const configuredLanes = lanes.map(lane => Object.freeze({
+    ...lane,
+    instruments: Object.freeze([...(lane.instruments ?? [lane.instrument])]),
+  }));
+  const instrumentLanes = new Map();
+  for (const lane of configuredLanes) for (const instrument of lane.instruments) instrumentLanes.set(instrument, lane.instrument);
   let exercise = null;
   let sequence = null;
   let position = 0;
@@ -111,14 +120,14 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
   return Object.freeze({
     setExercise(source) {
       assertActive();
-      const unsupported = [...new Set(source.hits.map(hit => hit.instrument).filter(instrument => !instruments.has(instrument)))];
+      const unsupported = [...new Set(source.hits.map(hit => hit.instrument).filter(instrument => !instrumentLanes.has(instrument)))];
       if (unsupported.length) throw new Error(`Highway does not support: ${unsupported.join(', ')}`);
       const barBeats = source.meter_numerator * 4 / source.meter_denominator;
       if (!Number.isFinite(barBeats) || barBeats <= 0 || !Number.isFinite(source.ticks_per_beat) || source.ticks_per_beat <= 0) throw new Error('Invalid exercise timing');
       const notes = source.hits.map(hit => {
         if (!hit.id || !Number.isFinite(hit.beat) || hit.beat < 0) throw new Error('Invalid expected note');
         return Object.freeze({
-          id: hit.id, instrument: hit.instrument, beat: hit.beat, notationBeat: hit.notation_beat ?? hit.beat,
+          id: hit.id, instrument: hit.instrument, lane: instrumentLanes.get(hit.instrument), articulation: hit.articulation ?? 'unspecified', beat: hit.beat, notationBeat: hit.notation_beat ?? hit.beat,
           duration: hit.raw_duration_ticks == null ? null : hit.raw_duration_ticks / source.ticks_per_beat,
           hand: hit.hand, accent: Boolean(hit.accent), grace: Boolean(hit.grace),
         });
@@ -160,6 +169,7 @@ export function createHighwayController(renderer, lanes = [{ instrument: 'snare'
           nextUnmatched.push({
             id: result.event_id ?? `unmatched:${cycle}:${result.actual_beat}:${index}`,
             instrument: result.instrument,
+            lane: instrumentLanes.get(result.instrument),
             judgement: result.judgement,
             iteration: cycle,
             position: sequence.origin + cycle * sequence.bars.length * exercise.barBeats + selectedIndex * exercise.barBeats + offset,

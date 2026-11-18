@@ -38,7 +38,7 @@ test('presents musical positions, durations, grid and detached feedback', () => 
   assert.equal(model.notes.find(note => note.id === 'note-1').position, 0.5);
   assert.equal(model.notes.find(note => note.id === 'note-1').duration, 0.25);
   assert.equal(model.notes.find(note => note.id === 'note-1').judgement, 'good');
-  assert.deepEqual(model.unmatched, [{ id: 'extra-1', instrument: 'snare', judgement: 'extra', iteration: 0, position: 1.25 }]);
+  assert.deepEqual(model.unmatched, [{ id: 'extra-1', instrument: 'snare', lane: 'snare', judgement: 'extra', iteration: 0, position: 1.25 }]);
   assert.ok(model.boundaries.some(boundary => boundary.position === 4 && boundary.kind === 'bar' && boundary.bar === 2));
   assert.ok(model.boundaries.some(boundary => boundary.position === 0.25 && boundary.kind === 'subdivision'));
   assert.throws(() => { model.notes[0].beat = 999; }, TypeError);
@@ -61,13 +61,28 @@ test('maps selected noncontiguous bars to consecutive playback positions and sto
   assert.ok(latest().notes.every(note => note.position < 16));
 });
 
+test('maps kick, snare and both hi-hat articulations onto configured lanes', () => {
+  const { controller, latest } = setup();
+  const source = exercise();
+  source.hits.push(
+    { id: 'kick', beat: 1, instrument: 'kick', articulation: 'center' },
+    { id: 'closed', beat: 1, instrument: 'closed_hat', articulation: 'closed' },
+    { id: 'open', beat: 1.5, instrument: 'open_hat', articulation: 'open' },
+  );
+  controller.setExercise(source);
+  assert.equal(latest().notes.find(note => note.id === 'kick').lane, 'kick');
+  assert.equal(latest().notes.find(note => note.id === 'closed').lane, 'hi_hat');
+  assert.equal(latest().notes.find(note => note.id === 'open').lane, 'hi_hat');
+  assert.deepEqual(latest().lanes.map(lane => lane.label), ['KICK', 'SNARE', 'HI-HAT']);
+});
+
 test('rejects unsupported instruments without replacing the active model', () => {
   const { controller, latest } = setup();
   controller.setExercise(exercise());
   const original = latest();
   const unsupported = exercise();
-  unsupported.hits.push({ id: 'kick', beat: 1, instrument: 'kick' });
-  assert.throws(() => controller.setExercise(unsupported), /kick/);
+  unsupported.hits.push({ id: 'ride', beat: 1, instrument: 'ride' });
+  assert.throws(() => controller.setExercise(unsupported), /ride/);
   controller.setPosition(1);
   assert.equal(latest().notes[0].id, original.notes[0].id);
 });

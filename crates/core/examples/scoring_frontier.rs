@@ -82,6 +82,7 @@ fn hit(time: f64) -> ObservedHit {
     ObservedHit {
         timestamp_ms: time,
         instrument: Instrument::Snare,
+        articulation: Default::default(),
         velocity: 100,
         source: InputSource::Demo,
         raw_note: None,
@@ -379,6 +380,7 @@ fn run_midi(filename: &str) {
                 &exercise.tempo_map,
             ) + 5.0,
             instrument: note.instrument,
+            articulation: note.articulation,
             velocity: 100,
             source: InputSource::Midi,
             raw_note: Some(note.note),

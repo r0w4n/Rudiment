@@ -30,6 +30,7 @@ fn run(count: usize, spacing_ms: f64, gap: bool) {
         let hit = ObservedHit {
             timestamp_ms,
             instrument: Instrument::Snare,
+            articulation: Default::default(),
             velocity: 100,
             source: InputSource::Demo,
             raw_note: Some(38),

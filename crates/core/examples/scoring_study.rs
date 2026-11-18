@@ -300,6 +300,7 @@ fn observed(timestamp_ms: f64) -> ObservedHit {
     ObservedHit {
         timestamp_ms,
         instrument: Instrument::Snare,
+        articulation: Default::default(),
         velocity: 100,
         source: InputSource::Midi,
         raw_note: Some(38),

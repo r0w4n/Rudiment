@@ -1610,7 +1610,13 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await expect(page.locator('.live-assessment')).toHaveCount(0);
   await page.getByRole('button', { name: 'Learn snare' }).click();
   await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99, 40, 112]));
-  await expect(page.getByText('Current snare: note 40, channel 10')).toBeVisible();
+  await expect(page.getByText('snare · note 40, channel 10')).toBeVisible();
+  await page.getByRole('button', { name: 'Learn kick' }).click();
+  await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99, 60, 108]));
+  await expect(page.getByText('kick · note 60, channel 10')).toBeVisible();
+  await page.getByRole('button', { name: 'Learn open hi-hat' }).click();
+  await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99, 61, 106]));
+  await expect(page.getByText('open hi-hat · note 61, channel 10')).toBeVisible();
   await page.waitForTimeout(400);
   await page.evaluate(() => (window as unknown as { __rudimentFakeAccess: { disconnect(): void } }).__rudimentFakeAccess.disconnect());
   await expect(page.locator('.midi-state')).toContainText('Drums disconnected');
@@ -1618,7 +1624,9 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await expect(page.locator('.midi-state')).toContainText('Acceptance Kit · connected');
   await page.reload();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await expect(page.getByText('Current snare: note 40, channel 10')).toBeVisible();
+  await expect(page.getByText('snare · note 40, channel 10')).toBeVisible();
+  await expect(page.getByText('kick · note 60, channel 10')).toBeVisible();
+  await expect(page.getByText('open hi-hat · note 61, channel 10')).toBeVisible();
 });
 
 test('MIDI monitoring does not generate a substitute snare when sample decoding stalls', async ({ page }) => {
@@ -2070,6 +2078,7 @@ test('kit MIDI maps to drum staff positions with mixed rhythms and one-bar syste
       {beat:0,notation_beat:0,notation_duration_beats:.5,instrument:'snare',note:38,hand:'R',accent:true},
       {beat:0,notation_beat:0,notation_duration_beats:.5,instrument:'closed_hat',note:42,hand:'R',accent:true},
       {beat:1.5,notation_beat:1.5,notation_duration_beats:.75,instrument:'snare',note:38,hand:'L',accent:false},
+      {beat:2.5,notation_beat:2.5,notation_duration_beats:.25,instrument:'open_hat',articulation:'open',note:46,hand:'R',accent:false},
       {beat:2.25,notation_beat:2.25,notation_duration_beats:.25,instrument:'snare',note:38,hand:'R',accent:false},
       {beat:3,notation_beat:3,notation_duration_beats:.5,instrument:'snare',note:40,hand:'L',accent:false},
       {beat:4,notation_beat:4,notation_duration_beats:.5,instrument:'ride',note:51,hand:'R',accent:false},
@@ -2102,6 +2111,8 @@ test('kit MIDI maps to drum staff positions with mixed rhythms and one-bar syste
   await expect(chord).toHaveAttribute('data-midi-notes','36,38,42');
   const chordY=await chord.locator('.vf-notehead').evaluateAll(heads=>heads.map(head=>(head as SVGGraphicsElement).getBBox().y));
   expect(new Set(chordY).size).toBeGreaterThan(1);
+  await expect(page.locator('.score-note[data-beat="2.5"] .open-hat-articulation')).toHaveCount(1);
+  await expect(page.locator('.score-note[data-beat="2.5"]')).toHaveAttribute('data-articulations','open');
 });
 
 test('triplet onsets render as grouped triplet notation',async({page})=>{
@@ -2379,12 +2390,26 @@ test('rapid repeated monitored strikes allocate an audio voice for every hit', a
   await expect.poll(()=>page.evaluate(()=>(window as unknown as {__voiceStarts:number}).__voiceStarts)).toBeGreaterThanOrEqual(41);
 });
 
-test('reference snare can follow written notes instead of physical hits', async ({ page }) => {
+test('kick and hi-hat samples play independently and closed hi-hat chokes only open hi-hat', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => (window as any).rudiment.ensureAudio());
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().drumSampleCount)).toBe(3);
+  expect(await page.evaluate(() => (window as any).rudiment.playDrum('open_hat', 'open', 100))).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().openHatVoices)).toBe(1);
+  expect(await page.evaluate(() => (window as any).rudiment.playDrum('kick', 'center', 110))).toBe(true);
+  expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().openHatVoices)).toBe(1);
+  expect(await page.evaluate(() => (window as any).rudiment.playDrum('closed_hat', 'closed', 90))).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().openHatVoices)).toBe(0);
+  const starts = await page.evaluate(() => (window as any).rudiment.audioDiagnostics().drumStarts);
+  expect(starts).toMatchObject({ kick: 1, closed_hat: 1, open_hat: 1 });
+});
+
+test('reference drums can follow written notes instead of physical hits', async ({ page }) => {
   await page.goto('/');
   await setTempo(page, '240');
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
-  const playbackMode = page.getByLabel('Reference snare timing');
+  const playbackMode = page.getByLabel('Reference drum timing');
   await playbackMode.selectOption('notes');
   await expect(playbackMode).toHaveValue('notes');
   await expect.poll(() => page.evaluate(() => new Promise<string | undefined>((resolve, reject) => {
@@ -2412,7 +2437,7 @@ test('reference snare can follow written notes instead of physical hits', async 
 
   await page.reload();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await expect(page.getByLabel('Reference snare timing')).toHaveValue('notes');
+  await expect(page.getByLabel('Reference drum timing')).toHaveValue('notes');
 });
 
 test('loop and restart leave practice stopped until started again', async ({ page }) => {

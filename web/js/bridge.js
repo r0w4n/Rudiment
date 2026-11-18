@@ -65,6 +65,11 @@ const metronomeSampleFiles = {
   crisp: { accent:'audio/click-accent.wav', regular:'audio/click-regular.wav' },
   cowbell: { accent:'audio/cowbell-accent.wav', regular:'audio/cowbell-regular.wav' }
 };
+const drumSampleFiles = {
+  kick:'audio/kick.wav',
+  closed_hat:'audio/closed-hat.wav',
+  open_hat:'audio/open-hat.wav',
+};
 const metronomeSampleName = path => path.slice('audio/'.length,-'.wav'.length);
 const performanceProfile={
   enabled:globalThis.__RUDIMENT_PERF__===true,
@@ -190,7 +195,7 @@ const visualMetronome = {
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
-  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, metronomeBuffers: {}, metronomeBuffersPromise: null, metronomeSampleErrors: {}, layerGains: [], layerPeaks: [], sampleErrors: [], snareStarts: 0, lastSnareError: null, lastMetronomeError:null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
+  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, drumBuffers: {}, drumBuffersPromise: null, drumSampleErrors: {}, drumStarts: {kick:0,closed_hat:0,open_hat:0}, openHatVoices:new Set(), metronomeBuffers: {}, metronomeBuffersPromise: null, metronomeSampleErrors: {}, layerGains: [], layerPeaks: [], sampleErrors: [], snareStarts: 0, lastSnareError: null, lastMetronomeError:null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
   preload() {
     this.state = 'loading';
     this.raw ??= Tone.getContext().rawContext;
@@ -259,11 +264,26 @@ const audio = {
         return this.metronomeBuffers;
       });
     }
-    return Promise.all([this.buffersPromise,this.metronomeBuffersPromise]);
+    if(!this.drumBuffersPromise){
+      this.drumBuffersPromise=Promise.all(Object.entries(drumSampleFiles).map(async([name,path])=>{
+        try{
+          const response=await fetch(publicAsset(path));if(!response.ok)throw new Error(String(response.status));
+          return [name,await this.raw.decodeAudioData(await response.arrayBuffer())];
+        }catch(error){
+          this.drumSampleErrors[name]=audioErrorMessage(error);
+          return [name,null];
+        }
+      })).then(entries=>{
+        this.drumBuffers=Object.fromEntries(entries);
+        this.updateSampleState();
+        return this.drumBuffers;
+      });
+    }
+    return Promise.all([this.buffersPromise,this.metronomeBuffersPromise,this.drumBuffersPromise]);
   },
   updateSampleState(){
-    const snareReady=this.buffers.some(Boolean),metronomeReady=Object.values(this.metronomeBuffers).some(Boolean);
-    this.state=snareReady||metronomeReady?'ready':'unavailable';
+    const drumsReady=this.buffers.some(Boolean)||Object.values(this.drumBuffers).some(Boolean),metronomeReady=Object.values(this.metronomeBuffers).some(Boolean);
+    this.state=drumsReady||metronomeReady?'ready':'unavailable';
   },
   async waitForMetronome(timbre){
     const layers=metronomeSampleFiles[timbre];
@@ -284,8 +304,8 @@ const audio = {
     this.preload();
     try { await startPromise; }
     catch(error) { this.state='locked'; this.lastSnareError=audioErrorMessage(error); throw error; }
-    if(this.buffers.length||Object.keys(this.metronomeBuffers).length)this.updateSampleState();
-    return { state: this.state, sampleLayers: this.buffers.filter(Boolean).length, metronomeSampleCount:Object.values(this.metronomeBuffers).filter(Boolean).length };
+    if(this.buffers.length||Object.keys(this.drumBuffers).length||Object.keys(this.metronomeBuffers).length)this.updateSampleState();
+    return { state: this.state, sampleLayers: this.buffers.filter(Boolean).length, drumSampleCount:Object.values(this.drumBuffers).filter(Boolean).length, metronomeSampleCount:Object.values(this.metronomeBuffers).filter(Boolean).length };
   },
   perfAt(audioTime) {
     const direct = performance.now() + (audioTime - this.raw.currentTime) * 1000;
@@ -297,7 +317,7 @@ const audio = {
     }
     return direct;
   },
-  playSnare(velocity = 105, when = null) {
+  playSnare(velocity = 105, when = null, articulation = 'center') {
     const profileStart=performanceProfile.enabled?performance.now():0;
     if (!this.raw || this.raw.state !== 'running') { this.state='locked'; return false; }
     if(Number(velocity)<=0)return false;
@@ -308,8 +328,10 @@ const audio = {
       for(const layer of layers){
         try {
           const source = this.raw.createBufferSource(), gain = this.raw.createGain(); source.buffer = this.buffers[layer.index];
-          source.playbackRate.value = .99 + Math.random() * .02;
-          gain.gain.value = (this.layerGains[layer.index]||1) * response * layer.weight;
+          const articulationRate=articulation==='rim'?1.16:articulation==='snare_wires_off' ? .88 : 1;
+          const articulationGain=articulation==='rim' ? .82 : articulation==='snare_wires_off' ? .72 : 1;
+          source.playbackRate.value = articulationRate * (.99 + Math.random() * .02);
+          gain.gain.value = (this.layerGains[layer.index]||1) * response * layer.weight * articulationGain;
           source.connect(gain); gain.connect(this.snareGain);this.voices.add(source);
           source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);source.disconnect();gain.disconnect();};
           if(scheduled)this.scheduledVoices.add(source);
@@ -335,6 +357,44 @@ const audio = {
     // opened the connection panel. Create/resume the graph without replacing
     // that first strike with a generated sound.
     this.ensure().then(()=>this.playSnare(velocity)).catch(error=>{this.lastSnareError=audioErrorMessage(error);});
+    return true;
+  },
+  chokeOpenHat(when = null) {
+    const time=when??this.raw?.currentTime??0;
+    for(const source of this.openHatVoices){
+      try{source.stop(Math.max(time,(this.raw?.currentTime??time))+.012);}
+      catch{/* A voice that has already ended is harmless. */}
+    }
+  },
+  playDrum(instrument='snare',articulation='unspecified',velocity=105,when=null) {
+    if(instrument==='snare')return this.playSnare(velocity,when,articulation);
+    const canonical=instrument==='pedal_hat'?'closed_hat':instrument;
+    if(!Object.hasOwn(drumSampleFiles,canonical))return false;
+    if(!this.raw||this.raw.state!=='running'||Number(velocity)<=0)return false;
+    const time=when??this.raw.currentTime;
+    if(canonical==='closed_hat'||articulation==='closed'||articulation==='pedal')this.chokeOpenHat(time);
+    const buffer=this.drumBuffers[canonical];
+    if(!buffer)return false;
+    try{
+      const source=this.raw.createBufferSource(),gain=this.raw.createGain(),scheduled=time>this.raw.currentTime+.001;
+      source.buffer=buffer;
+      source.playbackRate.value=.99+Math.random()*.02;
+      gain.gain.value=velocityGain(velocity)*(canonical==='kick'?1.15:.82);
+      source.connect(gain);gain.connect(this.snareGain);
+      this.voices.add(source);
+      if(scheduled)this.scheduledVoices.add(source);
+      if(canonical==='open_hat')this.openHatVoices.add(source);
+      source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);this.openHatVoices.delete(source);source.disconnect();gain.disconnect();};
+      source.start(time);
+      this.drumStarts[canonical]=(this.drumStarts[canonical]??0)+1;
+      return true;
+    }catch(error){this.lastSnareError=audioErrorMessage(error);return false;}
+  },
+  monitorDrum(instrument='snare',articulation='unspecified',velocity=105){
+    if(Number(velocity)<=0)return false;
+    if(this.playDrum(instrument,articulation,velocity))return true;
+    if(this.raw?.state==='running')return true;
+    this.ensure().then(()=>this.playDrum(instrument,articulation,velocity)).catch(error=>{this.lastSnareError=audioErrorMessage(error);});
     return true;
   },
   click(time, accent = false, timbre = 'woodblock') {
@@ -401,7 +461,7 @@ const audio = {
     this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,totalBeats:options.totalBeats,runPerformance,referenceNoteCount:referenceNotes.length,metronome:options.metronome,timbre:options.timbre};
     transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
     for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.activeRun&&transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time);},position);}
-    for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.playSnare(Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time);},position);}
+    for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.playDrum(note.instrument??'snare',note.articulation??'unspecified',Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time);},position);}
     const scheduleClick=(time,countIn=false)=>{
       if(generation!==this.generation)return;
       const transportBeat=transport.getTicksAtTime(time)/transport.PPQ;
@@ -537,12 +597,22 @@ function instrumentForHit(hit) {
   const note=Number(hit.note);
   if([35,36].includes(note))return 'kick';
   if([37,38,40].includes(note))return 'snare';
-  if([42,44,46].includes(note))return note===46?'open_hat':note===44?'pedal_hat':'closed_hat';
+  if([42,44,46].includes(note))return note===46?'open_hat':'closed_hat';
   if([41,43,45,47,48,50].includes(note))return 'tom';
   if([51,53,59].includes(note))return 'ride';
   if([49,52,55,57].includes(note))return 'crash';
   if(note>=39&&note<=81)return 'other_percussion';
   return 'snare';
+}
+function articulationForHit(hit) {
+  if(hit.articulation&&hit.articulation!=='unspecified')return hit.articulation;
+  const note=Number(hit.note);
+  if(note===37)return 'rim';
+  if(note===42)return 'closed';
+  if(note===44)return 'pedal';
+  if(note===46)return 'open';
+  if([35,36,38,40].includes(note))return 'center';
+  return 'unspecified';
 }
 function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBarOverride=null) {
   const profileStart=performanceProfile.enabled&&layoutPass===0?performance.now():0;
@@ -766,7 +836,19 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
       group.dataset.accent=String(Boolean(meta.hit.accent));
       group.dataset.midiNotes=eventHits.map(candidate=>candidate.note??38).join(',');
       group.dataset.instruments=[...new Set(eventHits.map(instrumentForHit))].join(',');
+      group.dataset.articulations=[...new Set(eventHits.map(articulationForHit))].join(',');
       group.classList.add('score-note');
+      for(const [index,hit] of eventHits.entries()){
+        if(instrumentForHit(hit)!=='open_hat'||group.querySelector(`.open-hat-articulation[data-hit-index="${index}"]`))continue;
+        const key=pitchForHit(hit),headIndex=[...new Set(eventHits.map(pitchForHit))].indexOf(key);
+        const head=group.querySelectorAll('.vf-notehead > text')[Math.max(0,headIndex)];
+        const bounds=head?.getBBox();if(!bounds)continue;
+        const open=document.createElementNS('http://www.w3.org/2000/svg','circle');
+        open.setAttribute('class','open-hat-articulation');open.dataset.hitIndex=String(index);
+        open.setAttribute('cx',String(bounds.x+bounds.width/2));open.setAttribute('cy',String(bounds.y-5));
+        open.setAttribute('r','3.4');open.setAttribute('fill','none');open.setAttribute('stroke','currentColor');open.setAttribute('stroke-width','1.3');
+        group.appendChild(open);
+      }
     }
   }
   if(svg&&lineCount>1){
@@ -1061,7 +1143,7 @@ function downloadJson(value,name){const anchor=document.createElement('a');ancho
 
 window.rudiment={
   bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,savedNotationTheme,saveNotationTheme,
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},

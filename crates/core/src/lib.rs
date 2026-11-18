@@ -27,21 +27,64 @@ pub enum Instrument {
     Unknown,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Articulation {
+    #[default]
+    Unspecified,
+    Center,
+    Rim,
+    Closed,
+    Open,
+    Pedal,
+    SnareWiresOn,
+    SnareWiresOff,
+}
+
 impl Instrument {
     pub fn from_gm(note: u8) -> Self {
+        Self::classify_gm(note).0
+    }
+
+    pub fn classify_gm(note: u8) -> (Self, Articulation) {
         match note {
-            35 | 36 => Self::Kick,
-            37 | 38 | 40 => Self::Snare,
-            42 => Self::ClosedHat,
-            44 => Self::PedalHat,
-            46 => Self::OpenHat,
-            51 | 53 | 59 => Self::Ride,
-            41 | 43 | 45 | 47 | 48 | 50 => Self::Tom,
-            49 | 52 | 55 | 57 => Self::Crash,
-            39 | 54 | 56 | 58 | 60..=81 => Self::OtherPercussion,
-            _ => Self::Unknown,
+            35 | 36 => (Self::Kick, Articulation::Center),
+            37 => (Self::Snare, Articulation::Rim),
+            38 | 40 => (Self::Snare, Articulation::Center),
+            42 => (Self::ClosedHat, Articulation::Closed),
+            // GM calls 44 "pedal hi-hat". It is a closed-hat strike for
+            // matching purposes while retaining its pedal articulation.
+            44 => (Self::ClosedHat, Articulation::Pedal),
+            46 => (Self::OpenHat, Articulation::Open),
+            51 | 53 | 59 => (Self::Ride, Articulation::Unspecified),
+            41 | 43 | 45 | 47 | 48 | 50 => (Self::Tom, Articulation::Unspecified),
+            49 | 52 | 55 | 57 => (Self::Crash, Articulation::Unspecified),
+            39 | 54 | 56 | 58 | 60..=81 => (Self::OtherPercussion, Articulation::Unspecified),
+            _ => (Self::Unknown, Articulation::Unspecified),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MidiBinding {
+    pub note: u8,
+    /// Live Web MIDI channels are one-based.
+    pub channel: u8,
+    pub instrument: Instrument,
+    #[serde(default)]
+    pub articulation: Articulation,
+}
+
+pub fn classify_midi(
+    note: u8,
+    channel: u8,
+    bindings: &[MidiBinding],
+) -> (Instrument, Articulation) {
+    bindings
+        .iter()
+        .find(|binding| binding.note == note && binding.channel == channel)
+        .map(|binding| (binding.instrument, binding.articulation))
+        .unwrap_or_else(|| Instrument::classify_gm(note))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +103,8 @@ pub struct ExpectedHit {
     pub raw_duration_ticks: Option<u64>,
     pub notation_duration_beats: f64,
     pub instrument: Instrument,
+    #[serde(default)]
+    pub articulation: Articulation,
     pub velocity: u8,
     pub accent: bool,
     #[serde(default)]
@@ -549,7 +594,7 @@ pub fn parse_midi(
                 Hand::Unknown
             }
         };
-        let instrument = Instrument::from_gm(note);
+        let (instrument, articulation) = Instrument::classify_gm(note);
         if instrument == Instrument::Unknown {
             warnings.push(format!(
                 "MIDI note {note} is not in the supported GM percussion map."
@@ -563,6 +608,7 @@ pub fn parse_midi(
             raw_duration_ticks: duration_ticks,
             notation_duration_beats: 0.25,
             instrument,
+            articulation,
             velocity,
             accent: velocity >= 105,
             grace: false,
@@ -652,6 +698,7 @@ pub fn paradiddle() -> Exercise {
                 raw_duration_ticks: None,
                 notation_duration_beats: 0.5,
                 instrument: Instrument::Snare,
+                articulation: Articulation::Center,
                 velocity: if step == 0 || step == 4 { 120 } else { 88 },
                 accent: step == 0 || step == 4,
                 grace: false,
@@ -691,6 +738,8 @@ pub fn paradiddle() -> Exercise {
 pub struct ObservedHit {
     pub timestamp_ms: f64,
     pub instrument: Instrument,
+    #[serde(default)]
+    pub articulation: Articulation,
     pub velocity: u8,
     pub source: InputSource,
     pub raw_note: Option<u8>,
@@ -1945,6 +1994,7 @@ mod tests {
         ObservedHit {
             timestamp_ms: ms,
             instrument,
+            articulation: Articulation::Unspecified,
             velocity: 100,
             source: InputSource::Demo,
             raw_note: None,
@@ -1984,6 +2034,20 @@ mod tests {
         let s = score_session(&e.hits[..1], &[obs(0.0, Instrument::Kick)], 60.0, 0.0, 0.0);
         assert_eq!(s.matched, 0);
         assert_eq!(s.wrong_instrument, 1);
+
+        let mut closed_hat = e.hits[0].clone();
+        closed_hat.instrument = Instrument::ClosedHat;
+        closed_hat.articulation = Articulation::Closed;
+        closed_hat.note = 42;
+        let open = score_session(
+            &[closed_hat],
+            &[obs(0.0, Instrument::OpenHat)],
+            60.0,
+            0.0,
+            0.0,
+        );
+        assert_eq!(open.matched, 0);
+        assert_eq!(open.wrong_instrument, 1);
     }
     #[test]
     fn close_hits_are_not_double_matched() {
@@ -1999,6 +2063,26 @@ mod tests {
         assert_eq!(e.hits.len(), 2);
         assert_eq!(e.hits[0].hand, Hand::R);
         assert_eq!(e.hits[1].hand, Hand::L);
+    }
+    #[test]
+    fn imported_kit_midi_preserves_instruments_articulations_and_simultaneous_notes() {
+        let bytes = kit_fixture(&[(0, 35), (0, 38), (0, 42), (240, 44), (240, 46), (240, 40)]);
+        let exercise = parse_midi(&bytes, "kit.mid", None).unwrap();
+        assert_eq!(
+            exercise
+                .hits
+                .iter()
+                .map(|hit| (hit.tick, hit.note, hit.instrument, hit.articulation))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 35, Instrument::Kick, Articulation::Center),
+                (0, 38, Instrument::Snare, Articulation::Center),
+                (0, 42, Instrument::ClosedHat, Articulation::Closed),
+                (240, 44, Instrument::ClosedHat, Articulation::Pedal),
+                (480, 46, Instrument::OpenHat, Articulation::Open),
+                (720, 40, Instrument::Snare, Articulation::Center),
+            ]
+        );
     }
     #[test]
     fn imported_midi_preserves_sha256_hash_and_id() {
@@ -2359,7 +2443,7 @@ mod tests {
         assert_eq!(e.playable_tracks[0].index, 1);
         assert_eq!(
             e.playable_tracks[0].instruments,
-            vec![Instrument::Snare, Instrument::Kick, Instrument::PedalHat]
+            vec![Instrument::Snare, Instrument::Kick, Instrument::ClosedHat]
         );
         assert_eq!(e.selected_track, 1);
         assert_eq!((e.meter_numerator, e.meter_denominator), (3, 4));
@@ -2373,7 +2457,7 @@ mod tests {
         );
         assert_eq!(
             e.hits.iter().map(|hit| hit.instrument).collect::<Vec<_>>(),
-            vec![Instrument::Kick, Instrument::Snare, Instrument::PedalHat]
+            vec![Instrument::Kick, Instrument::Snare, Instrument::ClosedHat]
         );
         assert_eq!(
             e.hits.iter().map(|hit| hit.hand).collect::<Vec<_>>(),
@@ -2490,6 +2574,7 @@ mod tests {
                 raw_duration_ticks: Some(20),
                 notation_duration_beats: 0.25,
                 instrument: Instrument::Snare,
+                articulation: Articulation::Center,
                 velocity: 100,
                 accent: false,
                 grace: false,
@@ -2601,7 +2686,30 @@ mod tests {
     }
     #[test]
     fn drum_map_covers_extended_gm_percussion_and_compound_meter() {
+        assert_eq!(
+            Instrument::classify_gm(35),
+            (Instrument::Kick, Articulation::Center)
+        );
+        assert_eq!(
+            Instrument::classify_gm(36),
+            (Instrument::Kick, Articulation::Center)
+        );
         assert_eq!(Instrument::from_gm(37), Instrument::Snare);
+        assert_eq!(Instrument::classify_gm(37).1, Articulation::Rim);
+        assert_eq!(Instrument::classify_gm(38).1, Articulation::Center);
+        assert_eq!(Instrument::classify_gm(40).1, Articulation::Center);
+        assert_eq!(
+            Instrument::classify_gm(42),
+            (Instrument::ClosedHat, Articulation::Closed)
+        );
+        assert_eq!(
+            Instrument::classify_gm(44),
+            (Instrument::ClosedHat, Articulation::Pedal)
+        );
+        assert_eq!(
+            Instrument::classify_gm(46),
+            (Instrument::OpenHat, Articulation::Open)
+        );
         assert_eq!(Instrument::from_gm(39), Instrument::OtherPercussion);
         assert_eq!(Instrument::from_gm(54), Instrument::OtherPercussion);
         assert_eq!(Instrument::from_gm(80), Instrument::OtherPercussion);
@@ -2609,6 +2717,39 @@ mod tests {
         assert_eq!(measure_beats(6, 8), 3.0);
         assert_eq!(nearest_written_value(0.75), 0.75);
         assert_eq!(nearest_written_value(1.5), 1.5);
+    }
+    #[test]
+    fn configurable_midi_bindings_override_gm_without_changing_other_notes() {
+        let bindings = vec![
+            MidiBinding {
+                note: 60,
+                channel: 10,
+                instrument: Instrument::Kick,
+                articulation: Articulation::Center,
+            },
+            MidiBinding {
+                note: 61,
+                channel: 10,
+                instrument: Instrument::OpenHat,
+                articulation: Articulation::Open,
+            },
+        ];
+        assert_eq!(
+            classify_midi(60, 10, &bindings),
+            (Instrument::Kick, Articulation::Center)
+        );
+        assert_eq!(
+            classify_midi(61, 10, &bindings),
+            (Instrument::OpenHat, Articulation::Open)
+        );
+        assert_eq!(
+            classify_midi(42, 10, &bindings),
+            (Instrument::ClosedHat, Articulation::Closed)
+        );
+        assert_eq!(
+            classify_midi(60, 9, &bindings),
+            (Instrument::OtherPercussion, Articulation::Unspecified)
+        );
     }
     #[test]
     fn configurable_timing_boundaries_and_simultaneous_hits_are_deterministic() {
@@ -2681,6 +2822,7 @@ mod tests {
                 .map(|(hit, offset)| ObservedHit {
                     timestamp_ms: start_ms + hit.beat * 1000.0 + offset,
                     instrument: hit.instrument,
+                    articulation: hit.articulation,
                     velocity: 100,
                     source,
                     raw_note: (source == InputSource::Midi).then_some(38),
@@ -2736,6 +2878,7 @@ mod tests {
                 .map(|(hit, offset)| ObservedHit {
                     timestamp_ms: elapsed_ms_at_beat(hit.beat, bpm, &[]) + offset,
                     instrument: hit.instrument,
+                    articulation: hit.articulation,
                     velocity: 100,
                     source: InputSource::Midi,
                     raw_note: Some(38),
@@ -2917,14 +3060,25 @@ mod tests {
         simultaneous[1].id = "kick".into();
         simultaneous[1].instrument = Instrument::Kick;
         simultaneous[1].note = 36;
+        simultaneous.push(ExpectedHit {
+            id: "closed-hat".into(),
+            instrument: Instrument::ClosedHat,
+            articulation: Articulation::Closed,
+            note: 42,
+            ..rapid[0].clone()
+        });
         let simultaneous_summary = score_session(
             &simultaneous,
-            &[obs(5.0, Instrument::Kick), obs(-5.0, Instrument::Snare)],
+            &[
+                obs(5.0, Instrument::Kick),
+                obs(-5.0, Instrument::Snare),
+                obs(3.0, Instrument::ClosedHat),
+            ],
             60.0,
             0.0,
             0.0,
         );
-        assert_eq!(simultaneous_summary.matched, 2);
+        assert_eq!(simultaneous_summary.matched, 3);
         assert_eq!(simultaneous_summary.score, Some(100.0));
     }
 
@@ -3049,6 +3203,39 @@ mod tests {
                 timing: Timing::Metrical(u15::new(480)),
             },
             tracks: vec![t],
+        };
+        let mut out = vec![];
+        smf.write_std(&mut out).unwrap();
+        out
+    }
+    fn kit_fixture(notes: &[(u32, u8)]) -> Vec<u8> {
+        use midly::{
+            Format, Header, Smf, TrackEvent, TrackEventKind,
+            num::{u4, u7, u15, u28},
+        };
+        let mut track = notes
+            .iter()
+            .map(|(delta, note)| TrackEvent {
+                delta: u28::new(*delta),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(9),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(*note),
+                        vel: u7::new(100),
+                    },
+                },
+            })
+            .collect::<Vec<_>>();
+        track.push(TrackEvent {
+            delta: u28::new(0),
+            kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+        });
+        let smf = Smf {
+            header: Header {
+                format: Format::SingleTrack,
+                timing: Timing::Metrical(u15::new(480)),
+            },
+            tracks: vec![track],
         };
         let mut out = vec![];
         smf.write_std(&mut out).unwrap();

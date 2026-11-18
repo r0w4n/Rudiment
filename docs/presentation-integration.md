@@ -35,10 +35,12 @@ Tone nor affects notation, MIDI or scoring; app cleanup also unbinds it. A
 renderer failure is isolated and detaches the renderer rather than interrupting
 the transport. The renderer is not passed playback or scoring controls.
 
-The default lane configuration supports snare only; mounting against an
-exercise with unsupported instruments fails explicitly. If a later exercise is
-unsupported, the optional renderer is detached. Future lanes require
-configuration and rendering support, not another MIDI parser or clock.
+The default configuration has kick, snare and hi-hat lanes. Closed, pedal and
+open hi-hat events share the hi-hat lane while retaining their articulation.
+Mounting against other unsupported instruments still fails explicitly. If a
+later exercise is unsupported, the optional renderer is detached. Additional
+lanes require configuration and rendering support, not another MIDI parser or
+clock.
 
 The built-in SVG Highway mounts only when selected and uses the existing host.
 It draws bounded, keyed note and grid elements under a fixed centred playhead;
