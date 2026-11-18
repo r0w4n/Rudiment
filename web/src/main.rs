@@ -1,8 +1,8 @@
 use js_sys::{Array, Date, Function, Promise, Uint8Array};
 use leptos::prelude::*;
 use lucide_leptos::{
-    ArrowLeft, ArrowRight, ChartNoAxesCombined, FolderOpen, Info, Minus, Pause, Play, Plus,
-    RotateCcw, Settings as SettingsIcon, Star, X,
+    ArrowLeft, ArrowRight, ChartNoAxesCombined, FolderOpen, Info, Minus, Moon, Pause, Play, Plus,
+    RotateCcw, Settings as SettingsIcon, Star, Sun, X,
 };
 use rudiment_core::{
     DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit,
@@ -3082,7 +3082,7 @@ fn App() -> impl IntoView {
             <section id="score-card" class=move || if highway.get(){"score-card highway-active"}else if notation_dark.get(){"score-card notation-dark"}else{"score-card"}>
               <div class="score-meta">
                 <div class="score-view-controls">
-                  <button type="button" class=move || if highway.get(){"notation-theme-toggle hidden"}else{"notation-theme-toggle"} aria-label=move || if notation_dark.get(){"Notation theme: Dark. Switch to Light"}else{"Notation theme: Light. Switch to Dark"} aria-pressed=move || notation_dark.get().to_string() title="Toggle notation theme" on:click=move |_|{let dark=!notation_dark.get_untracked();notation_dark.set(dark);save_notation_theme(dark);}>{move || if notation_dark.get(){"Dark"}else{"Light"}}</button>
+                  <button type="button" class=move || if highway.get(){"notation-theme-toggle hidden"}else{"notation-theme-toggle"} aria-label=move || if notation_dark.get(){"Notation theme: Dark. Switch to Light"}else{"Notation theme: Light. Switch to Dark"} aria-pressed=move || notation_dark.get().to_string() title=move || if notation_dark.get(){"Switch to light notation"}else{"Switch to dark notation"} on:click=move |_|{let dark=!notation_dark.get_untracked();notation_dark.set(dark);save_notation_theme(dark);}>{move || if notation_dark.get(){view!{<Moon size=18/>}.into_any()}else{view!{<Sun size=18/>}.into_any()}}</button>
                   <div class="visualisation-selector" role="group" aria-label="Musical visualisation">
                     <button type="button" class=move || if !highway.get(){"active"}else{""} aria-pressed=move || (!highway.get()).to_string() on:click=move |_|{highway.set(false);save_highway_mode(false);}>"Notation"</button>
                     <button type="button" class=move || if highway.get(){"active"}else{""} aria-pressed=move || highway.get().to_string() on:click=move |_|{highway.set(true);save_highway_mode(true);}>"Highway"</button>

@@ -461,7 +461,7 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .visualisation-selector button,.notation-theme-toggle{min-height:44px;padding:0 12px;border-radius:6px;background:transparent;color:var(--muted);font:700 11px var(--font-ui)}
 .visualisation-selector button.active{background:var(--panel-2);color:var(--ink)}
 .visualisation-selector button:hover,.notation-theme-toggle:hover{color:var(--ink)}
-.notation-theme-toggle{border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+.notation-theme-toggle{width:44px;padding:0;display:grid;place-items:center;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
 .notation-theme-toggle[aria-pressed=true]{background:var(--panel-2);color:var(--ink)}
 .score-card.notation-dark{background:var(--panel);border-color:var(--line);color:var(--ink);box-shadow:none;color-scheme:dark}
 .notation-dark .score-meta,.notation-dark .position-row{border-color:var(--line);color:var(--muted)}
