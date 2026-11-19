@@ -1,20 +1,55 @@
+// @ts-check
 // SVG presentation only: all positions and assessments come from the host.
+/** @typedef {import('./presentation-types.mjs').Presentation} Presentation */
+/** @typedef {import('./presentation-types.mjs').Renderer} Renderer */
 const NS = 'http://www.w3.org/2000/svg';
+/** @param {string} name
+ * @param {Record<string, string | number | boolean>} [attributes]
+ */
 const element = (name, attributes = {}) => {
   const node = document.createElementNS(NS, name);
   for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
   return node;
 };
+/** @param {HTMLElement} viewport
+ * @param {((milliseconds: number) => void) | null} [record]
+ * @returns {Renderer}
+ */
 export function createHighwaySvg(viewport, record = null) {
-  let svg, laneLayer, moving, grid, notes, strikes, playhead, width = 1, height = 1, scale = 1, model, laneSignature = '';
-  const noteNodes = new Map(), strikeNodes = new Map(), gridNodes = new Map();
+  /** @type {SVGElement | null} */
+  let svg = null;
+  /** @type {SVGElement} */
+  let laneLayer;
+  /** @type {SVGElement} */
+  let moving;
+  /** @type {SVGElement} */
+  let grid;
+  /** @type {SVGElement} */
+  let notes;
+  /** @type {SVGElement} */
+  let strikes;
+  /** @type {SVGElement} */
+  let playhead;
+  let width = 1, height = 1, scale = 1, laneSignature = '';
+  /** @type {Presentation | null} */
+  let model = null;
+  /** @type {Map<string, SVGElement>} */
+  const noteNodes = new Map();
+  /** @type {Map<string, SVGElement>} */
+  const strikeNodes = new Map();
+  /** @type {Map<string, SVGElement>} */
+  const gridNodes = new Map();
 
+  /** @param {string} lane
+   * @param {Presentation} presentation
+   */
   function laneCentre(lane, presentation) {
     const index = presentation.lanes.findIndex(item => item.instrument === lane);
     if (index < 0) throw new Error(`Missing highway lane: ${lane}`);
     return (index + .5) * height / Math.max(1, presentation.lanes.length);
   }
 
+  /** @param {Presentation} presentation */
   function drawLanes(presentation) {
     const signature = `${width}:${height}:${presentation.lanes.map(lane => `${lane.instrument}:${lane.label}`).join('|')}`;
     if (signature === laneSignature) return;
@@ -49,7 +84,9 @@ export function createHighwaySvg(viewport, record = null) {
     if (model) draw(model);
   }
 
+  /** @param {Presentation} presentation */
   function draw(presentation) {
+    if (!svg) return;
     model = presentation;
     const start = record ? performance.now() : 0;
     drawLanes(presentation);
@@ -70,21 +107,24 @@ export function createHighwaySvg(viewport, record = null) {
         grid.append(group); gridNodes.set(key, group);
       }
       if (boundary.kind === 'bar') {
-        const label = gridNodes.get(key).querySelector('text');
+        const label = gridNodes.get(key)?.querySelector('text');
         const text = `BAR ${boundary.bar}`;
-        if (label.textContent !== text) label.textContent = text;
+        if (label && label.textContent !== text) label.textContent = text;
       }
     }
     for (const [key, node] of gridNodes) if (!visibleGrid.has(key)) { node.remove(); gridNodes.delete(key); }
     const visibleNotes = new Set();
+    /** @type {{position: number; row: number} | null} */
     let previousGrace = null;
     let nextNode = notes.firstElementChild;
     for (const note of presentation.notes) {
       const gap = previousGrace ? note.position - previousGrace.position : Infinity;
+      /** @type {number} */
       const graceRow = note.grace ? previousGrace && gap >= 0 && gap * scale < 20 ? previousGrace.row + 1 : 1 : 0;
       previousGrace = note.grace ? { position: note.position, row: graceRow } : null;
       const key = `${note.iteration}:${note.id}`;
       visibleNotes.add(key);
+      /** @type {SVGElement | null | undefined} */
       let group = noteNodes.get(key);
       const signature = `${note.hand ?? ''}:${note.accent}:${note.grace}:${note.instrument}:${note.articulation}:${note.lane}`;
       if (group && group.getAttribute('data-signature') !== signature) {
@@ -125,8 +165,10 @@ export function createHighwaySvg(viewport, record = null) {
       const judgement = note.judgement || 'expected';
       if (group.getAttribute('data-judgement') !== judgement) {
         group.setAttribute('data-judgement', judgement);
-        group.lastChild.textContent = `${note.instrument}${note.grace ? ' grace' : ''} · ${judgement}${note.hand ? ` · ${note.hand}` : ''}`;
-        group.setAttribute('aria-label', group.lastChild.textContent);
+        if (group.lastChild) {
+          group.lastChild.textContent = `${note.instrument}${note.grace ? ' grace' : ''} · ${judgement}${note.hand ? ` · ${note.hand}` : ''}`;
+          group.setAttribute('aria-label', group.lastChild.textContent);
+        }
       }
     }
     for (const [key, node] of noteNodes) if (!visibleNotes.has(key)) { node.remove(); noteNodes.delete(key); }

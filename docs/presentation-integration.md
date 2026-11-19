@@ -19,9 +19,13 @@ repetitions, into a beat-based visible range. The immutable snapshot contains
 lanes, note IDs, source and sequence positions, durations, sticking, accents, grace flags,
 bar/beat boundaries, playback phase and tempo, selection and loop iteration,
 and the app's supplied judgements. Bar membership uses the same written-onset
-rule as Rust's expanded sequence; note timing still uses the original MIDI
-onset. Rust supplies the matched repetition from the actual scored expected ID,
-so early hits belonging to the next loop need not be guessed by a renderer.
+rule as Rust's expanded sequence: the mount-time snapshot carries each hit's
+`source_bar`, computed by the same helper as scoring. Note timing still uses the
+original MIDI onset. Rust supplies the matched repetition from the actual scored
+expected ID, so early hits belonging to the next loop need not be guessed by a
+renderer. `web/js/presentation-types.d.mts` types the mount-time snapshot and
+controller/renderer contract; `npm run typecheck` checks the JS presentation
+modules without bundling this type-only file.
 
 ## SVG Highway renderer
 

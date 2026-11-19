@@ -595,26 +595,12 @@ function pitchForHit(hit) {
   return ({kick:'f/4',snare:'c/5',closed_hat:'g/5/x',open_hat:'g/5/x',pedal_hat:'g/5/x',ride:'d/5/x',crash:'a/5/x',tom:'c/5',other_percussion:'c/5/x'})[hit.instrument]??'c/5';
 }
 function instrumentForHit(hit) {
-  if(hit.instrument)return hit.instrument;
-  const note=Number(hit.note);
-  if([35,36].includes(note))return 'kick';
-  if([37,38,40].includes(note))return 'snare';
-  if([42,44,46].includes(note))return note===46?'open_hat':'closed_hat';
-  if([41,43,45,47,48,50].includes(note))return 'tom';
-  if([51,53,59].includes(note))return 'ride';
-  if([49,52,55,57].includes(note))return 'crash';
-  if(note>=39&&note<=81)return 'other_percussion';
-  return 'snare';
+  // Rust classifies MIDI notes; engraving must not silently reinterpret them.
+  if(!hit.instrument)throw new Error('Notation requires a classified instrument');
+  return hit.instrument;
 }
 function articulationForHit(hit) {
-  if(hit.articulation&&hit.articulation!=='unspecified')return hit.articulation;
-  const note=Number(hit.note);
-  if(note===37)return 'rim';
-  if(note===42)return 'closed';
-  if(note===44)return 'pedal';
-  if(note===46)return 'open';
-  if([35,36,38,40].includes(note))return 'center';
-  return 'unspecified';
+  return hit.articulation??'unspecified';
 }
 function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBarOverride=null) {
   const profileStart=performanceProfile.enabled&&layoutPass===0?performance.now():0;

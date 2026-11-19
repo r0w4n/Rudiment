@@ -1,6 +1,8 @@
 {
   "compilerOptions": {
     "esModuleInterop": true,
+    "allowJs": true,
+    "checkJs": true,
     "lib": ["ES2022", "DOM"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
@@ -10,5 +12,12 @@
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["playwright.config.ts", "tests/e2e/**/*.ts"]
+  "include": [
+    "playwright.config.ts",
+    "tests/e2e/**/*.ts",
+    "web/js/highway-controller.mjs",
+    "web/js/presentation-host.mjs",
+    "web/js/highway-svg.mjs",
+    "web/js/presentation-types.d.mts"
+  ]
 }

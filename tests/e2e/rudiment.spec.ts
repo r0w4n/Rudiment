@@ -2036,7 +2036,7 @@ test('early first downbeat and later loop hits stay on the selected bar', async 
 test('score keeps one bar per system and follows playback vertically without horizontal scrolling',async({page})=>{
   await page.goto('/');
   await page.evaluate(()=>{
-    const hits=Array.from({length:64},(_,index)=>({beat:index*.5,notation_beat:index*.5,notation_duration_beats:.5,hand:index%2===0?'R':'L',accent:false}));
+    const hits=Array.from({length:64},(_,index)=>({beat:index*.5,notation_beat:index*.5,notation_duration_beats:.5,instrument:'snare',articulation:'center',note:38,hand:index%2===0?'R':'L',accent:false}));
     (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Multi-line Test',meter_numerator:4,meter_denominator:4,hits});
   });
   const score=page.locator('#notation'),svg=score.locator('svg');
@@ -2136,6 +2136,16 @@ test('single-line snare notation is available only when explicitly selected',asy
     (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Snare Rudiment',meter_numerator:4,meter_denominator:4,hits,staff_mode:'single_line'});
   });
   await expect(page.locator('#notation svg')).toHaveAttribute('data-staff-lines','1');
+});
+
+test('notation uses Rust-classified instruments instead of guessing from MIDI note numbers',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>{
+    const hits=[{id:'mapped-snare',beat:0,notation_beat:0,notation_duration_beats:1,instrument:'snare',articulation:'rim',note:36,hand:'R'}];
+    (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Mapped snare',meter_numerator:4,meter_denominator:4,hits});
+  });
+  await expect(page.locator('.score-note[data-midi-notes="36"]')).toHaveAttribute('data-instruments','snare');
+  await expect(page.locator('.score-note[data-midi-notes="36"]')).toHaveAttribute('data-articulations','rim');
 });
 
 test('kit MIDI maps to drum staff positions with mixed rhythms and one-bar systems',async({page})=>{
@@ -2764,7 +2774,7 @@ test('long scores scroll inside their panel while all practice controls remain o
   await page.goto('/');
   await page.getByRole('button',{name:'Dismiss welcome hint'}).click();
   await page.evaluate(()=>{
-    const hits=Array.from({length:320},(_,index)=>({beat:index,notation_beat:index,notation_duration_beats:1,hand:index%2===0?'R':'L',accent:false}));
+    const hits=Array.from({length:320},(_,index)=>({beat:index,notation_beat:index,notation_duration_beats:1,instrument:'snare',articulation:'center',note:38,hand:index%2===0?'R':'L',accent:false}));
     (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Long MIDI',meter_numerator:4,meter_denominator:4,hits});
   });
   const layout=await page.evaluate(()=>({

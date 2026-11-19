@@ -869,6 +869,44 @@ fn json_compatible<T: Serialize>(value: &T) -> Result<JsValue, serde_wasm_bindge
     value.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
 }
 
+fn source_bar(hit: &ExpectedHit, bar_beats: f64) -> usize {
+    ((hit.notation_beat + 0.000_001) / bar_beats)
+        .floor()
+        .max(0.0) as usize
+}
+
+#[derive(Serialize)]
+struct PresentationHit<'a> {
+    #[serde(flatten)]
+    hit: &'a ExpectedHit,
+    source_bar: usize,
+}
+
+#[derive(Serialize)]
+struct PresentationExercise<'a> {
+    meter_numerator: u8,
+    meter_denominator: u8,
+    ticks_per_beat: u16,
+    hits: Vec<PresentationHit<'a>>,
+}
+
+fn presentation_exercise(exercise: &Exercise) -> PresentationExercise<'_> {
+    let bar_beats = beats_per_bar(exercise);
+    PresentationExercise {
+        meter_numerator: exercise.meter_numerator,
+        meter_denominator: exercise.meter_denominator,
+        ticks_per_beat: exercise.ticks_per_beat,
+        hits: exercise
+            .hits
+            .iter()
+            .map(|hit| PresentationHit {
+                hit,
+                source_bar: source_bar(hit, bar_beats),
+            })
+            .collect(),
+    }
+}
+
 fn expanded_sequence_hits(
     exercise: &Exercise,
     sequence: &BarSequence,
@@ -876,9 +914,7 @@ fn expanded_sequence_hits(
 ) -> Vec<ExpectedHit> {
     let mut source_by_bar = vec![Vec::new(); sequence.bars.last().copied().unwrap_or(0) + 1];
     for hit in &exercise.hits {
-        let bar = ((hit.notation_beat + 0.000_001) / sequence.bar_beats)
-            .floor()
-            .max(0.0) as usize;
+        let bar = source_bar(hit, sequence.bar_beats);
         if let Some(hits) = source_by_bar.get_mut(bar) {
             hits.push(hit);
         }
@@ -1661,7 +1697,7 @@ fn App() -> impl IntoView {
     };
     let snapshot = Closure::wrap(Box::new(move || -> JsValue {
         json_compatible(&serde_json::json!({
-            "exercise": exercise.get_untracked(),
+            "exercise": presentation_exercise(&exercise.get_untracked()),
             "config": presentation_config(),
             "judgements": live.get_untracked(),
         }))
@@ -4202,6 +4238,41 @@ mod tests {
         assert_eq!(summary.missed, 0);
         assert_eq!(summary.extras, 0);
         assert_eq!(BarSequence::new(&exercise, &[]).bars, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn presentation_uses_scoring_bar_membership_for_early_grace_notes() {
+        let mut exercise = paradiddle();
+        let mut grace = exercise.hits[0].clone();
+        grace.id = "early-grace".into();
+        grace.beat = 7.99;
+        grace.notation_beat = 8.0;
+        grace.grace = true;
+        exercise.hits.push(grace);
+        let source = presentation_exercise(&exercise);
+        let presented = source
+            .hits
+            .iter()
+            .find(|item| item.hit.id == "early-grace")
+            .unwrap();
+        assert_eq!(presented.source_bar, 2);
+        assert_eq!(presented.hit.beat, 7.99);
+        let serialized = serde_json::to_value(&source).unwrap();
+        let serialized_grace = serialized["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "early-grace")
+            .unwrap();
+        assert_eq!(serialized_grace["source_bar"], 2);
+        assert_eq!(serialized_grace["beat"], 7.99);
+        let sequence = BarSequence::new(&exercise, &[2]);
+        let expanded = expanded_sequence_hits(&exercise, &sequence, 1);
+        assert!(
+            expanded
+                .iter()
+                .any(|hit| hit.id == "early-grace-loop1" && hit.beat == 7.99)
+        );
     }
 
     #[test]

@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHighwayController } from '../../web/js/highway-controller.mjs';
+import { createPresentationHost } from '../../web/js/presentation-host.mjs';
 
 const exercise = () => ({
   meter_numerator: 4, meter_denominator: 4, ticks_per_beat: 480,
   hits: [0, 0.5, 4, 8, 12].map((beat, index) => ({
-    id: `note-${index}`, beat, instrument: 'snare', raw_duration_ticks: 120,
+    id: `note-${index}`, beat, source_bar: Math.floor(beat / 4), instrument: 'snare', raw_duration_ticks: 120,
     hand: index % 2 ? 'L' : 'R', accent: index === 0,
   })),
 });
@@ -65,9 +66,9 @@ test('maps kick, snare and both hi-hat articulations onto configured lanes', () 
   const { controller, latest } = setup();
   const source = exercise();
   source.hits.push(
-    { id: 'kick', beat: 1, instrument: 'kick', articulation: 'center' },
-    { id: 'closed', beat: 1, instrument: 'closed_hat', articulation: 'closed' },
-    { id: 'open', beat: 1.5, instrument: 'open_hat', articulation: 'open' },
+    { id: 'kick', beat: 1, source_bar: 0, instrument: 'kick', articulation: 'center' },
+    { id: 'closed', beat: 1, source_bar: 0, instrument: 'closed_hat', articulation: 'closed' },
+    { id: 'open', beat: 1.5, source_bar: 0, instrument: 'open_hat', articulation: 'open' },
   );
   controller.setExercise(source);
   assert.equal(latest().notes.find(note => note.id === 'kick').lane, 'kick');
@@ -112,13 +113,48 @@ test('feedback is bound to the matched repetition, including an early next-loop 
 test('bar membership follows scoring notation onset without quantizing MIDI timing', () => {
   const { controller, latest } = setup();
   const source = exercise();
-  source.hits.push({ id: 'near-bar', beat: 7.99, notation_beat: 8, instrument: 'snare', raw_duration_ticks: null, hand: 'R' });
+  source.hits.push({ id: 'near-bar', beat: 7.99, notation_beat: 8, source_bar: 2, instrument: 'snare', raw_duration_ticks: null, hand: 'R' });
   controller.setExercise(source);
   controller.setTimeline([2], 12);
   controller.setPosition(8);
   const note = latest().notes.find(item => item.id === 'near-bar');
   assert.equal(note.beat, 7.99);
   assert.equal(note.position, 7.99);
+});
+
+test('requires Rust-assigned source bars instead of reclassifying written onsets', () => {
+  const { controller, latest } = setup();
+  const source = exercise();
+  source.hits.push({ id: 'assigned', beat: 7.99, source_bar: 2, instrument: 'snare' });
+  controller.setExercise(source);
+  controller.setTimeline([2], 12);
+  controller.setPosition(8);
+  assert.equal(latest().notes.find(note => note.id === 'assigned').position, 7.99);
+  assert.throws(() => controller.setExercise({ ...source, hits: [{ id: 'missing-bar', beat: 0, instrument: 'snare' }] }), /Invalid expected note/);
+});
+
+test('a faulty optional renderer detaches without keeping presentation active', () => {
+  const failures = [];
+  let disposed = 0;
+  let fail = false;
+  const host = createPresentationHost(() => null, error => failures.push(error));
+  host.bind(() => ({
+    exercise: exercise(),
+    config: { bars: [0], endBeat: 4, position: 0, phase: 'idle', tempoBpm: 60, loops: 1, repeatUntilGood: false, barAttempt: 0 },
+    judgements: [],
+  }));
+  host.mount({
+    initialize() {},
+    update() { if (fail) throw new Error('renderer failed'); },
+    resize() {},
+    dispose() { disposed++; },
+  });
+  fail = true;
+  host.position(0, 60);
+  assert.equal(host.isActive(), false);
+  assert.equal(disposed, 1);
+  assert.equal(failures.length, 1);
+  host.unbind();
 });
 
 test('a renderer that fails during initialization is disposed', () => {

@@ -1,6 +1,15 @@
+// @ts-check
 // Renderer-independent highway presentation. The application supplies beats and
 // judgements; this module neither reads a clock nor changes musical state.
+/** @typedef {import('./presentation-types.mjs').Exercise} Exercise */
+/** @typedef {import('./presentation-types.mjs').Lane} Lane */
+/** @typedef {import('./presentation-types.mjs').Timeline} Timeline */
+/** @typedef {import('./presentation-types.mjs').SourceNote} SourceNote */
+/** @typedef {import('./presentation-types.mjs').Playback} Playback */
+/** @typedef {import('./presentation-types.mjs').Renderer} Renderer */
+/** @typedef {import('./presentation-types.mjs').Judgement} Judgement */
 const EPSILON = 1e-9;
+/** @type {readonly Lane[]} */
 export const DEFAULT_HIGHWAY_LANES = Object.freeze([
   Object.freeze({ instrument: 'kick', label: 'KICK', instruments: Object.freeze(['kick']) }),
   Object.freeze({ instrument: 'snare', label: 'SNARE', instruments: Object.freeze(['snare']) }),
@@ -8,6 +17,9 @@ export const DEFAULT_HIGHWAY_LANES = Object.freeze([
 ]);
 const OTHER_LANE = Object.freeze({ instrument: 'other', label: 'OTHER', instruments: Object.freeze([]) });
 
+/** @param {Timeline['notes']} notes
+ * @param {number} beat
+ */
 function lowerBound(notes, beat) {
   let low = 0;
   let high = notes.length;
@@ -20,9 +32,10 @@ function lowerBound(notes, beat) {
 }
 
 /**
- * Renderer contract: initialize(), update(presentation), resize(viewport),
- * dispose(). A renderer receives detached, immutable presentation snapshots.
- * It must not be given the transport or any scoring callbacks.
+ * A renderer receives detached, immutable presentation snapshots. It must not
+ * be given the transport or any scoring callbacks.
+ * @param {Renderer} renderer
+ * @param {readonly Lane[]} lanes
  */
 export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES) {
   const configuredLanes = lanes.map(lane => Object.freeze({
@@ -31,13 +44,18 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
   }));
   const instrumentLanes = new Map();
   for (const lane of configuredLanes) for (const instrument of lane.instruments) instrumentLanes.set(instrument, lane.instrument);
+  /** @type {{barBeats: number; beatUnit: number; barCount: number; notes: SourceNote[]} | null} */
   let exercise = null;
+  /** @type {Timeline | null} */
   let sequence = null;
   let position = 0;
   let before = 2;
   let after = 6;
+  /** @type {Map<number, Map<string, string>>} */
   let judgements = new Map();
+  /** @type {import('./presentation-types.mjs').Presentation['unmatched'][number][]} */
   let unmatched = [];
+  /** @type {Playback} */
   let playback = Object.freeze({ phase: 'idle', tempoBpm: null });
   let disposed = false;
 
@@ -49,7 +67,9 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     if (!exercise || !sequence) return;
     const start = position - before;
     const end = position + after;
+    /** @type {import('./presentation-types.mjs').Presentation['notes'][number][]} */
     const notes = [];
+    /** @type {import('./presentation-types.mjs').Presentation['boundaries'][number][]} */
     const boundaries = [];
     const visibleUnmatched = unmatched.filter(hit => hit.position >= start - EPSILON && hit.position <= end + EPSILON).map(hit => Object.freeze({ ...hit }));
     const visibleLanes = visibleUnmatched.some(hit => hit.lane === 'other' && !configuredLanes.some(lane => lane.instrument === 'other'))
@@ -93,7 +113,11 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     }));
   }
 
+  /** @param {number[]} bars
+   * @param {number | undefined} endBeat
+   */
   function setSequence(bars, endBeat) {
+    if (!exercise) throw new Error('Exercise required');
     const count = exercise.barCount;
     const chosen = bars.length ? [...bars] : Array.from({ length: count }, (_, index) => index);
     if (chosen.some((bar, index) => !Number.isInteger(bar) || bar < 0 || bar >= count || (index > 0 && bar <= chosen[index - 1]))) {
@@ -101,12 +125,13 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     }
     const barBeats = exercise.barBeats;
     const origin = chosen[0] * barBeats;
+    /** @type {Timeline['notes']} */
     const notes = [];
     const indices = new Map(chosen.map((bar, index) => [bar, index]));
     for (const note of exercise.notes) {
-      // Scoring assigns source notes to bars using the written onset, while
-      // retaining the original MIDI beat for their actual expected timing.
-      const bar = Math.floor((note.notationBeat + 0.000001) / barBeats);
+      // Rust supplies the same written-onset bar membership used by scoring;
+      // the original MIDI beat still determines the actual expected timing.
+      const bar = note.sourceBar;
       const index = indices.get(bar);
       if (index !== undefined) notes.push(Object.freeze({ ...note, sequenceBeat: index * barBeats + note.beat - bar * barBeats }));
     }
@@ -114,6 +139,7 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     const limit = endBeat ?? origin + chosen.length * barBeats;
     if (!Number.isFinite(limit) || limit <= origin) throw new Error('Highway end beat must follow its origin');
     sequence = { bars: chosen, origin, endBeat: limit, notes };
+    return sequence;
   }
 
   try { renderer.initialize(); }
@@ -122,6 +148,7 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     throw error;
   }
   return Object.freeze({
+    /** @param {Exercise} source */
     setExercise(source) {
       assertActive();
       const unsupported = [...new Set(source.hits.map(hit => hit.instrument).filter(instrument => !instrumentLanes.has(instrument)))];
@@ -129,9 +156,9 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
       const barBeats = source.meter_numerator * 4 / source.meter_denominator;
       if (!Number.isFinite(barBeats) || barBeats <= 0 || !Number.isFinite(source.ticks_per_beat) || source.ticks_per_beat <= 0) throw new Error('Invalid exercise timing');
       const notes = source.hits.map(hit => {
-        if (!hit.id || !Number.isFinite(hit.beat) || hit.beat < 0) throw new Error('Invalid expected note');
+        if (!hit.id || !Number.isFinite(hit.beat) || hit.beat < 0 || !Number.isInteger(hit.source_bar) || hit.source_bar < 0) throw new Error('Invalid expected note');
         return Object.freeze({
-          id: hit.id, instrument: hit.instrument, lane: instrumentLanes.get(hit.instrument), articulation: hit.articulation ?? 'unspecified', beat: hit.beat, notationBeat: hit.notation_beat ?? hit.beat,
+          id: hit.id, instrument: hit.instrument, lane: instrumentLanes.get(hit.instrument) ?? '', articulation: hit.articulation ?? 'unspecified', beat: hit.beat, sourceBar: hit.source_bar,
           duration: hit.raw_duration_ticks == null ? null : hit.raw_duration_ticks / source.ticks_per_beat,
           hand: hit.hand, accent: Boolean(hit.accent), grace: Boolean(hit.grace),
         });
@@ -141,11 +168,16 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
       exercise = { barBeats, beatUnit: 4 / source.meter_denominator, barCount: Math.max(1, Math.ceil((lastBeat + 0.001) / barBeats)), notes };
       judgements = new Map();
       unmatched = [];
-      setSequence([], undefined);
-      position = sequence.origin;
+      position = setSequence([], undefined).origin;
       update();
     },
+    /** @param {number[]} bars
+     * @param {number} [endBeat]
+     */
     setTimeline(bars, endBeat) { assertActive(); if (!exercise) throw new Error('Exercise required'); setSequence(bars, endBeat); update(); },
+    /** @param {number} beat
+     * @param {number | null} [tempoBpm]
+     */
     setPosition(beat, tempoBpm = playback.tempoBpm) {
       assertActive();
       if (!Number.isFinite(beat)) throw new Error('Invalid playback position');
@@ -153,23 +185,34 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
       playback = Object.freeze({ ...playback, tempoBpm });
       update();
     },
+    /** @param {string} phase
+     * @param {number | null} tempoBpm
+     * @param {Omit<Playback, 'phase' | 'tempoBpm'>} [details]
+     */
     setPlayback(phase, tempoBpm, details = {}) { assertActive(); playback = Object.freeze({ ...details, phase, tempoBpm }); update(); },
     // The application must provide the matched repetition for early hits near
     // loop boundaries. This avoids colouring the same expected ID in every
     // visible repetition, without asking the renderer to match notes.
-    setJudgements(results, iteration = sequence ? Math.max(0, Math.floor((position - sequence.origin) / (sequence.bars.length * exercise.barBeats))) : 0) {
+    /** @param {Judgement[]} results
+     * @param {number} iteration
+     */
+    setJudgements(results, iteration = sequence && exercise ? Math.max(0, Math.floor((position - sequence.origin) / (sequence.bars.length * exercise.barBeats))) : 0) {
       assertActive();
+      if (!sequence || !exercise) throw new Error('Exercise required');
+      /** @type {Map<number, Map<string, string>>} */
       const next = new Map();
+      /** @type {typeof unmatched} */
       const nextUnmatched = [];
       for (const [index, result] of results.entries()) {
         const cycle = result.iteration ?? iteration;
         if (!Number.isInteger(cycle) || cycle < 0) throw new Error('Invalid judgement iteration');
         if (!result.expected_id) {
-          if (!Number.isFinite(result.actual_beat) || !['extra', 'wrong_instrument'].includes(result.judgement)) continue;
-          const sourceBar = Math.floor((result.actual_beat + EPSILON) / exercise.barBeats);
+          const actualBeat = result.actual_beat;
+          if (typeof actualBeat !== 'number' || !Number.isFinite(actualBeat) || !['extra', 'wrong_instrument'].includes(result.judgement)) continue;
+          const sourceBar = Math.floor((actualBeat + EPSILON) / exercise.barBeats);
           const selectedIndex = sequence.bars.indexOf(sourceBar);
           if (selectedIndex < 0) continue;
-          const offset = result.actual_beat - sourceBar * exercise.barBeats;
+          const offset = actualBeat - sourceBar * exercise.barBeats;
           nextUnmatched.push({
             id: result.event_id ?? `unmatched:${cycle}:${result.actual_beat}:${index}`,
             instrument: result.instrument,
@@ -180,18 +223,23 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
           });
           continue;
         }
-        if (!next.has(cycle)) next.set(cycle, new Map());
-        next.get(cycle).set(result.expected_id, result.judgement === 'on_time' ? result.excellent ? 'perfect' : 'good' : result.judgement);
+        let byCycle = next.get(cycle);
+        if (!byCycle) { byCycle = new Map(); next.set(cycle, byCycle); }
+        byCycle.set(result.expected_id, result.judgement === 'on_time' ? result.excellent ? 'perfect' : 'good' : result.judgement);
       }
       judgements = next;
       unmatched = nextUnmatched;
       update();
     },
+    /** @param {number} past
+     * @param {number} future
+     */
     setVisibleSpan(past, future) {
       assertActive();
       if (!Number.isFinite(past) || !Number.isFinite(future) || past < 0 || future <= 0) throw new Error('Invalid visible span');
       before = past; after = future; update();
     },
+    /** @param {import('./presentation-types.mjs').Viewport} viewport */
     resize(viewport) { assertActive(); renderer.resize(Object.freeze({ ...viewport })); },
     dispose() { if (disposed) return; disposed = true; renderer.dispose(); exercise = null; sequence = null; judgements.clear(); unmatched = []; },
   });
