@@ -70,8 +70,10 @@ test('Highway uses the transport position beneath a fixed centre playhead', asyn
   await page.getByRole('button', { name: /Resume/ }).click();
   await expect.poll(async () => (await measure()).note).toBeLessThan(paused.note);
   await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().transportBpm)).toBe(120);
-  const faster = await measure();
-  expect(Math.abs(faster.note - (faster.centre + (faster.expected - faster.beat) * faster.width / 10))).toBeLessThan(8);
+  await expect.poll(async () => {
+    const faster = await measure();
+    return Math.abs(faster.note - (faster.centre + (faster.expected - faster.beat) * faster.width / 10));
+  }).toBeLessThan(8);
 });
 
 test('Highway rests at the count-in position without jumping on start', async ({ page }) => {
