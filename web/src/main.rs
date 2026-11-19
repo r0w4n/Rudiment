@@ -3431,15 +3431,13 @@ fn App() -> impl IntoView {
                   <div class="summary-title-group"><span class="summary-icon" aria-hidden="true">"R"</span><div><h2 id="result-title">"Session Complete"</h2><p>{move || displayed_result.get().map(|session|format!("{} · {:.0} BPM",session.exercise_title,session.bpm)).unwrap_or_default()}</p></div></div>
                   <button id="result-modal-close" aria-label="Close session results" on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)><X size=21/></button>
                 </header>
-                <section class="summary-achievement">
-                  <div class=move || if displayed_result.get().is_some_and(|session|is_white_mastery(&session.summary)){"summary-stars mastery"}else{"summary-stars"} aria-label=move || displayed_result.get().map(|session|{let rating=performance_rating(&session.summary);if is_white_mastery(&session.summary){"Mastery, three white stars".into()}else{format!("{} of 3 gold stars",rating.stars)}}).unwrap_or_default()>{move || {let rating=displayed_result.get().map(|session|performance_rating(&session.summary)).unwrap_or(PerformanceRating{stars:0,award:PerformanceAward::None});(0..3).map(|index|view!{<Star size=38 fill=if index<rating.stars{"currentColor"}else{"none"}/>}).collect_view()}}</div>
-                  <h3>{move || displayed_result.get().map(|session|achievement_copy(&session.summary).0).unwrap_or("")}</h3>
-                  <p>{move || displayed_result.get().map(|session|achievement_copy(&session.summary).1).unwrap_or("")}</p>
-                </section>
                 <div class="summary-cards">
-                  <section class="summary-card score-summary-card">
+                  <section class="summary-card score-summary-card summary-achievement">
                     <h3>"Session Score"</h3>
                     <div class="summary-score"><strong>{move || display_score(displayed_result.get().and_then(|session|session.summary.score))}</strong><span>"/ 100"</span></div>
+                    <div class=move || if displayed_result.get().is_some_and(|session|is_white_mastery(&session.summary)){"summary-stars mastery"}else{"summary-stars"} aria-label=move || displayed_result.get().map(|session|{let rating=performance_rating(&session.summary);if is_white_mastery(&session.summary){"Mastery, three white stars".into()}else{format!("{} of 3 gold stars",rating.stars)}}).unwrap_or_default()>{move || {let rating=displayed_result.get().map(|session|performance_rating(&session.summary)).unwrap_or(PerformanceRating{stars:0,award:PerformanceAward::None});(0..3).map(|index|view!{<Star size=38 fill=if index<rating.stars{"currentColor"}else{"none"}/>}).collect_view()}}</div>
+                    <strong class="summary-classification">{move || displayed_result.get().map(|session|achievement_copy(&session.summary).0).unwrap_or("")}</strong>
+                    <p>{move || displayed_result.get().map(|session|achievement_copy(&session.summary).1).unwrap_or("")}</p>
                     <span class=move || if historical_result.get().is_none()&&displayed_result.get().is_some_and(|session|is_new_high_score(&session,&history.get())){"new-high-score"}else{"new-high-score hidden"}>"↗ New high score"</span>
                   </section>
                   <section class="summary-card breakdown-card">

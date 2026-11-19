@@ -920,9 +920,9 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await expect(resultDialog.locator('.progress-chart')).toBeVisible();
   await expect(resultDialog.locator('.progress-point')).toHaveCount(1);
   await expect(resultDialog.getByText(/Average offset|Mean absolute error|Timing variability|Focus for next time/i)).toHaveCount(0);
-  const resultModalLayout=await resultDialog.evaluate(element=>({clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,overflow:getComputedStyle(element).overflow}));
-  expect(resultModalLayout.scrollHeight).toBeLessThanOrEqual(resultModalLayout.clientHeight);
-  expect(resultModalLayout.overflow).toBe('hidden');
+  const resultModalLayout=await resultDialog.evaluate(element=>({clientWidth:element.clientWidth,scrollWidth:element.scrollWidth,overflow:getComputedStyle(element).overflow}));
+  expect(resultModalLayout.scrollWidth).toBeLessThanOrEqual(resultModalLayout.clientWidth);
+  expect(resultModalLayout.overflow).toBe('auto');
   const resultCloseChrome=await resultDialog.getByRole('button',{name:'Close session results'}).evaluate(element=>{const style=getComputedStyle(element);return {width:style.width,height:style.height,borderRadius:style.borderRadius,background:style.backgroundColor,borderColor:style.borderTopColor};});
   await expect(resultDialog.getByText('Single Paradiddle · 240 BPM', { exact:true })).toBeVisible();
   await expect(page.locator('.workspace')).toBeVisible();
@@ -936,30 +936,37 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   expect(overlayBounds.overlay.width).toBe(overlayBounds.viewport.width);
   expect(overlayBounds.overlay.height).toBe(overlayBounds.viewport.height);
   expect(overlayBounds.modal.width).toBeLessThan(overlayBounds.viewport.width);
-  expect(overlayBounds.modal.width).toBeLessThanOrEqual(900);
+  expect(overlayBounds.modal.width/overlayBounds.viewport.width).toBeGreaterThanOrEqual(.75);
+  expect(overlayBounds.modal.width).toBeLessThanOrEqual(1200);
+  const progressChartHeight=await resultDialog.locator('.progress-chart').evaluate(element=>element.getBoundingClientRect().height);
+  expect(progressChartHeight).toBeGreaterThanOrEqual(220);
+  expect(progressChartHeight).toBeLessThanOrEqual(260);
   await page.screenshot({ path: 'artifacts/completed-result.png', fullPage: true });
   await page.setViewportSize({width:412,height:915});
   const narrowResultLayout=await resultDialog.evaluate(element=>({clientWidth:element.clientWidth,scrollWidth:element.scrollWidth,clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,rect:element.getBoundingClientRect().toJSON()}));
   expect(narrowResultLayout.scrollWidth).toBeLessThanOrEqual(narrowResultLayout.clientWidth);
-  expect(narrowResultLayout.scrollHeight).toBeLessThanOrEqual(narrowResultLayout.clientHeight);
   expect(narrowResultLayout.rect.x).toBeGreaterThanOrEqual(5);
   expect(narrowResultLayout.rect.right).toBeLessThanOrEqual(407);
+  await resultDialog.locator('.summary-footer').scrollIntoViewIfNeeded();
   await expect(resultDialog.locator('.summary-footer')).toBeVisible();
   await page.setViewportSize({width:2168,height:522});
+  await resultDialog.locator('.summary-footer').scrollIntoViewIfNeeded();
   const shallowResultLayout=await resultDialog.evaluate(element=>{
     const modal=element.getBoundingClientRect();
     const actions=element.querySelector<HTMLElement>('.result-actions')!.getBoundingClientRect();
     return {
       clientHeight:element.clientHeight,
       scrollHeight:element.scrollHeight,
+      clientWidth:element.clientWidth,
+      scrollWidth:element.scrollWidth,
       actionsFit:actions.top>=modal.top&&actions.bottom<=modal.bottom,
     };
   });
-  expect(shallowResultLayout.scrollHeight).toBeLessThanOrEqual(shallowResultLayout.clientHeight);
+  expect(shallowResultLayout.scrollHeight).toBeGreaterThanOrEqual(shallowResultLayout.clientHeight);
+  expect(shallowResultLayout.scrollWidth).toBeLessThanOrEqual(shallowResultLayout.clientWidth);
   expect(shallowResultLayout.actionsFit).toBe(true);
   await page.setViewportSize({width:915,height:412});
   const landscapeResultLayout=await resultDialog.evaluate(element=>({clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,clientWidth:element.clientWidth,scrollWidth:element.scrollWidth}));
-  expect(landscapeResultLayout.scrollHeight).toBeLessThanOrEqual(landscapeResultLayout.clientHeight);
   expect(landscapeResultLayout.scrollWidth).toBeLessThanOrEqual(landscapeResultLayout.clientWidth);
   await page.setViewportSize({width:1440,height:900});
   const pageUrl=page.url();
