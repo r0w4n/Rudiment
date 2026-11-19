@@ -542,7 +542,7 @@ catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(
 
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
 let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
-let pendingScoreFeedback=[],pendingScoreFeedbackFrame=0;
+let pendingScoreFeedback=null,pendingScoreFeedbackFrame=0;
 let selectedBars=new Set();
 let scoreSelectionCallback=null;
 function applySelectedBarRange(){
@@ -998,8 +998,10 @@ function applyJudgements(judgements) {
 }
 function updateScore(beat, judgements, loopAware=false) {
   const profileStart=performanceProfile.enabled?performance.now():0;
+  const hasJudgements=Array.isArray(judgements);
+  if(hasJudgements)cancelQueuedScoreFeedback();
   const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
-  if(Array.isArray(judgements))applyJudgements(judgements);
+  if(hasJudgements)applyJudgements(judgements);
   const previousBeat=scoreData.lastBeat;
   const position=positionAtBeat(beat),playhead=svg.querySelector('#playhead');
   const rewound=beat>=0&&previousBeat>=0&&beat<previousBeat-.001;
@@ -1032,21 +1034,27 @@ function updateScore(beat, judgements, loopAware=false) {
   }
   performanceProfile.record('score_update_ms',performance.now()-profileStart);
 }
-function appendScoreJudgement(judgement){
-  pendingScoreFeedback.push(judgement);
+function cancelQueuedScoreFeedback(){
+  if(pendingScoreFeedbackFrame)cancelAnimationFrame(pendingScoreFeedbackFrame);
+  pendingScoreFeedbackFrame=0;pendingScoreFeedback=null;
+}
+function queueScoreFeedback(judgements){
+  if(!Array.isArray(judgements))return;
+  // A scoring update is a replacement projection, not an append-only event:
+  // a later hit may correct an earlier provisional match. Retain only the
+  // newest projection when several MIDI messages arrive in one browser turn.
+  pendingScoreFeedback=judgements;
   if(pendingScoreFeedbackFrame)return;
   pendingScoreFeedbackFrame=requestAnimationFrame(()=>{
     pendingScoreFeedbackFrame=0;
-    const known=new Set(scoreData.lastJudgements.map(item=>item.event_id).filter(Boolean));
-    const appended=pendingScoreFeedback.filter(item=>!item.event_id||!known.has(item.event_id));pendingScoreFeedback=[];
+    const pending=pendingScoreFeedback;pendingScoreFeedback=null;
     // Feedback may arrive between transport frames with an older Rust UI
     // progress value. Paint it without moving the transport-owned playhead.
-    if(appended.length&&scoreData.svg&&scoreData.notes.length)applyJudgements([...scoreData.lastJudgements,...appended]);
+    if(pending&&scoreData.svg&&scoreData.notes.length)applyJudgements(pending);
   });
 }
 function clearScoreFeedback(preserveViewport=false) {
-  if(pendingScoreFeedbackFrame)cancelAnimationFrame(pendingScoreFeedbackFrame);
-  pendingScoreFeedbackFrame=0;pendingScoreFeedback=[];
+  cancelQueuedScoreFeedback();
   const empty=[];
   for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
@@ -1147,7 +1155,7 @@ window.rudiment={
   bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,savedNotationTheme,saveNotationTheme,
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):0,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,appendScoreJudgement,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
+  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };

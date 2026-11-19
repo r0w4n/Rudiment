@@ -221,6 +221,8 @@ extern "C" {
     fn scroll_score_to_beat(beat: f64);
     #[wasm_bindgen(js_namespace = rudiment, js_name = updateScore)]
     fn update_score(beat: f64, judgements: JsValue);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = queueScoreFeedback)]
+    fn queue_score_feedback(judgements: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedback)]
     fn clear_score_feedback();
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedbackPreserveViewport)]
@@ -1093,20 +1095,37 @@ fn live_feedback_from_scoring(
 }
 
 fn merge_live_feedback(current: &mut Vec<LiveJudgement>, update: Vec<LiveJudgement>) {
-    // Every update carries the complete current provisional projection, so
-    // discard older provisional colours before applying corrections.
-    current.retain(|judgement| judgement.confirmed);
-    for judgement in update {
-        if judgement.expected_id.is_some() {
-            current.retain(|existing| {
-                existing.expected_id != judgement.expected_id
-                    || existing.iteration != judgement.iteration
-            });
-        } else if judgement.event_id.is_some() {
-            current.retain(|existing| existing.event_id != judgement.event_id);
-        }
-        current.push(judgement);
-    }
+    // Every update carries the complete current provisional projection. Keep
+    // only its final value for each key, then replace matching confirmed
+    // values in one pass. Repeated retain calls made a burst of provisional
+    // invalid strikes quadratic before any renderer work began.
+    let mut expected_keys = HashSet::new();
+    let mut event_keys = HashSet::new();
+    let mut replacement = update
+        .into_iter()
+        .rev()
+        .filter(|judgement| {
+            if let Some(expected_id) = &judgement.expected_id {
+                expected_keys.insert((expected_id.clone(), judgement.iteration))
+            } else if let Some(event_id) = &judgement.event_id {
+                event_keys.insert(event_id.clone())
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>();
+    replacement.reverse();
+    current.retain(|judgement| {
+        judgement.confirmed
+            && if let Some(expected_id) = &judgement.expected_id {
+                !expected_keys.contains(&(expected_id.clone(), judgement.iteration))
+            } else if let Some(event_id) = &judgement.event_id {
+                !event_keys.contains(event_id)
+            } else {
+                true
+            }
+    });
+    current.extend(replacement);
     // The scorer retains every confirmed invalid hit for the authoritative
     // summary. Only bound the visual projection: thousands of overlapping
     // unmatched markers are no longer readable and would make a long
@@ -2437,16 +2456,14 @@ fn App() -> impl IntoView {
                             judgement.iteration.is_none_or(|value| value == iteration)
                         });
                     }
-                    live.set(visible.clone());
-                    // Paint the authoritative projection in the input turn.
-                    // If a settings or navigation action pauses Tone before
-                    // its next frame, the accepted hit must not remain queued
-                    // in Rust state but absent from Notation.
                     let judgement_values =
                         serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
-                    let display_beat =
-                        sequence.display_beat(current_audio_beat().max(sequence.origin));
-                    update_score(display_beat, judgement_values);
+                    live.set(visible);
+                    // Keep the authoritative projection in Rust in this input
+                    // turn, but coalesce DOM work at the browser's next paint.
+                    // This queue is independent of Tone's transport frame, so
+                    // pausing immediately after a hit cannot strand feedback.
+                    queue_score_feedback(judgement_values);
                     feedback_dirty.set(false);
                 }
                 Err(error) => {
@@ -4446,6 +4463,64 @@ mod tests {
             unmatched.last().unwrap().event_id.as_deref(),
             Some("extra-299")
         );
+    }
+
+    #[test]
+    fn live_projection_merge_keeps_only_the_latest_value_for_each_key() {
+        let judgement = |expected_id: Option<&str>,
+                         iteration: Option<usize>,
+                         event_id: Option<&str>,
+                         judgement: Judgement,
+                         confirmed: bool| LiveJudgement {
+            expected_id: expected_id.map(str::to_string),
+            iteration,
+            expected_beat: expected_id.map(|_| 1.0),
+            actual_beat: Some(1.0),
+            instrument: Instrument::Snare,
+            judgement,
+            error_ms: 0.0,
+            excellent: judgement == Judgement::Perfect,
+            note_score: 0.0,
+            event_id: event_id.map(str::to_string),
+            confirmed,
+        };
+        let mut visible = vec![
+            judgement(
+                Some("expected"),
+                Some(0),
+                Some("old-expected"),
+                Judgement::Perfect,
+                true,
+            ),
+            judgement(None, None, Some("extra"), Judgement::Extra, true),
+            judgement(None, None, Some("stale"), Judgement::Extra, false),
+        ];
+        let update = vec![
+            judgement(
+                Some("expected"),
+                Some(0),
+                Some("first-expected"),
+                Judgement::Good,
+                false,
+            ),
+            judgement(
+                Some("expected"),
+                Some(0),
+                Some("latest-expected"),
+                Judgement::Late,
+                false,
+            ),
+            judgement(None, None, Some("extra"), Judgement::WrongInstrument, false),
+            judgement(None, None, Some("extra"), Judgement::Extra, false),
+        ];
+
+        merge_live_feedback(&mut visible, update);
+
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].event_id.as_deref(), Some("latest-expected"));
+        assert_eq!(visible[0].judgement, Judgement::Late);
+        assert_eq!(visible[1].event_id.as_deref(), Some("extra"));
+        assert_eq!(visible[1].judgement, Judgement::Extra);
     }
 
     #[test]
