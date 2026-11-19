@@ -300,6 +300,34 @@ test('visual metronome pulses from the audible transport clock and marks the dow
   await expect(page.locator('.visual-metronome-label')).toHaveText('READY');
 });
 
+test('pausing during count-in resumes the remaining count-in', async ({ page }) => {
+  await page.goto('/');
+  await setTempo(page, '240');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('2');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
+  await page.getByRole('button', { name: /Start practice/ }).click();
+
+  const currentBeat = () => page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat as number);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  await expect.poll(currentBeat).toBeGreaterThan(-7);
+  expect(await currentBeat()).toBeLessThan(-1);
+
+  await page.getByRole('button', { name: /Pause/ }).click();
+  const pausedBeat = await currentBeat();
+  await page.waitForTimeout(200);
+  expect(await currentBeat()).toBeCloseTo(pausedBeat, 2);
+
+  await page.getByRole('button', { name: 'Resume' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  const resumedBeat = await currentBeat();
+  expect(resumedBeat).toBeGreaterThanOrEqual(pausedBeat - 0.15);
+  expect(resumedBeat).toBeLessThan(pausedBeat + 0.5);
+  expect(resumedBeat).toBeLessThan(0);
+
+  await expect.poll(currentBeat).toBeGreaterThan(0);
+});
+
 test('sampled metronome uses the accented and regular recordings on the transport grid', async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__RUDIMENT_PERF__=true;

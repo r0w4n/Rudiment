@@ -26,7 +26,7 @@ use wasm_bindgen_futures::{JsFuture, spawn_local};
 type FrameCallback = Closure<dyn FnMut(f64, f64, f64)>;
 type DoneCallback = Closure<dyn FnMut()>;
 type CallbackSlot<T> = Rc<RefCell<Option<T>>>;
-type LaunchRun = Rc<dyn Fn(f64, u8, bool)>;
+type LaunchRun = Rc<dyn Fn(f64, f64, bool)>;
 type LaunchSlot = Rc<RefCell<Option<LaunchRun>>>;
 type StartRun = Rc<dyn Fn(u8)>;
 type StartSlot = CallbackSlot<StartRun>;
@@ -1835,12 +1835,13 @@ fn App() -> impl IntoView {
         let done_holder = done_holder.clone();
         let launch_holder = launch_holder.clone();
         let scoring_for_launch = scoring_engine.clone();
-        Rc::new(move |offset, count_bars, immediate| {
-            phase.set(if count_bars > 0 {
+        Rc::new(move |offset, count_beats, immediate| {
+            phase.set(if count_beats > 0.0 {
                 "count_in".into()
             } else {
                 "starting".into()
             });
+            progress.set(offset - count_beats);
             let current_exercise = exercise.get_untracked();
             let bar_beats = beats_per_bar(&current_exercise);
             let exercise_length = exercise_beats(&current_exercise);
@@ -1907,7 +1908,7 @@ fn App() -> impl IntoView {
             let final_effective_bpm =
                 final_source_bpm * bpm.get_untracked() / current_exercise.tempo_bpm.max(1.0);
             let scoring_tail_beats = SCORING_TAIL_MS * final_effective_bpm / 60_000.0;
-            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBars":count_bars,"meter":bar_beats,"exerciseBeats":exercise_length,"displayRangeStart":range_start,"displayRangeBeats":sequence.length(),"displayBars":sequence.bars,"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes,"scoringTailBeats":scoring_tail_beats})).unwrap_or(JsValue::NULL);
+            let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBeats":count_beats,"meter":bar_beats,"exerciseBeats":exercise_length,"displayRangeStart":range_start,"displayRangeBeats":sequence.length(),"displayBars":sequence.bars,"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes,"scoringTailBeats":scoring_tail_beats})).unwrap_or(JsValue::NULL);
             let origin_set = Rc::new(Cell::new(false));
             let tracking_started = Rc::new(Cell::new(false));
             let range_length = sequence.length();
@@ -2060,7 +2061,7 @@ fn App() -> impl IntoView {
                         clear_score_feedback_preserve_viewport();
                         let next = repeat_launch.borrow().as_ref().cloned();
                         if let Some(launch) = next {
-                            spawn_local(async move { launch(range_start, 0, true) });
+                            spawn_local(async move { launch(range_start, 0.0, true) });
                         }
                         return;
                     }
@@ -2115,7 +2116,7 @@ fn App() -> impl IntoView {
                         clear_score_feedback_preserve_viewport();
                         let next = repeat_launch.borrow().as_ref().cloned();
                         if let Some(launch) = next {
-                            spawn_local(async move { launch(segment_end, 0, true) });
+                            spawn_local(async move { launch(segment_end, 0.0, true) });
                         }
                     }
                 } else {
@@ -2128,7 +2129,7 @@ fn App() -> impl IntoView {
                     clear_score_feedback_preserve_viewport();
                     let next = repeat_launch.borrow().as_ref().cloned();
                     if let Some(launch) = next {
-                        spawn_local(async move { launch(segment_start, 0, true) });
+                        spawn_local(async move { launch(segment_start, 0.0, true) });
                     }
                 }
             }) as Box<dyn FnMut()>);
@@ -2156,13 +2157,14 @@ fn App() -> impl IntoView {
 
     let pause_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
-        let range_start = bar_sequence.get_untracked().origin;
-        let position = if phase.get_untracked() == "starting" {
+        let current_phase = phase.get_untracked();
+        let audio_position = current_audio_beat();
+        let position = if current_phase == "starting" || !audio_position.is_finite() {
             progress.get_untracked()
         } else {
-            current_audio_beat()
+            audio_position
         };
-        progress.set(position.max(range_start));
+        progress.set(position);
         if run_start_ms.get_untracked() > 0.0 {
             paused_run_start_ms.set(Some(run_start_ms.get_untracked()));
         }
@@ -2180,7 +2182,13 @@ fn App() -> impl IntoView {
                         start(count_in.get_untracked());
                     }
                 } else {
-                    launch(progress.get_untracked().max(0.0), 0, true);
+                    let position = progress.get_untracked();
+                    let segment_start = active_segment_start.get_untracked();
+                    if position < segment_start {
+                        launch(segment_start, segment_start - position, true);
+                    } else {
+                        launch(position.max(0.0), 0.0, true);
+                    }
                 }
             }
         })
@@ -2346,7 +2354,11 @@ fn App() -> impl IntoView {
             progress.set(-1.0);
             clear_score_feedback();
             scroll_score_to_beat(start_beat);
-            launch(start_beat, count_bars, false);
+            launch(
+                start_beat,
+                f64::from(count_bars) * beats_per_bar(&current_exercise),
+                false,
+            );
         })
     };
     *start_holder.borrow_mut() = Some(start_new_run.clone());
