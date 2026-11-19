@@ -1332,6 +1332,41 @@ fn focus_library_close() {
     }
 }
 
+fn focus_import_delete(hash: String) {
+    let callback = Closure::once_into_js(move || {
+        if let Some(button) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(&format!("delete-import-{hash}")))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = button.focus();
+        }
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = window.request_animation_frame(callback.unchecked_ref());
+    }
+}
+
+fn focus_import_delete_cancel() {
+    let callback = Closure::once_into_js(|| {
+        if let Some(button) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("import-delete-cancel"))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = button.focus();
+        }
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = window.request_animation_frame(callback.unchecked_ref());
+    }
+}
+
+fn dismiss_import_delete(pending_import_delete: RwSignal<Option<(String, String)>>, hash: String) {
+    pending_import_delete.set(None);
+    focus_import_delete(hash);
+}
+
 fn restore_settings_focus() {
     if let Some(button) = web_sys::window()
         .and_then(|window| window.document())
@@ -1563,6 +1598,7 @@ fn App() -> impl IntoView {
     let settings_open = RwSignal::new(false);
     let stats_open = RwSignal::new(false);
     let library_open = RwSignal::new(false);
+    let pending_import_delete = RwSignal::new(None::<(String, String)>);
     let library_personal = RwSignal::new(false);
     let library_page = RwSignal::new(0usize);
     let library_difficulty = RwSignal::new(None::<Difficulty>);
@@ -2340,6 +2376,7 @@ fn App() -> impl IntoView {
             }
             input_mode.set(source);
             if library_open.get_untracked() {
+                pending_import_delete.set(None);
                 library_open.set(false);
                 restore_library_focus();
                 return;
@@ -2482,6 +2519,7 @@ fn App() -> impl IntoView {
     let file_callback: Rc<MidiFileCallback> = Rc::new(Closure::wrap(Box::new(
         move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
             if library_open.get_untracked() {
+                pending_import_delete.set(None);
                 library_open.set(false);
                 restore_library_focus();
             }
@@ -3066,9 +3104,27 @@ fn App() -> impl IntoView {
             }
             return;
         }
+        if event.default_prevented() {
+            return;
+        }
+        if let Some((hash, _)) = pending_import_delete.get_untracked() {
+            match event.key().to_lowercase().as_str() {
+                "escape" => {
+                    event.prevent_default();
+                    event.stop_immediate_propagation();
+                    dismiss_import_delete(pending_import_delete, hash);
+                }
+                "tab" if !event.default_prevented() => {
+                    trap_dialog_tab(&event, "#import-delete-dialog");
+                }
+                _ => {}
+            }
+            return;
+        }
         if library_open.get_untracked() {
             if event.key() == "Escape" {
                 event.prevent_default();
+                pending_import_delete.set(None);
                 library_open.set(false);
                 restore_library_focus();
             } else if matches!(event.key().to_lowercase().as_str(), "j" | "r")
@@ -3251,6 +3307,7 @@ fn App() -> impl IntoView {
       <main class="app">
         <header class="topbar">
           <button id="midi-library-trigger" class="stats-trigger library-topbar-trigger" aria-label=move || format!("MIDI library · {} exercises",saved_imports.get().len()+BUILTIN_RUDIMENTS.len()) title=move || format!("MIDI library · {} exercises",saved_imports.get().len()+BUILTIN_RUDIMENTS.len()) aria-haspopup="dialog" aria-expanded=move || library_open.get().to_string() on:click=move |_|{
+            pending_import_delete.set(None);
             library_personal.set(false);
             library_page.set(0);
             library_open.set(true);
@@ -3374,10 +3431,10 @@ fn App() -> impl IntoView {
             </section>
           </section>
 
-            <div class=move || if library_open.get(){"stats-backdrop library-backdrop"}else{"stats-backdrop library-backdrop hidden"} on:click=move |_|{library_open.set(false);restore_library_focus();}>
-              <section id="midi-library-dialog" class="stats-modal library-modal" role="dialog" aria-modal="true" aria-labelledby="midi-library-title" on:click=|event|event.stop_propagation() on:keydown=move |event:web_sys::KeyboardEvent|{
+            <div class=move || if library_open.get(){"stats-backdrop library-backdrop"}else{"stats-backdrop library-backdrop hidden"} on:click=move |_|{pending_import_delete.set(None);library_open.set(false);restore_library_focus();}>
+              <section id="midi-library-dialog" class="stats-modal library-modal" role="dialog" aria-modal="true" aria-labelledby="midi-library-title" inert=move || pending_import_delete.get().is_some() on:click=|event|event.stop_propagation() on:keydown=move |event:web_sys::KeyboardEvent|{
                 match event.key().as_str(){
-                  "Escape"=>{event.prevent_default();event.stop_propagation();library_open.set(false);restore_library_focus();},
+                  "Escape"=>{event.prevent_default();event.stop_propagation();pending_import_delete.set(None);library_open.set(false);restore_library_focus();},
                   "Tab"=>trap_dialog_tab(&event,"#midi-library-dialog"),
                   "j"|"J"|"r"|"R"=>{event.prevent_default();event.stop_propagation();},
                   " " if !keyboard_targets_control(&event)=>{event.prevent_default();event.stop_propagation();},
@@ -3386,7 +3443,7 @@ fn App() -> impl IntoView {
               }>
                 <div class="stats-modal-header library-modal-header">
                   <div><span class="eyebrow">"EXERCISES"</span><h2 id="midi-library-title">"MIDI library"</h2><p>{move || format!("{} built-in · {} personal",BUILTIN_RUDIMENTS.len(),saved_imports.get().len())}</p></div>
-                  <button id="midi-library-close" aria-label="Close MIDI library" on:click=move |_|{library_open.set(false);restore_library_focus();}><X size=20/></button>
+                  <button id="midi-library-close" aria-label="Close MIDI library" on:click=move |_|{pending_import_delete.set(None);library_open.set(false);restore_library_focus();}><X size=20/></button>
                 </div>
                 <div class="library-actions">
                   <button class="primary" on:click={let callback=choose_cb.clone();let stop=stop_for_import.clone();move |_|{
@@ -3428,25 +3485,10 @@ fn App() -> impl IntoView {
                                 }
                               });
                             }><strong>{display_name}</strong><small>"Saved on this device"</small></button>
-                            <button class="library-delete" aria-label=format!("Delete {delete_name}") on:click=move |_|{
-                              let confirmed=web_sys::window().and_then(|window|window.confirm_with_message(&format!("Delete {} from the local MIDI library?",delete_name)).ok()).unwrap_or(false);
-                              if confirmed{
-                                let hash=delete_hash.clone();
-                                spawn_local(async move{
-                                  match JsFuture::from(delete_import(&hash)).await{
-                                    Ok(_)=>{
-                                      saved_imports.update(|items|items.retain(|item|item.hash!=hash));
-                                      if selected_import.get_untracked().as_deref()==Some(hash.as_str()){
-                                        selected_import.set(None);
-                                        if let Err(error)=JsFuture::from(save_last_import(JsValue::NULL)).await{
-                                          import_error.set(Some(format!("File deleted, but the last-selection setting could not be updated: {}",error.as_string().unwrap_or_else(||format!("{error:?}")))));
-                                        }
-                                      }
-                                    }
-                                    Err(error)=>import_error.set(Some(format!("Could not delete saved MIDI file: {}",error.as_string().unwrap_or_else(||format!("{error:?}"))))),
-                                  }
-                                });
-                              }
+                            <button id=format!("delete-import-{delete_hash}") class="library-delete" aria-label=format!("Delete {delete_name}") on:click=move |event:web_sys::MouseEvent|{
+                              event.stop_propagation();
+                              pending_import_delete.set(Some((delete_hash.clone(),delete_name.clone())));
+                              focus_import_delete_cancel();
                             }>"Delete"</button>
                           </article>
                         }
@@ -3476,6 +3518,48 @@ fn App() -> impl IntoView {
                   <button aria-label="Next library page" disabled=move || {let count=if library_personal.get(){saved_imports.get().len()}else{builtin_count(library_difficulty.get())};library_page.get()+1>=count.div_ceil(LIBRARY_PAGE_SIZE).max(1)} on:click=move |_|{let count=if library_personal.get_untracked(){saved_imports.get_untracked().len()}else{builtin_count(library_difficulty.get_untracked())};let pages=count.div_ceil(LIBRARY_PAGE_SIZE).max(1);library_page.update(|page|*page=(*page+1).min(pages-1));}>"Next"<ArrowRight size=13/></button>
                 </div>
               </section>
+              {move || pending_import_delete.get().map(|(hash,name)|{
+                let backdrop_hash=hash.clone();
+                let cancel_hash=hash.clone();
+                let confirm_hash=hash.clone();
+                view!{
+                  <div class="delete-confirm-backdrop" on:click=move |event:web_sys::MouseEvent|{event.stop_propagation();dismiss_import_delete(pending_import_delete,backdrop_hash.clone());}>
+                    <section id="import-delete-dialog" class="delete-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="import-delete-title" aria-describedby="import-delete-description" on:click=|event|event.stop_propagation() on:keydown=move |event:web_sys::KeyboardEvent|{
+                      if event.key()=="Tab"{
+                        trap_dialog_tab(&event,"#import-delete-dialog");
+                        event.stop_propagation();
+                      }
+                    }>
+                      <span class="eyebrow">"REMOVE IMPORT"</span>
+                      <h2 id="import-delete-title">"Delete MIDI file?"</h2>
+                      <p id="import-delete-description">{format!("“{name}” will be permanently removed from the MIDI library on this browser.")}</p>
+                      <div class="delete-confirm-actions">
+                        <button id="import-delete-cancel" on:click=move |event:web_sys::MouseEvent|{event.stop_propagation();dismiss_import_delete(pending_import_delete,cancel_hash.clone());}>"Cancel"</button>
+                        <button class="delete-confirm-danger" on:click=move |event:web_sys::MouseEvent|{
+                          event.stop_propagation();
+                          pending_import_delete.set(None);
+                          focus_library_close();
+                          let hash=confirm_hash.clone();
+                          spawn_local(async move{
+                            match JsFuture::from(delete_import(&hash)).await{
+                              Ok(_)=>{
+                                saved_imports.update(|items|items.retain(|item|item.hash!=hash));
+                                if selected_import.get_untracked().as_deref()==Some(hash.as_str()){
+                                  selected_import.set(None);
+                                  if let Err(error)=JsFuture::from(save_last_import(JsValue::NULL)).await{
+                                    import_error.set(Some(format!("File deleted, but the last-selection setting could not be updated: {}",error.as_string().unwrap_or_else(||format!("{error:?}")))));
+                                  }
+                                }
+                              }
+                              Err(error)=>import_error.set(Some(format!("Could not delete saved MIDI file: {}",error.as_string().unwrap_or_else(||format!("{error:?}"))))),
+                            }
+                          });
+                        }>"Delete file"</button>
+                      </div>
+                    </section>
+                  </div>
+                }
+              })}
             </div>
 
         {move || if stats_open.get(){

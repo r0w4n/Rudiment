@@ -239,6 +239,30 @@ test('library, settings, and statistics dialogs pass axe and manage focus', asyn
   }
 });
 
+test('library delete confirmation passes axe and restores focus on cancel', async ({ page }) => {
+  await page.goto('/');
+  const libraryTrigger = page.locator('#midi-library-trigger');
+  const library = page.getByRole('dialog', { name: 'MIDI library' });
+  const chooserPromise = page.waitForEvent('filechooser');
+  await libraryTrigger.click();
+  await library.getByRole('button', { name: 'Import MIDI' }).click();
+  await (await chooserPromise).setFiles('web/public/exercises/quarter-note-reference.mid');
+  await expect(library).toBeHidden();
+
+  await libraryTrigger.click();
+  await library.getByRole('tab', { name: /Your imports/ }).click();
+  const deleteButton = library.getByRole('button', { name: 'Delete quarter-note-reference.mid' });
+  await deleteButton.click();
+
+  const confirmation = page.getByRole('alertdialog', { name: 'Delete MIDI file?' });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await expectNoWcagViolations(page, 'Library delete confirmation');
+  await page.keyboard.press('Escape');
+  await expect(confirmation).toBeHidden();
+  await expect(deleteButton).toBeFocused();
+});
+
 test('contextual metronome and bar controls pass axe and restore focus', async ({ page }) => {
   await page.goto('/');
   for (const [triggerSelector, dialogName] of [
