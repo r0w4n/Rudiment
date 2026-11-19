@@ -37,10 +37,11 @@ the transport. The renderer is not passed playback or scoring controls.
 
 The default configuration has kick, snare and hi-hat lanes. Closed, pedal and
 open hi-hat events share the hi-hat lane while retaining their articulation.
-Mounting against other unsupported instruments still fails explicitly. If a
-later exercise is unsupported, the optional renderer is detached. Additional
-lanes require configuration and rendering support, not another MIDI parser or
-clock.
+Unsupported live strikes use a transient OTHER lane rather than appearing in
+the kick lane. Mounting against other unsupported instruments still fails
+explicitly. If a later exercise is unsupported, the optional renderer is
+detached. Additional lanes require configuration and rendering support, not
+another MIDI parser or clock.
 
 The built-in SVG Highway mounts only when selected and uses the existing host.
 It draws bounded, keyed note and grid elements under a fixed centred playhead;

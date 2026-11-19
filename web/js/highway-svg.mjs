@@ -10,7 +10,8 @@ export function createHighwaySvg(viewport, record = null) {
   const noteNodes = new Map(), strikeNodes = new Map(), gridNodes = new Map();
 
   function laneCentre(lane, presentation) {
-    const index = Math.max(0, presentation.lanes.findIndex(item => item.instrument === lane));
+    const index = presentation.lanes.findIndex(item => item.instrument === lane);
+    if (index < 0) throw new Error(`Missing highway lane: ${lane}`);
     return (index + .5) * height / Math.max(1, presentation.lanes.length);
   }
 
@@ -18,6 +19,10 @@ export function createHighwaySvg(viewport, record = null) {
     const signature = `${width}:${height}:${presentation.lanes.map(lane => `${lane.instrument}:${lane.label}`).join('|')}`;
     if (signature === laneSignature) return;
     laneSignature = signature;
+    // A transient OTHER lane changes every note's vertical position.
+    for (const node of noteNodes.values()) node.remove();
+    for (const node of strikeNodes.values()) node.remove();
+    noteNodes.clear(); strikeNodes.clear();
     laneLayer.replaceChildren();
     const laneHeight = height / Math.max(1, presentation.lanes.length);
     presentation.lanes.forEach((lane, index) => {

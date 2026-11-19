@@ -76,6 +76,17 @@ test('maps kick, snare and both hi-hat articulations onto configured lanes', () 
   assert.deepEqual(latest().lanes.map(lane => lane.label), ['KICK', 'SNARE', 'HI-HAT']);
 });
 
+test('shows unsupported live strikes in a separate lane without accepting unsupported exercises', () => {
+  const { controller, latest } = setup();
+  controller.setExercise(exercise());
+  controller.setJudgements([{ expected_id: null, event_id: 'ride-hit', actual_beat: 0.5, iteration: 0, instrument: 'ride', judgement: 'wrong_instrument' }]);
+  assert.equal(latest().unmatched[0].lane, 'other');
+  assert.deepEqual(latest().lanes.map(lane => lane.instrument), ['kick', 'snare', 'hi_hat', 'other']);
+  controller.setJudgements([]);
+  assert.deepEqual(latest().lanes.map(lane => lane.instrument), ['kick', 'snare', 'hi_hat']);
+  assert.throws(() => controller.setExercise({ ...exercise(), hits: [{ id: 'ride', beat: 0, instrument: 'ride' }] }), /ride/);
+});
+
 test('rejects unsupported instruments without replacing the active model', () => {
   const { controller, latest } = setup();
   controller.setExercise(exercise());

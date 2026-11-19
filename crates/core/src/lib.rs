@@ -389,7 +389,7 @@ pub fn parse_midi(
     }
 
     let mut tempo_events = BTreeMap::new();
-    let mut meter = (4u8, 4u8);
+    let mut meter_events = BTreeMap::new();
     let mut names = vec![];
     let mut candidates: Vec<Vec<RawMidiNote>> = vec![];
     let mut lyrics_by_track: Vec<BTreeMap<u64, Vec<String>>> = vec![];
@@ -418,7 +418,7 @@ pub fn parse_midi(
                     if n == 0 || d > 7 {
                         invalid_meter = true;
                     } else {
-                        meter = (n, 2u8.pow(d as u32));
+                        meter_events.entry(tick).or_insert((n, 2u8.pow(d as u32)));
                     }
                 }
                 TrackEventKind::Meta(MetaMessage::Lyric(raw))
@@ -475,6 +475,7 @@ pub fn parse_midi(
     if invalid_meter {
         return Err(MidiError::InvalidMeter);
     }
+    let meter = meter_events.values().next().copied().unwrap_or((4, 4));
     // Format-0 files place every channel in one physical track. When that
     // track contains channel 10 percussion, melodic channels are accompaniment
     // rather than additional drum instruments and must not enter notation or
@@ -539,6 +540,12 @@ pub fn parse_midi(
         return Err(MidiError::NoNotes);
     }
     let mut warnings = vec![];
+    if meter_events.values().any(|signature| *signature != meter) {
+        warnings.push(
+            "MIDI time signature changes are not supported; using the first signature throughout."
+                .into(),
+        );
+    }
     if playable_tracks.len() > 1 && selected_track.is_none() {
         warnings.push(format!(
             "Multiple note tracks found; selected ‘{}’. Choose another track if needed.",
@@ -2475,6 +2482,58 @@ mod tests {
         );
         let other = parse_midi(&bytes, "parallel.mid", Some(2)).unwrap();
         assert_eq!(other.selected_track, 2);
+    }
+    #[test]
+    fn imported_meter_uses_first_chronological_signature_and_warns_on_changes() {
+        use midly::{
+            Header, TrackEvent,
+            num::{u4, u7, u28},
+        };
+        let conductor = vec![
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::TimeSignature(4, 2, 24, 8)),
+            },
+            TrackEvent {
+                delta: u28::new(960),
+                kind: TrackEventKind::Meta(MetaMessage::TimeSignature(3, 2, 24, 8)),
+            },
+        ];
+        // This track comes after the conductor in file order, but its meter
+        // event is earlier than the conductor's later change.
+        let drums = vec![
+            TrackEvent {
+                delta: u28::new(0),
+                kind: TrackEventKind::Midi {
+                    channel: u4::new(9),
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(38),
+                        vel: u7::new(100),
+                    },
+                },
+            },
+            TrackEvent {
+                delta: u28::new(480),
+                kind: TrackEventKind::Meta(MetaMessage::TimeSignature(6, 3, 24, 8)),
+            },
+        ];
+        let smf = Smf {
+            header: Header::new(Format::Parallel, Timing::Metrical(480.into())),
+            tracks: vec![conductor, drums],
+        };
+        let mut bytes = Vec::new();
+        smf.write_std(&mut bytes).unwrap();
+        let exercise = parse_midi(&bytes, "changing-meter.mid", None).unwrap();
+        assert_eq!(
+            (exercise.meter_numerator, exercise.meter_denominator),
+            (4, 4)
+        );
+        assert!(
+            exercise
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("time signature changes"))
+        );
     }
     #[test]
     fn format_zero_with_channel_ten_ignores_melodic_channels() {

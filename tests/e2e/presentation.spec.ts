@@ -284,6 +284,45 @@ test('unsupported instruments are announced and a later snare exercise remounts'
   await expect(page.locator('#highway svg')).toBeVisible();
 });
 
+test('a ride strike against snare notes appears in OTHER, not the kick lane', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Highway', exact: true }).click();
+  await page.evaluate(() => (window as any).rudiment.presentationJudgements([
+    { expected_id: null, event_id: 'ride-hit', actual_beat: 0.5, iteration: 0, instrument: 'ride', judgement: 'wrong_instrument' },
+  ]));
+  await expect(page.locator('.highway-lane[data-lane="other"]')).toBeVisible();
+  const marker = page.locator('.highway-unmatched-hit[data-event-id="ride-hit"]');
+  await expect(marker).toBeVisible();
+  const other = await page.locator('.highway-lane[data-lane="other"]').boundingBox();
+  const kick = await page.locator('.highway-lane[data-lane="kick"]').boundingBox();
+  const hit = await marker.boundingBox();
+  expect(hit!.y + hit!.height / 2).toBeGreaterThan(other!.y);
+  expect(hit!.y + hit!.height / 2).toBeLessThan(other!.y + other!.height);
+  expect(hit!.y).toBeGreaterThan(kick!.y + kick!.height);
+  await page.evaluate(() => (window as any).rudiment.presentationJudgements([]));
+  await expect(page.locator('.highway-lane[data-lane="other"]')).toHaveCount(0);
+});
+
+test('a late earlier MIDI download cannot replace the most recently selected exercise', async ({ page }) => {
+  const track = [0, 0x99, 36, 100, 0, 0xff, 0x2f, 0];
+  const midi = Buffer.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 1, 0xe0, 0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, track.length, ...track]);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/slow-exercise.mid', async route => {
+    await blocked;
+    await route.fulfill({ status: 200, body: midi, contentType: 'audio/midi' });
+  });
+  await page.goto('/');
+  const request = page.waitForRequest('**/slow-exercise.mid');
+  await page.evaluate(() => { (window as any).__slowMidiLoad = (window as any).rudiment.loadBundledFromLibrary('slow-exercise.mid', 'Older exercise'); });
+  await request;
+  await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('public/exercises/rudiments/06_single_paradiddle.mid', 'Newer exercise'));
+  await expect(page.locator('.exercise-heading strong')).toHaveText('Newer exercise');
+  release();
+  await page.evaluate(() => (window as any).__slowMidiLoad);
+  await expect(page.locator('.exercise-heading strong')).toHaveText('Newer exercise');
+});
+
 test('Highway renders simultaneous kit notes in kick, snare and hi-hat lanes', async ({ page }) => {
   const track = [
     0, 0x99, 36, 100,

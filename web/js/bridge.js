@@ -19,7 +19,8 @@ const dbPromise = openDB(DB_NAME, DB_VERSION, {
     if (!db.objectStoreNames.contains('profiles')) db.createObjectStore('profiles', { keyPath: 'id' });
   }
 });
-async function loadSavedImport(hash){const item=await (await dbPromise).get('imports',hash);if(!item)throw new Error('This MIDI file is no longer in the local library.');if(!midiFileCallback)throw new Error('MIDI import is not ready yet.');midiFileCallback(new Uint8Array(item.bytes),item.name,'');}
+let midiLoadGeneration=0;
+async function loadSavedImport(hash){const generation=++midiLoadGeneration;try{const item=await (await dbPromise).get('imports',hash);if(generation!==midiLoadGeneration)return;if(!item)throw new Error('This MIDI file is no longer in the local library.');if(!midiFileCallback)throw new Error('MIDI import is not ready yet.');midiFileCallback(new Uint8Array(item.bytes),item.name,'');}catch(error){if(generation===midiLoadGeneration)throw error;}}
 async function saveLastImport(hash){const db=await dbPromise,current=await db.get('settings','app');await db.put('settings',{key:'app',value:{...(current?.value||{}),lastImportHash:hash||null}});}
 const put = async (store, value) => (await dbPromise).put(store, value);
 const all = async store => (await dbPromise).getAll(store);
@@ -1123,9 +1124,9 @@ async function connectMidi(callback) {
 async function autoConnectMidi(callback){midiCallback=callback;if(!navigator.requestMIDIAccess){sendMidiState({permission:'unsupported'});return;}await connectMidi(callback);}
 function selectMidi(id){selectedInput=connectedMidiInputs().find(input=>input.id===id)||null;rememberMidiInput(selectedInput);sendMidiState({permission:'granted'});}
 
-async function readFile(file,callback,maxFileBytes){if(!file)return;if(file.size>maxFileBytes){callback(new Uint8Array(),file.name,`Files larger than ${maxFileBytes/1024/1024} MB are not supported.`);return;}try{callback(new Uint8Array(await file.arrayBuffer()),file.name,'');}catch(error){callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
+async function readFile(file,callback,maxFileBytes){if(!file)return;const generation=++midiLoadGeneration;if(file.size>maxFileBytes){callback(new Uint8Array(),file.name,`Files larger than ${maxFileBytes/1024/1024} MB are not supported.`);return;}try{const bytes=await file.arrayBuffer();if(generation===midiLoadGeneration)callback(new Uint8Array(bytes),file.name,'');}catch(error){if(generation===midiLoadGeneration)callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
 function chooseMidi(callback,maxFileBytes){midiFileCallback=callback;const input=document.createElement('input');input.type='file';input.accept='.mid,.midi,audio/midi';input.onchange=()=>readFile(input.files?.[0],callback,maxFileBytes);input.click();}
-async function loadBundled(url,callback,saveToLibrary=false,displayName=''){try{const response=await fetch(url);if(!response.ok)throw new Error(`HTTP ${response.status}`);callback(new Uint8Array(await response.arrayBuffer()),displayName||url.split('/').pop(),'',saveToLibrary);}catch(error){callback(new Uint8Array(),displayName||url,error?.message||'Could not load bundled exercise.');}}
+async function loadBundled(url,callback,saveToLibrary=false,displayName=''){const generation=++midiLoadGeneration;try{const response=await fetch(url);if(!response.ok)throw new Error(`HTTP ${response.status}`);const bytes=await response.arrayBuffer();if(generation===midiLoadGeneration)callback(new Uint8Array(bytes),displayName||url.split('/').pop(),'',saveToLibrary);}catch(error){if(generation===midiLoadGeneration)callback(new Uint8Array(),displayName||url,error?.message||'Could not load bundled exercise.');}}
 async function loadBundledFromLibrary(url,displayName=''){if(!midiFileCallback)return;return loadBundled(url,midiFileCallback,false,displayName);}
 let dropController;
 let midiFileCallback;

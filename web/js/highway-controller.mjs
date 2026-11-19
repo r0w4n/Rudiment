@@ -6,6 +6,7 @@ export const DEFAULT_HIGHWAY_LANES = Object.freeze([
   Object.freeze({ instrument: 'snare', label: 'SNARE', instruments: Object.freeze(['snare']) }),
   Object.freeze({ instrument: 'hi_hat', label: 'HI-HAT', instruments: Object.freeze(['closed_hat', 'open_hat', 'pedal_hat']) }),
 ]);
+const OTHER_LANE = Object.freeze({ instrument: 'other', label: 'OTHER', instruments: Object.freeze([]) });
 
 function lowerBound(notes, beat) {
   let low = 0;
@@ -50,6 +51,9 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     const end = position + after;
     const notes = [];
     const boundaries = [];
+    const visibleUnmatched = unmatched.filter(hit => hit.position >= start - EPSILON && hit.position <= end + EPSILON).map(hit => Object.freeze({ ...hit }));
+    const visibleLanes = visibleUnmatched.some(hit => hit.lane === 'other' && !configuredLanes.some(lane => lane.instrument === 'other'))
+      ? [...configuredLanes, OTHER_LANE] : configuredLanes;
     const length = sequence.bars.length * exercise.barBeats;
     const firstCycle = Math.max(0, Math.floor((start - sequence.origin) / length));
     const lastCycle = Math.max(-1, Math.floor((end - sequence.origin) / length));
@@ -78,10 +82,10 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
       }
     }
     renderer.update(Object.freeze({
-      lanes: Object.freeze(configuredLanes.slice()),
+      lanes: Object.freeze(visibleLanes.slice()),
       notes: Object.freeze(notes),
       boundaries: Object.freeze(boundaries),
-      unmatched: Object.freeze(unmatched.filter(hit => hit.position >= start - EPSILON && hit.position <= end + EPSILON).map(hit => Object.freeze({ ...hit }))),
+      unmatched: Object.freeze(visibleUnmatched),
       position,
       playback,
       timeline: Object.freeze({ bars: Object.freeze(sequence.bars.slice()), origin: sequence.origin, endBeat: sequence.endBeat, iteration: Math.max(0, Math.floor((position - sequence.origin) / length)) }),
@@ -169,7 +173,7 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
           nextUnmatched.push({
             id: result.event_id ?? `unmatched:${cycle}:${result.actual_beat}:${index}`,
             instrument: result.instrument,
-            lane: instrumentLanes.get(result.instrument),
+            lane: instrumentLanes.get(result.instrument) ?? 'other',
             judgement: result.judgement,
             iteration: cycle,
             position: sequence.origin + cycle * sequence.bars.length * exercise.barBeats + selectedIndex * exercise.barBeats + offset,
