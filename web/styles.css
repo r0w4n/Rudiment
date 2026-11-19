@@ -228,9 +228,10 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
   .bar-selection-popover{bottom:calc(100% + 5px);max-height:calc(100dvh - 75px);overflow:auto}
 }
 
-/* Session summary uses the available viewport while keeping the existing
-   library-style modal chrome and allowing short screens to scroll naturally. */
-.results-modal{width:min(78vw,1180px);max-height:85vh;max-height:85dvh;padding:26px 30px 22px;display:grid;gap:20px;border:1px solid #34443d;border-radius:22px;background:#121915;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;box-shadow:0 30px 90px #0008}
+/* Keep the header and actions in view; only the middle scrolls on short screens. */
+.results-modal{width:min(78vw,1180px);max-height:calc(100dvh - 32px);padding:20px 30px;display:flex;flex-direction:column;gap:14px;border:1px solid #34443d;border-radius:22px;background:#121915;overflow:hidden;box-shadow:0 30px 90px #0008}
+.summary-content{min-height:0;overflow-y:auto;overscroll-behavior:contain;display:grid;align-content:start;gap:14px}
+.summary-header,.summary-footer{flex:none}
 .summary-header{display:flex;align-items:center;justify-content:space-between;gap:18px}
 .summary-title-group{display:flex;align-items:center;min-width:0;gap:14px}
 .summary-icon{width:48px;height:48px;flex:none;display:grid;place-items:center;border:1px solid #3a4a43;border-radius:50%;background:#1d2823;color:#86d7c4;font:800 17px Manrope,sans-serif}
@@ -241,18 +242,18 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .summary-cards{display:grid;grid-template-columns:minmax(300px,.9fr) minmax(440px,1.1fr);gap:20px}
 .summary-card{min-width:0;border:1px solid #304039;border-radius:16px;background:#151e1a}
 .summary-card>h3{margin:0;color:#b7c3bd;font:800 13px Manrope,sans-serif}
-.score-summary-card{min-height:224px;padding:22px 24px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
-.summary-score{display:flex;align-items:baseline;gap:8px;margin-top:8px}
-.summary-score strong{font:700 68px Georgia,serif;line-height:.9;color:#f3f5f3;font-variant-numeric:tabular-nums}
+.score-summary-card{padding:16px 20px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.summary-score{display:flex;align-items:baseline;gap:8px;margin-top:6px}
+.summary-score strong{font:700 64px Georgia,serif;line-height:.9;color:#f3f5f3;font-variant-numeric:tabular-nums}
 .summary-score span{color:#8b9992;font:600 18px Manrope,sans-serif}
-.summary-stars{display:flex;gap:12px;margin-top:14px;color:#f6bd51}
+.summary-stars{display:flex;gap:12px;margin-top:8px;color:#f6bd51}
 .summary-stars.mastery{color:#f4f6f5}
-.summary-stars svg{width:42px;height:42px;filter:none}
-.summary-classification{margin-top:8px;color:#eef2ef;font:800 22px Manrope,sans-serif}
+.summary-stars svg{width:38px;height:38px;filter:none}
+.summary-classification{margin-top:6px;color:#eef2ef;font:800 20px Manrope,sans-serif}
 .summary-achievement>p{margin:3px 0 0;color:#8f9d96;font-size:12px;line-height:1.45}
-.new-high-score{display:inline-flex;align-items:center;margin-top:12px;padding:6px 10px;border:1px solid #25745f;border-radius:8px;background:#153a30;color:#70dfc4;font:800 10px Manrope,sans-serif}
-.breakdown-card{min-height:224px;padding:22px 24px}
-.breakdown-list{display:grid;gap:12px;margin-top:18px}
+.new-high-score{display:inline-flex;align-items:center;margin-top:8px;padding:6px 10px;border:1px solid #25745f;border-radius:8px;background:#153a30;color:#70dfc4;font:800 10px Manrope,sans-serif}
+.breakdown-card{padding:16px 20px}
+.breakdown-list{display:grid;gap:7px;margin-top:10px}
 .breakdown-row{display:grid;grid-template-columns:96px 72px minmax(90px,1fr) 42px;align-items:center;gap:10px;min-height:22px}
 .breakdown-row>span{display:flex;align-items:center;gap:9px;color:#d8dfdb;font-size:12px;font-weight:650}
 .breakdown-row>span i{width:10px;height:10px;flex:none;border-radius:50%;background:currentColor;box-shadow:0 0 7px currentColor}
@@ -262,9 +263,9 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .breakdown-row>em i{display:block;height:100%;border-radius:inherit;background:currentColor}
 .breakdown-row.perfect{color:var(--feedback-perfect)}.breakdown-row.good{color:var(--feedback-good)}.breakdown-row.early{color:var(--feedback-early)}.breakdown-row.late{color:var(--feedback-late)}.breakdown-row.missed{color:var(--feedback-missed-chart)}
 .breakdown-row.perfect>span i{background:var(--feedback-perfect)}.breakdown-row.good>span i{background:var(--feedback-good)}.breakdown-row.early>span i{background:var(--feedback-early)}.breakdown-row.late>span i{background:var(--feedback-late)}.breakdown-row.missed>span i{background:var(--feedback-missed-chart)}
-.progress-card{padding:20px 24px 14px}
+.progress-card{padding:14px 20px 10px}
 .progress-card>p{margin:5px 0 4px;color:#829089;font-size:11px}
-.progress-chart{display:block;width:100%;height:240px;overflow:visible}
+.progress-chart{display:block;width:100%;height:170px;overflow:visible}
 .progress-grid line{stroke:#2a3932;stroke-width:1}.progress-grid text{fill:#78877f;font:9px Manrope,sans-serif;text-anchor:end}
 .progress-line{fill:none;stroke:#55d8b8;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
 .progress-point{fill:#55d8b8}.progress-point.latest{stroke:#d8fff5;stroke-width:2}
@@ -284,7 +285,7 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
   .breakdown-row{grid-template-columns:84px 66px minmax(70px,1fr) 38px;gap:8px}
 }
 @media(max-width:760px){
-  .results-modal{width:calc(100vw - 16px);padding:18px;gap:16px;border-radius:18px;scrollbar-gutter:auto}
+  .results-modal{width:calc(100vw - 16px);padding:18px;gap:16px;border-radius:18px}
   .summary-icon{width:40px;height:40px}.summary-header h2{font-size:18px}.summary-header p{font-size:10px}
   .summary-cards{grid-template-columns:1fr;gap:14px}
   .score-summary-card{min-height:0;padding:20px}.summary-score strong{font-size:58px}.summary-stars{gap:9px}.summary-stars svg{width:36px;height:36px}.summary-classification{font-size:19px}.summary-achievement>p{font-size:11px}

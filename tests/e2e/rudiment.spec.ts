@@ -923,7 +923,7 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   await expect(resultDialog.getByText(/Average offset|Mean absolute error|Timing variability|Focus for next time/i)).toHaveCount(0);
   const resultModalLayout=await resultDialog.evaluate(element=>({clientWidth:element.clientWidth,scrollWidth:element.scrollWidth,overflow:getComputedStyle(element).overflow}));
   expect(resultModalLayout.scrollWidth).toBeLessThanOrEqual(resultModalLayout.clientWidth);
-  expect(resultModalLayout.overflow).toBe('auto');
+  expect(resultModalLayout.overflow).toBe('hidden');
   const resultCloseChrome=await resultDialog.getByRole('button',{name:'Close session results'}).evaluate(element=>{const style=getComputedStyle(element);return {width:style.width,height:style.height,borderRadius:style.borderRadius,background:style.backgroundColor,borderColor:style.borderTopColor};});
   await expect(resultDialog.getByText('Single Paradiddle · 240 BPM', { exact:true })).toBeVisible();
   await expect(page.locator('.workspace')).toBeVisible();
@@ -939,32 +939,63 @@ test('demo hits complete through scoring and persist locally', async ({ page }) 
   expect(overlayBounds.modal.width).toBeLessThan(overlayBounds.viewport.width);
   expect(overlayBounds.modal.width/overlayBounds.viewport.width).toBeGreaterThanOrEqual(.75);
   expect(overlayBounds.modal.width).toBeLessThanOrEqual(1200);
-  const progressChartHeight=await resultDialog.locator('.progress-chart').evaluate(element=>element.getBoundingClientRect().height);
-  expect(progressChartHeight).toBeGreaterThanOrEqual(220);
-  expect(progressChartHeight).toBeLessThanOrEqual(260);
+  for(const height of [900,800,700]){
+    await page.setViewportSize({width:1440,height});
+    const layout=await resultDialog.evaluate(element=>{
+      const modal=element.getBoundingClientRect();
+      const header=element.querySelector('.summary-header')!.getBoundingClientRect();
+      const content=element.querySelector<HTMLElement>('.summary-content')!;
+      const chart=element.querySelector('.progress-chart')!.getBoundingClientRect();
+      const card=element.querySelector('.progress-card')!.getBoundingClientRect();
+      const actions=element.querySelector('.result-actions')!.getBoundingClientRect();
+      return {
+        modalTop:modal.top,modalBottom:modal.bottom,headerTop:header.top,
+        contentFits:content.scrollHeight<=content.clientHeight,
+        chartHeight:chart.height,chartWidth:chart.width,cardWidth:card.width,
+        actionsBottom:actions.bottom,
+      };
+    });
+    expect(layout.modalTop).toBeGreaterThanOrEqual(0);
+    expect(layout.modalBottom).toBeLessThanOrEqual(height);
+    expect(layout.headerTop).toBeGreaterThanOrEqual(layout.modalTop);
+    expect(layout.contentFits).toBe(true);
+    expect(layout.chartHeight).toBeGreaterThanOrEqual(150);
+    expect(layout.chartHeight).toBeLessThanOrEqual(180);
+    expect(layout.chartWidth).toBeGreaterThan(layout.cardWidth-50);
+    expect(layout.actionsBottom).toBeLessThan(layout.modalBottom);
+  }
   await page.screenshot({ path: 'artifacts/completed-result.png', fullPage: true });
   await page.setViewportSize({width:412,height:915});
   const narrowResultLayout=await resultDialog.evaluate(element=>({clientWidth:element.clientWidth,scrollWidth:element.scrollWidth,clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,rect:element.getBoundingClientRect().toJSON()}));
   expect(narrowResultLayout.scrollWidth).toBeLessThanOrEqual(narrowResultLayout.clientWidth);
   expect(narrowResultLayout.rect.x).toBeGreaterThanOrEqual(5);
   expect(narrowResultLayout.rect.right).toBeLessThanOrEqual(407);
-  await resultDialog.locator('.summary-footer').scrollIntoViewIfNeeded();
-  await expect(resultDialog.locator('.summary-footer')).toBeVisible();
+  await expect(resultDialog.getByRole('button',{name:'Perform again'})).toBeInViewport();
+  await page.setViewportSize({width:412,height:600});
+  const shortMobileContent=await resultDialog.locator('.summary-content').evaluate(element=>element.scrollHeight>element.clientHeight);
+  expect(shortMobileContent).toBe(true);
+  await expect(resultDialog.getByRole('button',{name:'Back to score'})).toBeInViewport();
+  await expect(resultDialog.getByRole('button',{name:'Perform again'})).toBeInViewport();
   await page.setViewportSize({width:2168,height:522});
-  await resultDialog.locator('.summary-footer').scrollIntoViewIfNeeded();
   const shallowResultLayout=await resultDialog.evaluate(element=>{
     const modal=element.getBoundingClientRect();
+    const header=element.querySelector('.summary-header')!.getBoundingClientRect();
+    const content=element.querySelector<HTMLElement>('.summary-content')!;
     const actions=element.querySelector<HTMLElement>('.result-actions')!.getBoundingClientRect();
     return {
       clientHeight:element.clientHeight,
       scrollHeight:element.scrollHeight,
       clientWidth:element.clientWidth,
       scrollWidth:element.scrollWidth,
+      contentScrolls:content.scrollHeight>content.clientHeight,
+      headerFits:header.top>=modal.top&&header.bottom<=modal.bottom,
       actionsFit:actions.top>=modal.top&&actions.bottom<=modal.bottom,
     };
   });
-  expect(shallowResultLayout.scrollHeight).toBeGreaterThanOrEqual(shallowResultLayout.clientHeight);
+  expect(shallowResultLayout.scrollHeight).toBeLessThanOrEqual(shallowResultLayout.clientHeight);
   expect(shallowResultLayout.scrollWidth).toBeLessThanOrEqual(shallowResultLayout.clientWidth);
+  expect(shallowResultLayout.contentScrolls).toBe(true);
+  expect(shallowResultLayout.headerFits).toBe(true);
   expect(shallowResultLayout.actionsFit).toBe(true);
   await page.setViewportSize({width:915,height:412});
   const landscapeResultLayout=await resultDialog.evaluate(element=>({clientHeight:element.clientHeight,scrollHeight:element.scrollHeight,clientWidth:element.clientWidth,scrollWidth:element.scrollWidth}));

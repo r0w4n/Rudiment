@@ -3431,6 +3431,7 @@ fn App() -> impl IntoView {
                   <div class="summary-title-group"><span class="summary-icon" aria-hidden="true">"R"</span><div><h2 id="result-title">"Session Complete"</h2><p>{move || displayed_result.get().map(|session|format!("{} · {:.0} BPM",session.exercise_title,session.bpm)).unwrap_or_default()}</p></div></div>
                   <button id="result-modal-close" aria-label="Close session results" on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)><X size=21/></button>
                 </header>
+                <div class="summary-content">
                 <div class="summary-cards">
                   <section class="summary-card score-summary-card summary-achievement">
                     <h3>"Session Score"</h3>
@@ -3448,7 +3449,7 @@ fn App() -> impl IntoView {
                 <section class="summary-card progress-card">
                   <h3>"Your Progress"</h3><p>"Session score over time"</p>
                   {move || displayed_result.get().map(|session|{let entries=progress_sessions(&session,&history.get());let scores=entries.iter().map(|(_,score)|*score).collect::<Vec<_>>();let points=progress_chart_points(&scores);let selected=entries.iter().position(|(id,_)|id==&session.id);let line=points.iter().map(|(x,y)|format!("{x:.1},{y:.1}")).collect::<Vec<_>>().join(" ");let latest=selected.and_then(|index|points.get(index).copied().zip(scores.get(index).copied()));view!{
-                    <svg class="progress-chart" viewBox="0 0 760 190" role="img" aria-label=format!("Scores for {} sessions through the selected session",scores.len())>
+                    <svg class="progress-chart" viewBox="0 0 760 190" preserveAspectRatio="none" role="img" aria-label=format!("Scores for {} sessions through the selected session",scores.len())>
                       <title>{format!("{} scores for this exercise through the selected session",scores.len())}</title>
                       {[100_u8,75,50,25,0].into_iter().map(|value|{let y=146.0-132.0*value as f64/100.0;view!{<g class="progress-grid"><line x1="48" y1=y.to_string() x2="712" y2=y.to_string()/><text x="36" y=(y+4.0).to_string()>{value}</text></g>}}).collect_view()}
                       <polyline class="progress-line" points=line/>
@@ -3458,6 +3459,7 @@ fn App() -> impl IntoView {
                     </svg>
                   }.into_any()}).unwrap_or_else(||().into_any())}
                 </section>
+                </div>
                 <footer class="summary-footer"><p>{move || displayed_result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>{move || if historical_result.get().is_some(){"Back to history"}else{"Back to score"}}</button><button class=move || if historical_result.get().is_some(){"primary hidden"}else{"primary"} on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
                 </section>
               </div>
