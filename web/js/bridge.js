@@ -79,7 +79,11 @@ const performanceProfile={
   reset(){this.samples.clear();},
   snapshot(){return Object.fromEntries([...this.samples].map(([name,values])=>[name,[...values]]));}
 };
-const presentation=createPresentationHost(()=>audio.activeRun?{beat:Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats),tempoBpm:Tone.getTransport().bpm.value}:null,highwayError);
+// Tone's implicit "now" includes a 100 ms scheduler look-ahead. That is
+// correct for scheduling clicks, but ahead of what the listener hears NOW.
+// Read the same transport at the audio output's current context time instead.
+const transportBeat=(run,now=performance.now())=>run.offset+Tone.getTransport().getTicksAtTime(audio.outputTime(now))/Tone.getTransport().PPQ-run.countBeats;
+const presentation=createPresentationHost(()=>audio.activeRun?{beat:Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)),tempoBpm:Tone.getTransport().bpm.value}:null,highwayError);
 let highwayHandle=null,highwayObserver=null,highwaySelected=false;
 function highwayError(error){
   highwayObserver?.disconnect();highwayObserver=null;highwayHandle=null;
@@ -148,7 +152,7 @@ document.addEventListener('keydown',event=>{
 // downbeat. Pulses are queued from the same Tone callback and output timestamp
 // as the audible click, so there is no independent visual timer to drift.
 const visualMetronome = {
-  pending: [], lastStep: null,
+  pending: [], lastStep: null, lastDisplayBeat: null,
   schedule(performanceTime,beat,meter,subdivision){
     const step=Math.round(beat*Math.max(1,subdivision));
     this.pending.push({performanceTime,beat,meter:Math.max(1,Math.round(meter)),step});
@@ -172,19 +176,22 @@ const visualMetronome = {
     const whole=Math.floor(beat),fraction=((beat%1)+1)%1;
     const beatInBar=((whole%meter)+meter)%meter;
     const swing=whole%2===0?-1+fraction*2:1-fraction*2;
-    root.classList.add('active');root.classList.toggle('count-in',beat<0);
     root.style.setProperty('--metronome-swing',String(swing));
-    root.dataset.beat=String(beatInBar+1);root.dataset.step=String(Math.floor(beat*subdivision));
-    const dots=[...root.querySelectorAll('.visual-metronome-beats i')];
-    dots.forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
-    const label=root.querySelector('.visual-metronome-label');if(label)label.textContent=beat<0?'COUNT IN':'PLAY';
-    root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
+    const display=`${beat<0?'count':'play'}:${beatInBar}:${Math.floor(beat*subdivision)}:${meter}`;
+    if(display!==this.lastDisplayBeat){
+      this.lastDisplayBeat=display;
+      root.classList.add('active');root.classList.toggle('count-in',beat<0);
+      root.dataset.beat=String(beatInBar+1);root.dataset.step=String(Math.floor(beat*subdivision));
+      root.querySelectorAll('.visual-metronome-beats i').forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
+      const label=root.querySelector('.visual-metronome-label');if(label)label.textContent=beat<0?'COUNT IN':'PLAY';
+      root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
+    }
     while(this.pending.length&&this.pending[0].performanceTime<=now+8){
       const event=this.pending.shift();if(event.step!==this.lastStep){this.lastStep=event.step;this.pulse(event);}
     }
   },
   stop(){
-    this.pending.length=0;this.lastStep=null;
+    this.pending.length=0;this.lastStep=null;this.lastDisplayBeat=null;
     const root=document.getElementById('visual-metronome');if(!root)return;
     root.classList.remove('active','count-in');root.style.setProperty('--metronome-swing','0');
     delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
@@ -318,6 +325,18 @@ const audio = {
     }
     return direct;
   },
+  outputTime(now) {
+    const timestamp=this.raw?.getOutputTimestamp?.();
+    if(timestamp){
+      const direct=now+(timestamp.contextTime-this.raw.currentTime)*1000;
+      if(Number.isFinite(timestamp.performanceTime)&&Number.isFinite(direct)
+        && Math.abs(timestamp.performanceTime-direct)<120)
+        return timestamp.contextTime+(now-timestamp.performanceTime)/1000;
+    }
+    // No reliable output timestamp: the unscheduled audio context time is
+    // still preferable to Tone.now() with its intentional look-ahead.
+    return this.raw?.currentTime??Tone.immediate();
+  },
   playSnare(velocity = 105, when = null, articulation = 'center') {
     const profileStart=performanceProfile.enabled?performance.now():0;
     if (!this.raw || this.raw.state !== 'running') { this.state='locked'; return false; }
@@ -419,9 +438,12 @@ const audio = {
     }
   },
   stop() {
-    if(this.activeRun){this.lastBeat=Math.min(this.activeRun.totalBeats,this.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-this.activeRun.countBeats);if(presentation.isActive())presentation.position(this.lastBeat,Tone.getTransport().bpm.value);}
+    if(this.activeRun){this.lastBeat=Math.min(this.activeRun.totalBeats,transportBeat(this.activeRun));if(presentation.isActive())presentation.position(this.lastBeat,Tone.getTransport().bpm.value);}
     this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
-    const transport = Tone.getTransport(); transport.stop(); transport.cancel(0); transport.seconds = 0;
+    // Stop the old clock at the current audio time, not Tone.now() (which is
+    // in the future). Otherwise an output-time read sees the previous run
+    // through the look-ahead window during a restart or bar retry.
+    const transport = Tone.getTransport(); transport.stop(this.raw?.currentTime??Tone.immediate()); transport.cancel(0); transport.seconds = 0;
     for(const source of this.scheduledVoices){
       try{source.stop();}
       catch(error){this.lastSnareError=audioErrorMessage(error);}
@@ -433,7 +455,7 @@ const audio = {
     const requested=Math.max(30,Math.min(240,Number(bpm)||60)),run=this.activeRun;
     if(!run)return false;
     run.tempoScale=requested/run.sourceBpm;
-    const transport=Tone.getTransport(),elapsed=transport.ticks/transport.PPQ;
+    const transport=Tone.getTransport(),elapsed=transport.getTicksAtTime(this.outputTime(performance.now()))/transport.PPQ;
     const rawBeat=run.offset+elapsed-run.countBeats,exerciseBeat=Math.max(run.offset,rawBeat);
     const value=tempoAtBeat(exerciseBeat,run.tempoMap,run.sourceBpm)*run.tempoScale;
     transport.bpm.setValueAtTime(value,Tone.now());
@@ -455,11 +477,10 @@ const audio = {
     }
     if(generation!==this.generation)return {cancelled:true,state:this.state};
     const transport = Tone.getTransport(), tempoMap=(options.tempoMap||[]).slice().sort((a,b)=>a.beat-b.beat),sourceBpm=options.sourceBpm||options.bpm,tempoScale=options.bpm/sourceBpm,offset = options.offsetBeat || 0,initialBpm=tempoAtBeat(offset,tempoMap,sourceBpm)*tempoScale,countBeats = Math.max(0,Number.isFinite(Number(options.countInBeats))?Number(options.countInBeats):Number(options.countInBars||0)*options.meter);
-    const remaining = Math.max(0, options.totalBeats - offset), scoringTailBeats=Math.max(0,Number(options.scoringTailBeats)||0), startDelay = 0;
-    const countInSeconds=countBeats*60/initialBpm,runAudio = this.raw.currentTime + startDelay + countInSeconds;
-    const runPerformance = this.perfAt(runAudio), subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
+    const remaining = Math.max(0, options.totalBeats - offset), scoringTailBeats=Math.max(0,Number(options.scoringTailBeats)||0);
+    const countInSeconds=countBeats*60/initialBpm,subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
     const referenceNotes=(options.referenceNotes||[]).filter(note=>Number.isFinite(Number(note.beat))&&Number(note.beat)>=offset-.000001&&Number(note.beat)<options.totalBeats-.000001&&Number(note.velocity)>0);
-    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,totalBeats:options.totalBeats,runPerformance,referenceNoteCount:referenceNotes.length,metronome:options.metronome,timbre:options.timbre};
+    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,totalBeats:options.totalBeats,runPerformance:0,referenceNoteCount:referenceNotes.length,metronome:options.metronome,timbre:options.timbre};
     transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
     for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.activeRun&&transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time);},position);}
     for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.playDrum(note.instrument??'snare',note.articulation??'unspecified',Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time);},position);}
@@ -486,11 +507,16 @@ const audio = {
     const practiceStep=Math.ceil(offset*subdivision);
     const firstPracticeBeat=countBeats+practiceStep/subdivision-offset;
     transport.scheduleRepeat(time=>scheduleClick(time),interval,transportPositionAtBeat(firstPracticeBeat,options.meter));
+    // Establish the scoring origin from the actual scheduled start. Tone
+    // starts at Tone.now(), not raw.currentTime; schedule setup may itself
+    // take several frames on a dense exercise.
+    const transportStart=Tone.now(),runAudio=transportStart+countInSeconds,runPerformance=this.perfAt(runAudio);
+    this.activeRun.runPerformance=runPerformance;
+    transport.start(transportStart);
     const initialBeat=offset-countBeats;
     this.lastBeat=initialBeat;
     onFrame(initialBeat,performance.now(),runPerformance);
     if(presentation.isActive())presentation.position(initialBeat,transport.bpm.value);
-    transport.start(startDelay ? `+${startDelay}` : undefined);
     let lastStateFrame=-Infinity;
     let lastAnimationFrame=performance.now();
     const frame = () => {
@@ -498,7 +524,7 @@ const audio = {
       // Keep the score at the exact paused position during the short audio
       // scheduling lead-in. Without the clamp, resuming visibly jumps the
       // playhead backwards before the Tone transport starts.
-      const now = performance.now(), elapsedBeats=transport.ticks/transport.PPQ;
+      const now = performance.now(), elapsedBeats=transport.getTicksAtTime(this.outputTime(now))/transport.PPQ;
       performanceProfile.record('animation_frame_interval_ms',now-lastAnimationFrame);lastAnimationFrame=now;
       const beat = offset + elapsedBeats-countBeats;
       const musicalBeat=Math.min(beat,options.totalBeats-.000001);
@@ -543,7 +569,7 @@ try { audio.preload(); }
 catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(error); }
 
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
-let scoreData = { notes:[], svg:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+let scoreData = { notes:[], svg:null, playhead:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
 let pendingScoreFeedback=null,pendingScoreFeedbackFrame=0;
 let selectedBars=new Set();
 let scoreSelectionCallback=null;
@@ -561,6 +587,7 @@ function applySelectedBarRange(){
 function setSelectedBars(bars){selectedBars=new Set(Array.isArray(bars)?bars.map(Number):[]);applySelectedBarRange();}
 function bindScoreSelection(callback){scoreSelectionCallback=callback;}
 let scoreResizeObserver=null;
+let scoreScrollContainer=null;
 const handText = hand => hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·';
 const durationTable=[[4,'w',false,false],[3,'h',true,false],[2,'h',false,false],[1.5,'q',true,false],[1,'q',false,false],[.75,'8',true,false],[2/3,'q',false,true],[.5,'8',false,false],[.375,'16',true,false],[1/3,'8',false,true],[.25,'16',false,false],[1/6,'16',false,true],[.125,'32',false,false]];
 const durationSpec = beats => durationTable.find(([value])=>Math.abs(value-beats)<.001)??durationTable.at(-1);
@@ -873,7 +900,12 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`,meta);
     notesByRow[meta.row]?.push(meta);
   }
-  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),svg,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:0,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),svg,playhead:line,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  if(scoreScrollContainer!==element){
+    scoreScrollContainer?.removeEventListener('scroll',onScoreScroll);
+    element.addEventListener('scroll',onScoreScroll,{passive:true});
+    scoreScrollContainer=element;
+  }
   applySelectedBarRange();
   applyJudgements(previousJudgements);updateScore(previousBeat,null);
   if(focusBar!==null)svg?.querySelector(`.score-bar-highlight[data-score-bar="${focusBar}"]`)?.focus({preventScroll:true});
@@ -893,6 +925,9 @@ function positionAtBeat(beat) {
   const bar=bars[index];
   const ratio=Math.max(0,Math.min(1,(value-bar.startBeat)/Math.max(.001,bar.endBeat-bar.startBeat)));
   return {x:bar.xStart+(bar.xEnd-bar.xStart)*ratio,y:bar.y,y1:bar.y1,y2:bar.y2,row:bar.row,bar:index};
+}
+function onScoreScroll(event){
+  if(scoreData.container===event.currentTarget)scoreData.cameraY=scoreData.container.scrollTop;
 }
 function cameraAtBeat(beat,position) {
   if(beat<0||position.row<=0)return 0;
@@ -991,9 +1026,11 @@ function updateScore(beat, judgements, loopAware=false) {
   const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
   if(hasJudgements)applyJudgements(judgements);
   const previousBeat=scoreData.lastBeat;
-  const position=positionAtBeat(beat),playhead=svg.querySelector('#playhead');
+  const position=positionAtBeat(beat),playhead=scoreData.playhead;
   const rewound=beat>=0&&previousBeat>=0&&beat<previousBeat-.001;
-  const targetAlreadyVisible=position.y1>=container.scrollTop-1&&position.y2<=container.scrollTop+container.clientHeight+1;
+  // Reading layout after mutating the score forces a synchronous SVG layout
+  // on every frame. Only a rewind needs to inspect the actual viewport.
+  const targetAlreadyVisible=rewound&&position.y1>=container.scrollTop-1&&position.y2<=container.scrollTop+scoreData.viewportHeight+1;
   const previousBar=previousBeat>=0?Math.floor(Math.max(0,previousBeat-.000001)/scoreData.meter):-1;
   if(rewound&&(loopAware||scoreData.preserveViewportOnRewind)&&(previousBar===position.bar||targetAlreadyVisible))scoreData.preserveCameraBar=position.bar;
   if(beat>=0)scoreData.preserveViewportOnRewind=false;
@@ -1005,6 +1042,7 @@ function updateScore(beat, judgements, loopAware=false) {
     playhead.setAttribute('x1',String(position.x));
     playhead.setAttribute('x2',String(position.x));
     playhead.dataset.x=String(position.x);
+    if(performanceProfile.enabled)playhead.dataset.beat=String(beat);
     if(position.row!==scoreData.lastPlayheadRow){playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);scoreData.lastPlayheadRow=position.row;}
     const visible=beat>=0&&beat<=scoreData.totalBeats;
     if(visible!==scoreData.lastPlayheadVisible){playhead.classList.toggle('visible',visible);scoreData.lastPlayheadVisible=visible;}
@@ -1012,9 +1050,9 @@ function updateScore(beat, judgements, loopAware=false) {
   if(beat>=0){
     const preservedBar=scoreData.preserveCameraBar;
     const stillPreserving=preservedBar!==null&&(position.bar===preservedBar||beat<=(preservedBar+1)*scoreData.meter+.001);
-    if(stillPreserving){
-      scoreData.cameraY=container.scrollTop;
-    }else{
+    // A scroll listener tracks a deliberate seek's viewport without reading
+    // layout on every ordinary playback frame.
+    if(!stillPreserving){
       scoreData.preserveCameraBar=null;
       const cameraY=cameraAtBeat(beat,position);
       if(Math.abs(cameraY-scoreData.cameraY)>.05){container.scrollTop=cameraY;scoreData.cameraY=cameraY;}
@@ -1141,8 +1179,8 @@ function downloadJson(value,name){const anchor=document.createElement('a');ancho
 
 window.rudiment={
   bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,savedNotationTheme,saveNotationTheme,
-  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
-  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,audio.activeRun.offset+Tone.getTransport().ticks/Tone.getTransport().PPQ-audio.activeRun.countBeats):Number.NaN,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
+  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):Number.NaN,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
   renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')

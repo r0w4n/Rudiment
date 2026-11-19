@@ -62,6 +62,30 @@ test('maps selected noncontiguous bars to consecutive playback positions and sto
   assert.ok(latest().notes.every(note => note.position < 16));
 });
 
+test('reuses static projections between beats but refreshes on boundaries, feedback and seeks', () => {
+  const { controller, latest } = setup();
+  controller.setExercise(exercise());
+  controller.setTimeline([0, 2], 16);
+  controller.setPosition(0.1);
+  const first = latest();
+  controller.setPosition(0.9);
+  assert.equal(latest().position, 0.9);
+  assert.equal(latest().notes, first.notes);
+  assert.equal(latest().boundaries, first.boundaries);
+  assert.equal(latest().timeline, first.timeline);
+  assert.equal(latest().playback, first.playback);
+  controller.setJudgements([{ expected_id: 'note-0', judgement: 'early', iteration: 0 }]);
+  assert.notEqual(latest().notes, first.notes);
+  assert.equal(latest().notes.find(note => note.id === 'note-0').judgement, 'early');
+  const withFeedback = latest().notes;
+  controller.setPosition(1.1);
+  assert.notEqual(latest().notes, withFeedback);
+  controller.setPosition(8.2);
+  assert.equal(latest().timeline.iteration, 1);
+  assert.equal(latest().notes.find(note => note.id === 'note-0' && note.iteration === 1).position, 8);
+  controller.dispose();
+});
+
 test('maps kick, snare and both hi-hat articulations onto configured lanes', () => {
   const { controller, latest } = setup();
   const source = exercise();

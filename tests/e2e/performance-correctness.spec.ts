@@ -34,6 +34,7 @@ test('high-rate MIDI feedback paints by the next frame and Restart clears it',as
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
   await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.currentAudioBeat())).toBeGreaterThan(0.05);
   await page.evaluate(()=>{const input=(window as any).__performanceInput;for(let index=0;index<64;index++)input.dispatch([0x99,index%8===0?36:38,40+index%88],performance.now()+index*.1);});
   await expect(page.locator('.score-note[data-judgement],.unmatched-hit-marker').first()).toBeVisible();
   await page.getByRole('button',{name:/Restart/}).click();
@@ -51,6 +52,7 @@ test('live hit feedback never rewinds the playhead within a bar',async({page})=>
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.currentAudioBeat())).toBeGreaterThan(0.05);
   const movement=await page.evaluate(()=>new Promise<{deltas:number[],feedbackCount:number}>(resolve=>{
     const playhead=document.querySelector('#playhead')!;
     const deltas:number[]=[];
@@ -68,4 +70,52 @@ test('live hit feedback never rewinds the playhead within a bar',async({page})=>
   expect(movement.deltas.length).toBeGreaterThan(10);
   expect(movement.feedbackCount).toBeGreaterThan(0);
   expect(Math.min(...movement.deltas)).toBeGreaterThanOrEqual(-0.01);
+});
+
+test('dense MIDI traffic and a delayed frame recover both views to the audio timeline',async({page})=>{
+  test.setTimeout(60_000);
+  await page.addInitScript(() => { (window as any).__RUDIMENT_PERF__=true; });
+  await page.goto('/');
+  await page.evaluate(() => (window as any).rudiment.loadBundledFromLibrary('public/exercises/performance/dense.mid','Performance Dense'));
+  await expect(page.locator('.score-note')).toHaveCount(manifest.fixtures.dense.bars*4*manifest.fixtures.dense.subdivision);
+  await page.locator('#visual-metronome').click();
+  await page.locator('#metronome-popover').getByLabel('Tempo in BPM').fill('240');
+  await page.getByLabel('Close metronome settings').click();
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.currentAudioBeat())).toBeGreaterThan(0.05);
+  for(const view of ['notation','highway'] as const){
+    if(view==='highway')await page.getByRole('button',{name:'Highway',exact:true}).click();
+    const result=await page.evaluate(async currentView=>{
+      const app=(window as any).rudiment;
+      const samples:{error:number;interval:number}[]=[];
+      let previous=performance.now();
+      const read=()=>{
+        if(currentView==='notation')return Number(document.querySelector('#playhead')?.getAttribute('data-beat'));
+        const svg=document.querySelector<SVGSVGElement>('.highway-svg')!;
+        const translate=svg.querySelector<SVGGElement>('.highway-moving')!.transform.baseVal.consolidate()!.matrix.e;
+        return (svg.viewBox.baseVal.width/2-translate)/Math.max(80,svg.viewBox.baseVal.width/10);
+      };
+      for(let index=0;index<32;index++){
+        if(index%3===0){
+          window.dispatchEvent(new KeyboardEvent('keydown',{key:'j',bubbles:true}));
+          window.dispatchEvent(new KeyboardEvent('keydown',{key:'k',bubbles:true}));
+        }
+        await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
+        const now=performance.now();
+        samples.push({error:Math.abs(read()-app.currentAudioBeat()),interval:now-previous});
+        previous=now;
+      }
+      const before=read(),start=performance.now();
+      while(performance.now()-start<90){/* Simulate a blocked main thread. */}
+      await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
+      const after=read(),timeline=app.currentAudioBeat();
+      return {before,after,timeline,samples};
+    },view);
+    expect(result.samples.filter(sample=>sample.error<0.12).length).toBeGreaterThan(24);
+    expect(result.after-result.before).toBeGreaterThan(0.15);
+    expect(Math.abs(result.after-result.timeline)).toBeLessThan(0.12);
+  }
 });

@@ -58,6 +58,13 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
   /** @type {Playback} */
   let playback = Object.freeze({ phase: 'idle', tempoBpm: null });
   let disposed = false;
+  // Static note/grid projections are valid for a whole beat. Keep a one-beat
+  // guard on either side so newly visible items are ready before they enter
+  // the actual viewport; only the transport position changes every frame.
+  /** @type {({bucket: number} & Pick<import('./presentation-types.mjs').Presentation, 'notes' | 'boundaries' | 'unmatched' | 'lanes'>) | null} */
+  let projection = null;
+  /** @type {import('./presentation-types.mjs').Presentation['timeline'] | null} */
+  let timeline = null;
 
   function assertActive() {
     if (disposed) throw new Error('Highway controller has been disposed');
@@ -67,48 +74,62 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     if (!exercise || !sequence) return;
     const start = position - before;
     const end = position + after;
-    /** @type {import('./presentation-types.mjs').Presentation['notes'][number][]} */
-    const notes = [];
-    /** @type {import('./presentation-types.mjs').Presentation['boundaries'][number][]} */
-    const boundaries = [];
-    const visibleUnmatched = unmatched.filter(hit => hit.position >= start - EPSILON && hit.position <= end + EPSILON).map(hit => Object.freeze({ ...hit }));
-    const visibleLanes = visibleUnmatched.some(hit => hit.lane === 'other' && !configuredLanes.some(lane => lane.instrument === 'other'))
-      ? [...configuredLanes, OTHER_LANE] : configuredLanes;
-    const length = sequence.bars.length * exercise.barBeats;
-    const firstCycle = Math.max(0, Math.floor((start - sequence.origin) / length));
-    const lastCycle = Math.max(-1, Math.floor((end - sequence.origin) / length));
-    for (let cycle = firstCycle; cycle <= lastCycle; cycle++) {
-      const base = sequence.origin + cycle * length;
-      if (base >= sequence.endBeat - EPSILON) break;
-      for (let index = lowerBound(sequence.notes, start - base); index < sequence.notes.length; index++) {
-        const note = sequence.notes[index];
-        const beat = base + note.sequenceBeat;
-        if (beat > end + EPSILON || beat >= sequence.endBeat - EPSILON) break;
-        notes.push(Object.freeze({ ...note, position: beat, iteration: cycle, judgement: judgements.get(cycle)?.get(note.id) ?? null }));
-      }
-      const firstBar = Math.max(0, Math.floor((start - base) / exercise.barBeats));
-      const lastBar = Math.min(sequence.bars.length - 1, Math.floor((end - base) / exercise.barBeats));
-      for (let barIndex = firstBar; barIndex <= lastBar; barIndex++) {
-        const barStart = base + barIndex * exercise.barBeats;
-        if (barStart > end || barStart + exercise.barBeats < start || barStart >= sequence.endBeat) continue;
-        // Denominator-note beats, expressed in the transport's quarter-note units.
-        const subdivision = exercise.beatUnit / 4;
-        for (let offset = 0; offset < exercise.barBeats - EPSILON; offset += subdivision) {
-          const beat = barStart + offset;
-          if (beat < start - EPSILON || beat > end + EPSILON || beat >= sequence.endBeat) continue;
-          const kind = offset < EPSILON ? 'bar' : Math.abs(offset / exercise.beatUnit - Math.round(offset / exercise.beatUnit)) < EPSILON ? 'beat' : 'subdivision';
-          boundaries.push(Object.freeze({ position: beat, kind, bar: sequence.bars[barIndex] + 1 }));
+    const bucket = Math.floor(position);
+    if (!projection || projection.bucket !== bucket) {
+      const projectedStart = bucket - before - 1;
+      const projectedEnd = bucket + after + 2;
+      /** @type {import('./presentation-types.mjs').Presentation['notes'][number][]} */
+      const notes = [];
+      /** @type {import('./presentation-types.mjs').Presentation['boundaries'][number][]} */
+      const boundaries = [];
+      const visibleUnmatched = unmatched.filter(hit => hit.position >= projectedStart - EPSILON && hit.position <= projectedEnd + EPSILON).map(hit => Object.freeze({ ...hit }));
+      const visibleLanes = visibleUnmatched.some(hit => hit.lane === 'other' && !configuredLanes.some(lane => lane.instrument === 'other'))
+        ? [...configuredLanes, OTHER_LANE] : configuredLanes;
+      const length = sequence.bars.length * exercise.barBeats;
+      const firstCycle = Math.max(0, Math.floor((projectedStart - sequence.origin) / length));
+      const lastCycle = Math.max(-1, Math.floor((projectedEnd - sequence.origin) / length));
+      for (let cycle = firstCycle; cycle <= lastCycle; cycle++) {
+        const base = sequence.origin + cycle * length;
+        if (base >= sequence.endBeat - EPSILON) break;
+        for (let index = lowerBound(sequence.notes, projectedStart - base); index < sequence.notes.length; index++) {
+          const note = sequence.notes[index];
+          const beat = base + note.sequenceBeat;
+          if (beat > projectedEnd + EPSILON || beat >= sequence.endBeat - EPSILON) break;
+          notes.push(Object.freeze({ ...note, position: beat, iteration: cycle, judgement: judgements.get(cycle)?.get(note.id) ?? null }));
+        }
+        const firstBar = Math.max(0, Math.floor((projectedStart - base) / exercise.barBeats));
+        const lastBar = Math.min(sequence.bars.length - 1, Math.floor((projectedEnd - base) / exercise.barBeats));
+        for (let barIndex = firstBar; barIndex <= lastBar; barIndex++) {
+          const barStart = base + barIndex * exercise.barBeats;
+          if (barStart > projectedEnd || barStart + exercise.barBeats < projectedStart || barStart >= sequence.endBeat) continue;
+          // Denominator-note beats, expressed in the transport's quarter-note units.
+          const subdivision = exercise.beatUnit / 4;
+          for (let offset = 0; offset < exercise.barBeats - EPSILON; offset += subdivision) {
+            const beat = barStart + offset;
+            if (beat < projectedStart - EPSILON || beat > projectedEnd + EPSILON || beat >= sequence.endBeat) continue;
+            const kind = offset < EPSILON ? 'bar' : Math.abs(offset / exercise.beatUnit - Math.round(offset / exercise.beatUnit)) < EPSILON ? 'beat' : 'subdivision';
+            boundaries.push(Object.freeze({ position: beat, kind, bar: sequence.bars[barIndex] + 1 }));
+          }
         }
       }
+      projection = {
+        bucket, notes: Object.freeze(notes), boundaries: Object.freeze(boundaries),
+        unmatched: Object.freeze(visibleUnmatched), lanes: Object.freeze(visibleLanes.slice()),
+      };
+    }
+    const length = sequence.bars.length * exercise.barBeats;
+    const iteration = Math.max(0, Math.floor((position - sequence.origin) / length));
+    if (!timeline || timeline.iteration !== iteration) {
+      timeline = Object.freeze({ bars: Object.freeze(sequence.bars.slice()), origin: sequence.origin, endBeat: sequence.endBeat, iteration });
     }
     renderer.update(Object.freeze({
-      lanes: Object.freeze(visibleLanes.slice()),
-      notes: Object.freeze(notes),
-      boundaries: Object.freeze(boundaries),
-      unmatched: Object.freeze(visibleUnmatched),
+      lanes: projection.lanes,
+      notes: projection.notes,
+      boundaries: projection.boundaries,
+      unmatched: projection.unmatched,
       position,
       playback,
-      timeline: Object.freeze({ bars: Object.freeze(sequence.bars.slice()), origin: sequence.origin, endBeat: sequence.endBeat, iteration: Math.max(0, Math.floor((position - sequence.origin) / length)) }),
+      timeline,
       visibleRange: Object.freeze({ start, end }),
     }));
   }
@@ -139,6 +160,8 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     const limit = endBeat ?? origin + chosen.length * barBeats;
     if (!Number.isFinite(limit) || limit <= origin) throw new Error('Highway end beat must follow its origin');
     sequence = { bars: chosen, origin, endBeat: limit, notes };
+    projection = null;
+    timeline = null;
     return sequence;
   }
 
@@ -166,6 +189,7 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
       const lastBeat = notes.reduce((last, note) => Math.max(last, note.beat), 0);
       // Match the application's exercise_beats convention at bar boundaries.
       exercise = { barBeats, beatUnit: 4 / source.meter_denominator, barCount: Math.max(1, Math.ceil((lastBeat + 0.001) / barBeats)), notes };
+      projection = null;
       judgements = new Map();
       unmatched = [];
       position = setSequence([], undefined).origin;
@@ -182,7 +206,7 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
       assertActive();
       if (!Number.isFinite(beat)) throw new Error('Invalid playback position');
       position = beat;
-      playback = Object.freeze({ ...playback, tempoBpm });
+      if (tempoBpm !== playback.tempoBpm) playback = Object.freeze({ ...playback, tempoBpm });
       update();
     },
     /** @param {string} phase
@@ -229,6 +253,7 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
       }
       judgements = next;
       unmatched = nextUnmatched;
+      projection = null;
       update();
     },
     /** @param {number} past
@@ -237,10 +262,10 @@ export function createHighwayController(renderer, lanes = DEFAULT_HIGHWAY_LANES)
     setVisibleSpan(past, future) {
       assertActive();
       if (!Number.isFinite(past) || !Number.isFinite(future) || past < 0 || future <= 0) throw new Error('Invalid visible span');
-      before = past; after = future; update();
+      before = past; after = future; projection = null; update();
     },
     /** @param {import('./presentation-types.mjs').Viewport} viewport */
     resize(viewport) { assertActive(); renderer.resize(Object.freeze({ ...viewport })); },
-    dispose() { if (disposed) return; disposed = true; renderer.dispose(); exercise = null; sequence = null; judgements.clear(); unmatched = []; },
+    dispose() { if (disposed) return; disposed = true; renderer.dispose(); exercise = null; sequence = null; projection = null; timeline = null; judgements.clear(); unmatched = []; },
   });
 }

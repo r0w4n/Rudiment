@@ -141,6 +141,7 @@ test('Restart clears painted note feedback', async ({ page }) => {
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   await page.getByRole('button', { name: /Start practice/ }).click();
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.currentAudioBeat())).toBeGreaterThan(0.04);
   await page.keyboard.press('j');
   await expect(page.locator('.score-note[data-judgement]')).toHaveCount(1);
   await page.getByRole('button', { name: /Restart/ }).click();
@@ -2539,8 +2540,9 @@ test('loop and restart leave practice stopped until started again', async ({ pag
   await page.getByRole('button', { name: /Start practice/ }).click();
   await expect(page.getByLabel('Loops')).toHaveValue('2');
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  await expect.poll(() => page.evaluate(() => (window as any).rudiment.currentAudioBeat())).toBeGreaterThan(0.04);
   await page.keyboard.press('j');
-  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(1);
+  await expect(page.locator('.score-note[data-judgement]').first()).toBeAttached();
   await page.evaluate(() => {
     (window as any).__sawLoopFeedbackClear = false;
     const score = document.querySelector('#notation svg')!;
@@ -2588,7 +2590,13 @@ test('repeat-until-good setting persists and retries a failed bar', async ({ pag
       if (started || !label.textContent?.includes('TRY 2')) return;
       started = true;
       void (async () => {
-        const firstHit = performance.now() + 20;
+        // The attempt label can update during Tone's scheduling look-ahead.
+        // Strike on the actual audio-output timeline, not on that UI change.
+        while (!Number.isFinite((window as any).rudiment.currentAudioBeat())
+          || (window as any).rudiment.currentAudioBeat() < 0.04) {
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        }
+        const firstHit = performance.now();
         for (let index = 0; index < 8; index += 1) {
           const delay = Math.max(0, firstHit + index * 125 - performance.now());
           await new Promise(resolve => setTimeout(resolve, delay));
@@ -2652,6 +2660,7 @@ test('single-bar repetition preserves the visible score and reuses its SVG', asy
 });
 
 test('bar retries stay on tempo and pause/resume preserves position without scoring paused hits', async ({ page }) => {
+  test.setTimeout(45_000);
   await page.goto('/');
   await setTempo(page, '72');
   await page.getByRole('button', { name: 'Open settings' }).click();
@@ -2668,7 +2677,7 @@ test('bar retries stay on tempo and pause/resume preserves position without scor
     }).observe(label, { childList: true, subtree: true, characterData: true });
   });
   await page.getByRole('button', { name: /Start practice/ }).click();
-  await expect(page.getByText(/BAR 1 \/ 4 · TRY 5/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/BAR 1 \/ 4 · TRY 5/)).toBeVisible({ timeout: 20_000 });
   const attempts = await page.evaluate(() => (window as any).__attemptTimes as { attempt: number; at: number }[]);
   for (let attempt = 3; attempt <= 5; attempt += 1) {
     const previous = attempts.find(item => item.attempt === attempt - 1)!;

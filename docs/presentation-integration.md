@@ -3,7 +3,12 @@
 `rudiment-core` owns MIDI parsing, expected hits and scoring. Leptos owns the
 exercise, selected bar sequence, practice state and live judgements. Tone's
 existing transport and animation frame remain the sole source of playback
-position. VexFlow notation continues on its existing path.
+position. The transport is queried at the audio-output time (using
+`AudioContext.getOutputTimestamp()` where reliable, otherwise its raw
+`currentTime`), not at Tone's scheduling `now()` with its 100 ms look-ahead.
+This keeps the metronome's scheduled sample and both visualisations on the
+same musical timeline; missed frames never accumulate positional error.
+VexFlow notation continues on its existing path.
 
 The optional presentation host bridges those existing sources to
 `web/js/highway-controller.mjs`. It asks Leptos for a snapshot only when a
@@ -38,6 +43,15 @@ one optional renderer may be mounted at a time. Disposing it neither stops
 Tone nor affects notation, MIDI or scoring; app cleanup also unbinds it. A
 renderer failure is isolated and detaches the renderer rather than interrupting
 the transport. The renderer is not passed playback or scoring controls.
+
+The controller retains immutable visible note/grid/feedback projections for
+each beat window, with a one-beat guard on either side so notes enter view
+before the next projection. Position and effective tempo are still forwarded
+on every transport frame; the SVG renderer moves the existing group without
+walking notes or grid on frames when the projection has not changed. Feedback,
+selection, crossing beat windows (including seek and repeat), and exercise
+changes invalidate the controller's projection; resize invalidates the
+renderer layout. This does not add another animation loop or alter notation.
 
 The default configuration has kick, snare and hi-hat lanes. Closed, pedal and
 open hi-hat events share the hi-hat lane while retaining their articulation.

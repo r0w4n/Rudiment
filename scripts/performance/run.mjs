@@ -92,6 +92,9 @@ async function configurePractice(page){
   await page.getByRole('button',{name:/Start practice/}).click();
   await page.getByRole('button',{name:/Pause/}).waitFor({timeout:15_000});
   await page.waitForFunction(()=>window.rudiment.audioDiagnostics().activeRun,null,{timeout:15_000});
+  // "starting" precedes Tone's scheduled audio onset by its look-ahead.
+  // Measure hits only after the output-time transport is actually moving.
+  await page.waitForFunction(()=>window.rudiment.currentAudioBeat()>0.05,null,{timeout:15_000});
   await page.waitForFunction(()=>typeof window.__rudimentPerfInput.onmidimessage==='function',null,{timeout:15_000});
 }
 

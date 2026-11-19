@@ -47,6 +47,45 @@ Input processing was fast but note colour feedback waited for a 32 ms applicatio
 
 A Chrome regression test also exposed backward playhead jumps during hits: the feedback frame reused the slower UI progress value. Feedback now paints without repositioning the playhead, leaving position and scrolling to the transport-driven frame. The test observes SVG position mutations during repeated keyboard hits; it does not measure subjective smoothness or physical MIDI latency.
 
+Further playhead investigation found that Tone's `Transport.ticks` uses the
+clock's rounded tick at Tone's scheduling `now()` (100 ms ahead of the raw
+audio context). The metronome sample is scheduled for its actual output time,
+so that future position gave both playheads a systematic lead even with
+otherwise smooth frames. Visual frames and pause/resume now query the _same_
+Tone transport with fractional `getTicksAtTime()` at the estimated audio
+output time (`getOutputTimestamp()` where available and valid, raw
+`AudioContext.currentTime` otherwise). This is a position read, not a new
+clock, extrapolator or audio scheduler. Frames delayed by scoring or browser
+work render the current transport beat on the next opportunity.
+
+The optional Highway previously allocated/froze note and grid snapshots and
+walked the whole visible SVG on every frame. It now retains guarded static
+beat-window projections, updating only the moving SVG group between window
+or feedback changes. Notation keeps its existing VexFlow engraving path,
+caches the playhead element and viewport height, and avoids a synchronous
+layout read during normal per-frame scrolling; metronome labels and beat LEDs
+update only when their displayed beat changes. No full-score redraw was
+needed for position or feedback. The performance harness continues measuring
+the actual SVG renderer separately from notation.
+
+On macOS/ARM Chrome 157 the fast medium-fixture interaction workload passed
+its absolute gates. The final run measured 0.30 ms p95 for the actual highway
+renderer (208 updates), 1.69 ms p95 for notation score updates (42 updates)
+and 78.78 ms p95 for animation-frame intervals (34 samples). The initial
+unmodified run measured 0.30 ms, 1.69 ms and 71.10 ms respectively; these
+small, burst-heavy samples do **not** demonstrate a frame-rate improvement. The 250
+synchronous synthetic MIDI hits still block the main thread and cannot be
+painted during the stall. The full run measured highway renderer p95 of 0.30
+ms (large), 0.20 ms (extreme) and 0.60 ms (dense), and 78.74 ms animation
+interval p95 across its interaction workloads. A dense 2,560-hit/240 BPM
+browser regression checks both views during frequent hits and a deliberate
+90 ms stall; it verifies that the next frame recovers the current transport
+position. A separate 30-second medium-fixture endurance run with repeated
+64-hit batches and pause/resume cycles completed with the transport stopped
+after cleanup; it is a lifecycle check, not a calibrated drift or memory
+measurement. Neither headless Chrome nor simulated input measures device or
+speaker latency, real-device display frame rates, or physical MIDI timing.
+
 See `PERFORMANCE_REPORT.md` for the measured comparison. Large score import still causes an isolated main-thread task, especially at 10,000 notes. It occurs before practice, not recurrently during musical playback; renderer virtualisation should only be considered with further evidence and correctness coverage.
 
 ## Regression policy

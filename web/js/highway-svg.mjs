@@ -33,6 +33,8 @@ export function createHighwaySvg(viewport, record = null) {
   let width = 1, height = 1, scale = 1, laneSignature = '';
   /** @type {Presentation | null} */
   let model = null;
+  /** @type {Presentation | null} */
+  let painted = null;
   /** @type {Map<string, SVGElement>} */
   const noteNodes = new Map();
   /** @type {Map<string, SVGElement>} */
@@ -81,6 +83,7 @@ export function createHighwaySvg(viewport, record = null) {
     for (const node of strikeNodes.values()) node.remove();
     for (const node of gridNodes.values()) node.remove();
     noteNodes.clear(); strikeNodes.clear(); gridNodes.clear();
+    painted = null;
     if (model) draw(model);
   }
 
@@ -89,8 +92,15 @@ export function createHighwaySvg(viewport, record = null) {
     if (!svg) return;
     model = presentation;
     const start = record ? performance.now() : 0;
-    drawLanes(presentation);
     moving.setAttribute('transform', `translate(${width / 2 - presentation.position * scale} 0)`);
+    // The controller retains these immutable projections between beat-window
+    // changes. Most frames need only move the already painted SVG group.
+    if (painted && painted.notes === presentation.notes && painted.boundaries === presentation.boundaries
+      && painted.unmatched === presentation.unmatched && painted.lanes === presentation.lanes) {
+      if (record) record(performance.now() - start);
+      return;
+    }
+    drawLanes(presentation);
     const visibleGrid = new Set();
     for (const boundary of presentation.boundaries) {
       if (boundary.kind === 'subdivision') continue;
@@ -190,6 +200,7 @@ export function createHighwaySvg(viewport, record = null) {
       marker.setAttribute('aria-label', `${hit.instrument} unmatched strike · ${hit.judgement.replace('_', ' ')}`);
     }
     for (const [key, node] of strikeNodes) if (!visibleStrikes.has(key)) { node.remove(); strikeNodes.delete(key); }
+    painted = presentation;
     if (record) record(performance.now() - start);
   }
 
@@ -205,6 +216,6 @@ export function createHighwaySvg(viewport, record = null) {
     },
     update: draw,
     resize(size) { width = Math.max(1, size.width); height = Math.max(1, size.height); layout(); },
-    dispose() { svg?.remove(); noteNodes.clear(); strikeNodes.clear(); gridNodes.clear(); model = null; laneSignature = ''; svg = null; },
+    dispose() { svg?.remove(); noteNodes.clear(); strikeNodes.clear(); gridNodes.clear(); model = null; painted = null; laneSignature = ''; svg = null; },
   };
 }
