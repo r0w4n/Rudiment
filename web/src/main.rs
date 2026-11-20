@@ -16,7 +16,7 @@ use rudiment_core::{HitResult, score_session_with_tempo_map};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{BTreeMap, HashSet, VecDeque},
     rc::Rc,
     sync::Arc,
 };
@@ -515,6 +515,159 @@ struct LiveJudgement {
     event_id: Option<String>,
     #[serde(default)]
     confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ExpectedJudgementKey {
+    iteration: Option<usize>,
+    expected_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LiveJudgementRemoval {
+    expected_id: String,
+    iteration: Option<usize>,
+}
+
+/// A display-only transport packet. Confirmed expected results are upserted by
+/// their stable `(expected_id, iteration)` key; provisional results are
+/// replaced or removed. Unmatched hits stay a small bounded projection so the
+/// renderer never needs to reconstruct the session's full judgement history.
+#[derive(Debug, Default, Serialize)]
+struct LiveFeedbackDelta {
+    epoch: u64,
+    reset: bool,
+    upserts: Vec<LiveJudgement>,
+    removes: Vec<LiveJudgementRemoval>,
+    unmatched: Vec<LiveJudgement>,
+}
+
+#[derive(Debug, Default)]
+struct LiveFeedbackState {
+    epoch: u64,
+    expected: BTreeMap<ExpectedJudgementKey, LiveJudgement>,
+    provisional: HashSet<ExpectedJudgementKey>,
+    unmatched_confirmed: VecDeque<LiveJudgement>,
+    unmatched_provisional: Vec<LiveJudgement>,
+}
+
+impl LiveFeedbackState {
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    fn reset(&mut self) -> LiveFeedbackDelta {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.expected.clear();
+        self.provisional.clear();
+        self.unmatched_confirmed.clear();
+        self.unmatched_provisional.clear();
+        LiveFeedbackDelta {
+            epoch: self.epoch,
+            reset: true,
+            ..LiveFeedbackDelta::default()
+        }
+    }
+
+    fn snapshot(&self) -> Vec<LiveJudgement> {
+        self.expected
+            .values()
+            .chain(self.unmatched_confirmed.iter())
+            .chain(self.unmatched_provisional.iter())
+            .cloned()
+            .collect()
+    }
+
+    fn apply(
+        &mut self,
+        update: Vec<LiveJudgement>,
+        visible_iteration: Option<usize>,
+    ) -> LiveFeedbackDelta {
+        let mut delta = LiveFeedbackDelta {
+            epoch: self.epoch,
+            ..LiveFeedbackDelta::default()
+        };
+        self.unmatched_provisional.clear();
+        let previous_provisional = std::mem::take(&mut self.provisional);
+        let mut next_provisional = HashSet::new();
+        let mut confirmed_keys = HashSet::new();
+
+        for judgement in update {
+            if visible_iteration.is_some_and(|iteration| {
+                judgement.iteration.is_some_and(|value| value != iteration)
+            }) {
+                continue;
+            }
+            let Some(expected_id) = judgement.expected_id.clone() else {
+                if judgement.confirmed {
+                    self.unmatched_confirmed.push_back(judgement);
+                } else {
+                    self.unmatched_provisional.push(judgement);
+                }
+                continue;
+            };
+            let key = ExpectedJudgementKey {
+                iteration: judgement.iteration,
+                expected_id,
+            };
+            if judgement.confirmed {
+                confirmed_keys.insert(key.clone());
+                self.provisional.remove(&key);
+                if self.expected.get(&key) != Some(&judgement) {
+                    self.expected.insert(key, judgement.clone());
+                    delta.upserts.push(judgement);
+                }
+            } else if !confirmed_keys.contains(&key) {
+                next_provisional.insert(key.clone());
+                if self.expected.get(&key) != Some(&judgement) {
+                    self.expected.insert(key, judgement.clone());
+                    delta.upserts.push(judgement);
+                }
+            }
+        }
+
+        for key in previous_provisional.difference(&next_provisional) {
+            if confirmed_keys.contains(key) {
+                continue;
+            }
+            if self.expected.remove(key).is_some() {
+                delta.removes.push(LiveJudgementRemoval {
+                    expected_id: key.expected_id.clone(),
+                    iteration: key.iteration,
+                });
+            }
+        }
+        self.provisional = next_provisional;
+        while self.unmatched_confirmed.len() > LIVE_UNMATCHED_FEEDBACK_LIMIT {
+            self.unmatched_confirmed.pop_front();
+        }
+        delta
+            .unmatched
+            .extend(self.unmatched_confirmed.iter().cloned());
+        delta
+            .unmatched
+            .extend(self.unmatched_provisional.iter().cloned());
+        delta
+    }
+}
+
+fn publish_presentation_delta(delta: &LiveFeedbackDelta) {
+    if !presentation_active() {
+        return;
+    }
+    if let Ok(value) = serde_wasm_bindgen::to_value(delta) {
+        presentation_judgements(value);
+    }
+}
+
+fn publish_live_delta(delta: &LiveFeedbackDelta) {
+    let Ok(value) = serde_wasm_bindgen::to_value(delta) else {
+        return;
+    };
+    if presentation_active() {
+        presentation_judgements(value.clone());
+    }
+    queue_score_feedback(value);
 }
 
 fn beats_per_bar(exercise: &Exercise) -> f64 {
@@ -1130,57 +1283,6 @@ fn live_feedback_from_scoring(
         .collect()
 }
 
-fn merge_live_feedback(current: &mut Vec<LiveJudgement>, update: Vec<LiveJudgement>) {
-    // Every update carries the complete current provisional projection. Keep
-    // only its final value for each key, then replace matching confirmed
-    // values in one pass. Repeated retain calls made a burst of provisional
-    // invalid strikes quadratic before any renderer work began.
-    let mut expected_keys = HashSet::new();
-    let mut event_keys = HashSet::new();
-    let mut replacement = update
-        .into_iter()
-        .rev()
-        .filter(|judgement| {
-            if let Some(expected_id) = &judgement.expected_id {
-                expected_keys.insert((expected_id.clone(), judgement.iteration))
-            } else if let Some(event_id) = &judgement.event_id {
-                event_keys.insert(event_id.clone())
-            } else {
-                true
-            }
-        })
-        .collect::<Vec<_>>();
-    replacement.reverse();
-    current.retain(|judgement| {
-        judgement.confirmed
-            && if let Some(expected_id) = &judgement.expected_id {
-                !expected_keys.contains(&(expected_id.clone(), judgement.iteration))
-            } else if let Some(event_id) = &judgement.event_id {
-                !event_keys.contains(event_id)
-            } else {
-                true
-            }
-    });
-    current.extend(replacement);
-    // The scorer retains every confirmed invalid hit for the authoritative
-    // summary. Only bound the visual projection: thousands of overlapping
-    // unmatched markers are no longer readable and would make a long
-    // continuous practice session progressively more expensive to render.
-    let unmatched = current
-        .iter()
-        .filter(|judgement| judgement.expected_id.is_none())
-        .count();
-    let mut discard = unmatched.saturating_sub(LIVE_UNMATCHED_FEEDBACK_LIMIT);
-    current.retain(|judgement| {
-        if judgement.expected_id.is_none() && discard > 0 {
-            discard -= 1;
-            false
-        } else {
-            true
-        }
-    });
-}
-
 fn combined_summaries(summaries: &[SessionSummary]) -> SessionSummary {
     let expected = summaries.iter().map(|summary| summary.expected).sum();
     let results = summaries
@@ -1615,13 +1717,19 @@ fn App() -> impl IntoView {
     let active_segment_start = RwSignal::new(0.0);
     let visible_loop_index = RwSignal::new(0usize);
     let observed = RwSignal::new(Vec::<ObservedHit>::new());
-    let feedback_dirty = RwSignal::new(true);
     let accepted_observed = RwSignal::new(Vec::<ObservedHit>::new());
     let practice_origin_ms = RwSignal::new(0.0);
     let bar_attempt = RwSignal::new(1usize);
     let failed_repeat_attempts = RwSignal::new(Vec::<(usize, Vec<LiveJudgement>)>::new());
     let repeat_attempt_summaries = RwSignal::new(Vec::<SessionSummary>::new());
-    let live = RwSignal::new(Vec::<LiveJudgement>::new());
+    let live_feedback = Rc::new(RefCell::new(LiveFeedbackState::default()));
+    let reset_live_feedback = {
+        let live_feedback = live_feedback.clone();
+        Rc::new(move || {
+            let delta = live_feedback.borrow_mut().reset();
+            publish_presentation_delta(&delta);
+        })
+    };
     let live_matched_expected = RwSignal::new(HashSet::<String>::new());
     let input_mode = RwSignal::new(InputSource::Demo);
     let result = RwSignal::new(None::<SessionRecord>);
@@ -1695,13 +1803,17 @@ fn App() -> impl IntoView {
             "barAttempt": bar_attempt.get_untracked(),
         })
     };
-    let snapshot = Closure::wrap(Box::new(move || -> JsValue {
-        json_compatible(&serde_json::json!({
-            "exercise": presentation_exercise(&exercise.get_untracked()),
-            "config": presentation_config(),
-            "judgements": live.get_untracked(),
-        }))
-        .unwrap_or(JsValue::NULL)
+    let snapshot = Closure::wrap(Box::new({
+        let live_feedback = live_feedback.clone();
+        move || -> JsValue {
+            json_compatible(&serde_json::json!({
+                "exercise": presentation_exercise(&exercise.get_untracked()),
+                "config": presentation_config(),
+                "judgements": live_feedback.borrow().snapshot(),
+                "judgementEpoch": live_feedback.borrow().epoch(),
+            }))
+            .unwrap_or(JsValue::NULL)
+        }
     }) as Box<dyn FnMut() -> JsValue>);
     bind_presentation_snapshot(snapshot.as_ref().unchecked_ref());
     let _snapshot = StoredValue::new_local(snapshot);
@@ -1726,14 +1838,6 @@ fn App() -> impl IntoView {
             && let Ok(value) = json_compatible(&presentation_config())
         {
             presentation_configuration(value);
-        }
-    });
-    Effect::new(move |_| {
-        live.track();
-        if presentation_active()
-            && let Ok(value) = json_compatible(&live.get_untracked())
-        {
-            presentation_judgements(value);
         }
     });
     Effect::new(move |_| {
@@ -1871,6 +1975,8 @@ fn App() -> impl IntoView {
         let done_holder = done_holder.clone();
         let launch_holder = launch_holder.clone();
         let scoring_for_launch = scoring_engine.clone();
+        let live_feedback = live_feedback.clone();
+        let reset_live_feedback = reset_live_feedback.clone();
         Rc::new(move |offset, count_beats, immediate| {
             phase.set(if count_beats > 0.0 {
                 "count_in".into()
@@ -1953,6 +2059,8 @@ fn App() -> impl IntoView {
             visible_loop_index.set(initial_visible_loop);
             let scoring_for_frame = scoring_for_launch.clone();
             let frame_sequence = sequence.clone();
+            let live_feedback_for_frame = live_feedback.clone();
+            let reset_live_feedback_for_frame = reset_live_feedback.clone();
             let last_scoring_revision = Cell::new(u64::MAX);
             let frame = Closure::wrap(Box::new(move |beat: f64, _now: f64, start: f64| {
                 let score_tempo_map = runtime_tempo_map.get_untracked();
@@ -2010,12 +2118,12 @@ fn App() -> impl IntoView {
                         // The scorer continues across iterations; only reset
                         // the renderer projection so a previous loop cannot
                         // leave stale notation colours or unbounded markers.
-                        live.set(vec![]);
-                        feedback_dirty.set(false);
+                        reset_live_feedback_for_frame();
                         clear_score_feedback_preserve_viewport();
                     }
                 }
                 if beat >= offset - 0.000_001 {
+                    let display_beat = frame_sequence.display_beat(visible_beat);
                     let watermark = session_start
                         + elapsed_ms_at_beat(beat, scoring_bpm, &score_tempo_map)
                         - SCORING_DELIVERY_GRACE_MS;
@@ -2034,7 +2142,7 @@ fn App() -> impl IntoView {
                     };
                     match scoring_result {
                         Ok(Some(feedback)) => {
-                            let mut update = live_feedback_from_scoring(
+                            let update = live_feedback_from_scoring(
                                 &feedback,
                                 &frame_sequence,
                                 scoring_bpm,
@@ -2042,26 +2150,19 @@ fn App() -> impl IntoView {
                                 session_start,
                                 latency_ms.get_untracked(),
                             );
-                            if !repeat_enabled {
-                                let iteration = visible_loop_index.get_untracked();
-                                update.retain(|judgement| {
-                                    judgement.iteration.is_none_or(|value| value >= iteration)
-                                });
-                            }
-                            let mut visible = live.get_untracked();
-                            merge_live_feedback(&mut visible, update);
-                            if !repeat_enabled {
-                                let iteration = visible_loop_index.get_untracked();
-                                visible.retain(|judgement| {
-                                    judgement.iteration.is_none_or(|value| value == iteration)
-                                });
-                            }
-                            if live.get_untracked() != visible {
-                                live.set(visible);
-                                feedback_dirty.set(true);
+                            let visible_iteration =
+                                (!repeat_enabled).then(|| visible_loop_index.get_untracked());
+                            let delta = live_feedback_for_frame
+                                .borrow_mut()
+                                .apply(update, visible_iteration);
+                            publish_presentation_delta(&delta);
+                            if let Ok(value) = serde_wasm_bindgen::to_value(&delta) {
+                                update_score(display_beat, value);
                             }
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            update_score(display_beat, JsValue::NULL);
+                        }
                         Err(error) => {
                             set_practice_active(false);
                             phase.set("error".into());
@@ -2073,27 +2174,19 @@ fn App() -> impl IntoView {
                         }
                     }
                 }
-                if beat >= offset - 0.000_001 && feedback_dirty.get_untracked() {
-                    feedback_dirty.set(false);
-                    let visible = live.get_untracked();
-                    let judgement_values =
-                        serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
-                    let display_beat = frame_sequence.display_beat(visible_beat);
-                    update_score(display_beat, judgement_values);
-                }
             }) as Box<dyn FnMut(f64, f64, f64)>);
             let done_finish = finish_run.clone();
             let repeat_launch = launch_holder.clone();
             let scoring_for_done = scoring_for_launch.clone();
+            let reset_live_feedback_for_done = reset_live_feedback.clone();
             let done = Closure::wrap(Box::new(move || {
                 set_practice_active(false);
                 if !repeat_enabled {
                     if app_mode.get_untracked() == AppMode::Practice && loops.get_untracked() == 0 {
                         observed.set(vec![]);
-                        live.set(vec![]);
+                        reset_live_feedback_for_done();
                         live_matched_expected.set(HashSet::new());
                         scoring_for_done.borrow_mut().take();
-                        feedback_dirty.set(true);
                         clear_score_feedback_preserve_viewport();
                         let next = repeat_launch.borrow().as_ref().cloned();
                         if let Some(launch) = next {
@@ -2139,7 +2232,6 @@ fn App() -> impl IntoView {
                         .collect::<Vec<_>>();
                     accepted_observed.update(|items| items.extend(accepted));
                     observed.set(vec![]);
-                    feedback_dirty.set(true);
                     live_matched_expected.set(HashSet::new());
                     scoring_for_done.borrow_mut().take();
                     bar_attempt.set(1);
@@ -2148,7 +2240,7 @@ fn App() -> impl IntoView {
                         run_start_ms.set(canonical_origin);
                         done_finish();
                     } else {
-                        live.set(vec![]);
+                        reset_live_feedback_for_done();
                         clear_score_feedback_preserve_viewport();
                         let next = repeat_launch.borrow().as_ref().cloned();
                         if let Some(launch) = next {
@@ -2157,8 +2249,7 @@ fn App() -> impl IntoView {
                     }
                 } else {
                     observed.set(vec![]);
-                    feedback_dirty.set(true);
-                    live.set(vec![]);
+                    reset_live_feedback_for_done();
                     live_matched_expected.set(HashSet::new());
                     scoring_for_done.borrow_mut().take();
                     bar_attempt.update(|attempt| *attempt += 1);
@@ -2231,13 +2322,13 @@ fn App() -> impl IntoView {
     };
 
     let scoring_for_reset = scoring_engine.clone();
+    let reset_live_feedback_for_reset = reset_live_feedback.clone();
     let reset_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
         selection_changed.set(false);
         stop_audio();
         result_modal_open.set(false);
         observed.set(vec![]);
-        feedback_dirty.set(true);
         accepted_observed.set(vec![]);
         practice_origin_ms.set(0.0);
         paused_run_start_ms.set(None);
@@ -2245,7 +2336,7 @@ fn App() -> impl IntoView {
         failed_repeat_attempts.set(vec![]);
         repeat_attempt_summaries.set(vec![]);
         scoring_for_reset.borrow_mut().take();
-        live.set(vec![]);
+        reset_live_feedback_for_reset();
         live_matched_expected.set(HashSet::new());
         result.set(None);
         progress.set(-1.0);
@@ -2254,6 +2345,7 @@ fn App() -> impl IntoView {
     });
 
     let scoring_for_navigation = scoring_engine.clone();
+    let reset_live_feedback_for_navigation = reset_live_feedback.clone();
     let stop_for_navigation: Rc<dyn Fn()> = Rc::new(move || {
         if matches!(
             phase.get_untracked().as_str(),
@@ -2263,7 +2355,6 @@ fn App() -> impl IntoView {
             set_practice_active(false);
             stop_audio();
             observed.set(vec![]);
-            feedback_dirty.set(true);
             accepted_observed.set(vec![]);
             practice_origin_ms.set(0.0);
             run_start_ms.set(0.0);
@@ -2272,7 +2363,7 @@ fn App() -> impl IntoView {
             failed_repeat_attempts.set(vec![]);
             repeat_attempt_summaries.set(vec![]);
             scoring_for_navigation.borrow_mut().take();
-            live.set(vec![]);
+            reset_live_feedback_for_navigation();
             live_matched_expected.set(HashSet::new());
             result.set(None);
             progress.set(-1.0);
@@ -2348,6 +2439,7 @@ fn App() -> impl IntoView {
     let start_new_run: Rc<dyn Fn(u8)> = {
         let launch = launch_run.clone();
         let scoring_for_start = scoring_engine.clone();
+        let reset_live_feedback_for_start = reset_live_feedback.clone();
         Rc::new(move |count_bars| {
             result_modal_open.set(false);
             selection_changed.set(false);
@@ -2375,7 +2467,6 @@ fn App() -> impl IntoView {
                 configured_loops,
             )));
             observed.set(vec![]);
-            feedback_dirty.set(true);
             accepted_observed.set(vec![]);
             practice_origin_ms.set(0.0);
             run_start_ms.set(0.0);
@@ -2384,7 +2475,7 @@ fn App() -> impl IntoView {
             failed_repeat_attempts.set(vec![]);
             repeat_attempt_summaries.set(vec![]);
             scoring_for_start.borrow_mut().take();
-            live.set(vec![]);
+            reset_live_feedback_for_start();
             live_matched_expected.set(HashSet::new());
             result.set(None);
             progress.set(-1.0);
@@ -2402,6 +2493,7 @@ fn App() -> impl IntoView {
     let save_for_hit = save_current_settings.clone();
     let start_for_hit = start_new_run.clone();
     let scoring_for_hit = scoring_engine.clone();
+    let live_feedback_for_hit = live_feedback.clone();
     let hit_input: HitInput = Rc::new(
         move |timestamp, instrument, articulation, velocity, source, raw_note, raw_channel| {
             if result_modal_open.get_untracked() {
@@ -2519,7 +2611,7 @@ fn App() -> impl IntoView {
             match scoring_result {
                 Ok(feedback) => {
                     observed.update(|items| items.push(event));
-                    let mut update = live_feedback_from_scoring(
+                    let update = live_feedback_from_scoring(
                         &feedback,
                         &sequence,
                         scoring_bpm,
@@ -2527,29 +2619,16 @@ fn App() -> impl IntoView {
                         session_start,
                         latency_ms.get_untracked(),
                     );
-                    if !repeat_bar_until_good.get_untracked() {
-                        let iteration = visible_loop_index.get_untracked();
-                        update.retain(|judgement| {
-                            judgement.iteration.is_none_or(|value| value >= iteration)
-                        });
-                    }
-                    let mut visible = live.get_untracked();
-                    merge_live_feedback(&mut visible, update);
-                    if !repeat_bar_until_good.get_untracked() {
-                        let iteration = visible_loop_index.get_untracked();
-                        visible.retain(|judgement| {
-                            judgement.iteration.is_none_or(|value| value == iteration)
-                        });
-                    }
-                    let judgement_values =
-                        serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
-                    live.set(visible);
+                    let visible_iteration = (!repeat_bar_until_good.get_untracked())
+                        .then(|| visible_loop_index.get_untracked());
+                    let delta = live_feedback_for_hit
+                        .borrow_mut()
+                        .apply(update, visible_iteration);
                     // Keep the authoritative projection in Rust in this input
                     // turn, but coalesce DOM work at the browser's next paint.
                     // This queue is independent of Tone's transport frame, so
                     // pausing immediately after a hit cannot strand feedback.
-                    queue_score_feedback(judgement_values);
-                    feedback_dirty.set(false);
+                    publish_live_delta(&delta);
                 }
                 Err(error) => {
                     set_practice_active(false);
@@ -2564,6 +2643,7 @@ fn App() -> impl IntoView {
     );
 
     let scoring_for_file = scoring_engine.clone();
+    let reset_live_feedback_for_file = reset_live_feedback.clone();
     let file_callback: Rc<MidiFileCallback> = Rc::new(Closure::wrap(Box::new(
         move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
             if library_open.get_untracked() {
@@ -2585,7 +2665,7 @@ fn App() -> impl IntoView {
                 failed_repeat_attempts.set(vec![]);
                 repeat_attempt_summaries.set(vec![]);
                 scoring_for_file.borrow_mut().take();
-                live.set(vec![]);
+                reset_live_feedback_for_file();
                 live_matched_expected.set(HashSet::new());
                 progress.set(-1.0);
                 clear_score_feedback();
@@ -3265,7 +3345,6 @@ fn App() -> impl IntoView {
                     "paused" => key_resume_run(),
                     "idle" | "complete" => {
                         observed.set(vec![]);
-                        live.set(vec![]);
                         result.set(None);
                         key_start_new_run(count_in.get_untracked());
                     }
@@ -3460,14 +3539,14 @@ fn App() -> impl IntoView {
                   }.into_any()}).unwrap_or_else(||().into_any())}
                 </section>
                 </div>
-                <footer class="summary-footer"><p>{move || displayed_result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>{move || if historical_result.get().is_some(){"Back to history"}else{"Back to score"}}</button><button class=move || if historical_result.get().is_some(){"primary hidden"}else{"primary"} on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
+                <footer class="summary-footer"><p>{move || displayed_result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>{move || if historical_result.get().is_some(){"Back to history"}else{"Back to score"}}</button><button class=move || if historical_result.get().is_some(){"primary hidden"}else{"primary"} on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
                 </section>
               </div>
             </section>
             <section class="practice-controls">
               <div class="transport">
                 <button class="restart-button" on:click={let reset=reset_run.clone();move |_|reset()}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true"><RotateCcw size=24/></span><span>"Restart"</span></span><small>"Clear current run"</small></button>
-                <button class="primary start-button" aria-label=move || match phase.get().as_str(){"running"|"count_in"|"starting"=>String::from("Pause"),"paused" if selection_changed.get()=>String::from("Start selected bars"),"paused"=>String::from("Resume"),_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{String::from("Start performance Hit your drum or press J to start Start practice")}else{String::from("Start practice Hit your drum or press J to start Start performance")}}} on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"|"starting"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"|"starting"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"|"starting"=>"Pause","paused" if selection_changed.get()=>"Start selected bars","paused"=>"Resume",_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{"Start performance "}else{"Start practice "}}}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
+                <button class="primary start-button" aria-label=move || match phase.get().as_str(){"running"|"count_in"|"starting"=>String::from("Pause"),"paused" if selection_changed.get()=>String::from("Start selected bars"),"paused"=>String::from("Resume"),_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{String::from("Start performance Hit your drum or press J to start Start practice")}else{String::from("Start practice Hit your drum or press J to start Start performance")}}} on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"|"starting"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"|"starting"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"|"starting"=>"Pause","paused" if selection_changed.get()=>"Start selected bars","paused"=>"Resume",_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{"Start performance "}else{"Start practice "}}}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
                 <aside class="timing-key" aria-label="Timing feedback key">
                   <span class="perfect"><i aria-hidden="true"></i>"Perfect"</span>
                   <span class="good"><i aria-hidden="true"></i>"Good"</span>
@@ -4581,39 +4660,52 @@ mod tests {
         assert_eq!(summary.score, Some(75.0));
     }
 
+    fn live_judgement(
+        expected_id: Option<&str>,
+        iteration: Option<usize>,
+        event_id: Option<&str>,
+        judgement: Judgement,
+        confirmed: bool,
+    ) -> LiveJudgement {
+        LiveJudgement {
+            expected_id: expected_id.map(str::to_string),
+            iteration,
+            expected_beat: expected_id.map(|_| 1.0),
+            actual_beat: Some(1.0),
+            instrument: Instrument::Snare,
+            judgement,
+            error_ms: 0.0,
+            excellent: judgement == Judgement::Perfect,
+            note_score: 0.0,
+            event_id: event_id.map(str::to_string),
+            confirmed,
+        }
+    }
+
     #[test]
     fn live_projection_bounds_unmatched_markers_without_losing_expected_feedback() {
-        let expected = LiveJudgement {
-            expected_id: Some("expected-note".into()),
-            iteration: Some(0),
-            expected_beat: Some(0.0),
-            actual_beat: None,
-            instrument: Instrument::Snare,
-            judgement: Judgement::Missed,
-            error_ms: 0.0,
-            excellent: false,
-            note_score: 0.0,
-            event_id: Some("expected-note:none:0".into()),
-            confirmed: true,
-        };
-        let mut update = vec![expected];
-        update.extend((0..300).map(|index| LiveJudgement {
-            expected_id: None,
-            iteration: None,
-            expected_beat: None,
-            actual_beat: Some(index as f64),
-            instrument: Instrument::Snare,
-            judgement: Judgement::Extra,
-            error_ms: 0.0,
-            excellent: false,
-            note_score: 0.0,
-            event_id: Some(format!("extra-{index}")),
-            confirmed: true,
+        let mut state = LiveFeedbackState::default();
+        let mut update = vec![live_judgement(
+            Some("expected-note"),
+            Some(0),
+            Some("expected-note:none:0"),
+            Judgement::Missed,
+            true,
+        )];
+        update.extend((0..300).map(|index| {
+            live_judgement(
+                None,
+                None,
+                Some(&format!("extra-{index}")),
+                Judgement::Extra,
+                true,
+            )
         }));
 
-        let mut visible = Vec::new();
-        merge_live_feedback(&mut visible, update);
+        let delta = state.apply(update, None);
+        let visible = state.snapshot();
 
+        assert_eq!(delta.unmatched.len(), LIVE_UNMATCHED_FEEDBACK_LIMIT);
         assert_eq!(visible.len(), LIVE_UNMATCHED_FEEDBACK_LIMIT + 1);
         assert!(
             visible
@@ -4633,61 +4725,68 @@ mod tests {
     }
 
     #[test]
-    fn live_projection_merge_keeps_only_the_latest_value_for_each_key() {
-        let judgement = |expected_id: Option<&str>,
-                         iteration: Option<usize>,
-                         event_id: Option<&str>,
-                         judgement: Judgement,
-                         confirmed: bool| LiveJudgement {
-            expected_id: expected_id.map(str::to_string),
-            iteration,
-            expected_beat: expected_id.map(|_| 1.0),
-            actual_beat: Some(1.0),
-            instrument: Instrument::Snare,
-            judgement,
-            error_ms: 0.0,
-            excellent: judgement == Judgement::Perfect,
-            note_score: 0.0,
-            event_id: event_id.map(str::to_string),
-            confirmed,
-        };
-        let mut visible = vec![
-            judgement(
+    fn live_projection_replaces_provisional_results_and_removes_expired_keys() {
+        let mut state = LiveFeedbackState::default();
+        let provisional = live_judgement(
+            Some("expected"),
+            Some(0),
+            Some("provisional"),
+            Judgement::Good,
+            false,
+        );
+        let first = state.apply(vec![provisional], None);
+        assert_eq!(first.upserts.len(), 1);
+        assert!(first.removes.is_empty());
+
+        let confirmed = live_judgement(
+            Some("expected"),
+            Some(0),
+            Some("confirmed"),
+            Judgement::Late,
+            true,
+        );
+        let second = state.apply(vec![confirmed], None);
+        assert_eq!(second.upserts.len(), 1);
+        assert!(second.removes.is_empty());
+        assert_eq!(state.snapshot()[0].judgement, Judgement::Late);
+
+        // Provisional expiry is tested on a fresh projection.
+        let mut state = LiveFeedbackState::default();
+        let provisional = live_judgement(
+            Some("other"),
+            Some(0),
+            Some("provisional"),
+            Judgement::Good,
+            false,
+        );
+        let third = state.apply(vec![provisional], None);
+        assert_eq!(third.upserts.len(), 1);
+        let fourth = state.apply(vec![], None);
+        assert_eq!(fourth.removes.len(), 1);
+        assert_eq!(fourth.removes[0].expected_id, "other");
+        assert_eq!(fourth.removes[0].iteration, Some(0));
+        assert!(state.snapshot().is_empty());
+    }
+
+    #[test]
+    fn live_projection_reset_advances_the_epoch_and_clears_projection() {
+        let mut state = LiveFeedbackState::default();
+        state.apply(
+            vec![live_judgement(
                 Some("expected"),
                 Some(0),
-                Some("old-expected"),
-                Judgement::Perfect,
-                true,
-            ),
-            judgement(None, None, Some("extra"), Judgement::Extra, true),
-            judgement(None, None, Some("stale"), Judgement::Extra, false),
-        ];
-        let update = vec![
-            judgement(
-                Some("expected"),
-                Some(0),
-                Some("first-expected"),
+                Some("confirmed"),
                 Judgement::Good,
-                false,
-            ),
-            judgement(
-                Some("expected"),
-                Some(0),
-                Some("latest-expected"),
-                Judgement::Late,
-                false,
-            ),
-            judgement(None, None, Some("extra"), Judgement::WrongInstrument, false),
-            judgement(None, None, Some("extra"), Judgement::Extra, false),
-        ];
-
-        merge_live_feedback(&mut visible, update);
-
-        assert_eq!(visible.len(), 2);
-        assert_eq!(visible[0].event_id.as_deref(), Some("latest-expected"));
-        assert_eq!(visible[0].judgement, Judgement::Late);
-        assert_eq!(visible[1].event_id.as_deref(), Some("extra"));
-        assert_eq!(visible[1].judgement, Judgement::Extra);
+                true,
+            )],
+            None,
+        );
+        let epoch = state.epoch();
+        let delta = state.reset();
+        assert!(delta.reset);
+        assert_eq!(delta.epoch, epoch.wrapping_add(1));
+        assert!(delta.upserts.is_empty());
+        assert!(state.snapshot().is_empty());
     }
 
     #[test]

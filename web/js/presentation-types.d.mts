@@ -127,4 +127,5 @@ export interface Snapshot {
   exercise: Exercise;
   config: Configuration;
   judgements: Judgement[];
+  judgementEpoch?: number;
 }
