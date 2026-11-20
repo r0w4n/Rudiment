@@ -2388,6 +2388,36 @@ test('adding live feedback preserves existing notehead feedback nodes',async({pa
   await expect(page.locator('.judgement-halo')).toHaveCount(2);
 });
 
+test('hit halos expire while permanent judgement feedback remains',async({page})=>{
+  await page.goto('/');
+  const note=page.locator('.score-note[data-beat="0"]').first(),head=note.locator(':scope > .vf-notehead').first();
+  const originalFill=await head.locator(':scope > text').first().evaluate(element=>getComputedStyle(element).fill);
+  await page.evaluate(()=>(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(.25,[{
+    expected_beat:0,actual_beat:0,judgement:'good',error_ms:20,excellent:false,event_id:'temporary-halo'
+  }]));
+  await expect(head.locator(':scope > .judgement-halo')).toHaveCount(1);
+  await expect(head.locator(':scope > .judgement-halo')).toHaveCount(0,{timeout:1000});
+  await expect(note).toHaveAttribute('data-judgement','good');
+  await expect(head).toHaveAttribute('aria-label','good +20 milliseconds');
+  expect(await head.locator(':scope > text').first().evaluate(element=>getComputedStyle(element).fill)).not.toBe(originalFill);
+});
+
+test('hidden Notation feedback halos still expire',async({page})=>{
+  await page.goto('/');
+  await page.getByRole('button',{name:'Highway',exact:true}).click();
+  const head=page.locator('.score-note[data-beat="0"] > .vf-notehead').first();
+  const counts=await page.evaluate(async()=>{
+    (window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment.updateScore(.25,[{
+      expected_beat:0,actual_beat:0,judgement:'perfect',error_ms:0,excellent:true,event_id:'hidden-halo'
+    }]);
+    const immediate=document.querySelectorAll('.judgement-halo').length;
+    await new Promise(resolve=>setTimeout(resolve,500));
+    return {immediate,after:document.querySelectorAll('.judgement-halo').length};
+  });
+  expect(counts).toEqual({immediate:1,after:0});
+  await expect(head).toHaveAttribute('aria-label','perfect +0 milliseconds');
+});
+
 test('unmatched marker positions preserve millisecond offsets without rhythmic snapping',async({page})=>{
   await page.goto('/');
   const offsets=[0,7,20,43,80,-35,-91];
