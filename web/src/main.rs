@@ -2170,7 +2170,6 @@ fn App() -> impl IntoView {
                                 "Scoring stopped to preserve reliable results: {error}"
                             )));
                             stop_audio();
-                            return;
                         }
                     }
                 }
