@@ -776,8 +776,6 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
   for(const beam of beams)beam.setContext(context).draw();
   for(const tuplet of tuplets)tuplet.setContext(context).draw();
   const svg=element.querySelector('svg');
-  svg?.addEventListener('animationend',removeFinishedJudgementHalo);
-  svg?.addEventListener('animationcancel',removeFinishedJudgementHalo);
   for(let row=0;row<lineCount;row++){
     const firstNote=firstNoteByRow[row],head=firstNote?.note.getSVGElement?.()?.querySelector('.vf-notehead > text');
     const bounds=head?.getBBox();
@@ -963,20 +961,11 @@ function noteForJudgement(result){
     ??scoreData.noteByBeatInstrument?.get(`${Number(result.expected_beat).toFixed(6)}|${result.instrument??'snare'}`)
     ??scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001&&(!result.instrument||instrumentForHit(note.hit)===result.instrument));
 }
-function removeFinishedJudgementHalo(event){
-  if(event.target?.classList?.contains('judgement-halo'))event.target.remove();
-}
-function removeJudgementHalos(notehead){
-  for(const halo of notehead.querySelectorAll(':scope > .judgement-halo')){
-    halo.getAnimations?.().forEach(animation=>animation.cancel());
-    halo.remove();
-  }
-}
 function clearExpectedJudgement(result,touchedGroups){
   const meta=noteForJudgement(result),group=meta?.note.getSVGElement?.();if(!group)return;
   const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
   if(noteheads.length<=1)delete group.dataset.judgement;
-  if(notehead){delete notehead.dataset.judgement;notehead.removeAttribute('role');notehead.removeAttribute('aria-label');removeJudgementHalos(notehead);}
+  if(notehead){delete notehead.dataset.judgement;notehead.removeAttribute('role');notehead.removeAttribute('aria-label');notehead.querySelector('.judgement-halo')?.remove();}
   touchedGroups.add(group);
 }
 function paintExpectedJudgement(result,touchedGroups){
@@ -1096,7 +1085,7 @@ function clearScoreFeedback(preserveViewport=false) {
   for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
     delete group.dataset.judgement;group.classList.remove('excellent-flash');
-    for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');removeJudgementHalos(head);}
+    for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');head.querySelector('.judgement-halo')?.remove();}
     group.getAnimations?.().forEach(animation=>animation.cancel());
   }
   scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;
