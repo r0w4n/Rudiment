@@ -1964,6 +1964,40 @@ test('past unplayed notes become missed while future notes stay neutral and the 
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
 });
 
+test('opt-in playhead diagnostic compares wall-clock motion and follows pause, resume, and restart',async({page})=>{
+  await page.goto('/?playhead-debug=1');
+  await setTempo(page,'80');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+
+  const reference=page.locator('#playhead-reference');
+  await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  await expect(reference).toHaveClass(/visible/);
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.playheadDebugSnapshot().frames.length)).toBeGreaterThan(8);
+  const samples=await page.evaluate(()=>(window as any).rudiment.playheadDebugSnapshot().frames.filter((frame:any)=>Number.isFinite(frame.green_x)&&Number.isFinite(frame.blue_x)));
+  expect(samples.length).toBeGreaterThan(4);
+  expect(samples.at(-1).blue_x).toBeGreaterThan(samples[0].blue_x);
+  expect(await page.locator('#notation').evaluate(element=>element.scrollTop)).toBe(0);
+
+  await page.getByRole('button',{name:'Pause'}).click();
+  const paused=await reference.getAttribute('data-x');
+  const pausedFrames=await page.evaluate(()=>(window as any).rudiment.playheadDebugSnapshot().frames.length);
+  await page.waitForTimeout(150);
+  expect(await reference.getAttribute('data-x')).toBe(paused);
+  expect(await page.evaluate(()=>(window as any).rudiment.playheadDebugSnapshot().frames.length)).toBe(pausedFrames);
+
+  await page.getByRole('button',{name:'Resume'}).click();
+  await expect.poll(()=>reference.getAttribute('data-x')).not.toBe(paused);
+  const csv=await page.evaluate(()=>(window as any).rudiment.playheadDebugCsv());
+  expect(csv).toContain('frame_interval_ms,green_x,blue_x,green_increment,blue_increment');
+
+  await page.getByRole('button',{name:/Restart/}).click();
+  await expect(reference).not.toHaveClass(/visible/);
+  await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
+});
+
 test('playhead continues moving after entering bar two', async ({ page }) => {
   await page.goto('/');
   await setTempo(page, '240');

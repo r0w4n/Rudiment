@@ -11,6 +11,7 @@ const STICKING_PLACEMENT = AnnotationVerticalJustify.BOTTOM;
 const SYSTEM_MARK_BASELINE_CLEARANCE = 24;
 const bridgeUrl = document.currentScript?.src || document.querySelector('script[src*="bridge.js"]')?.src || document.baseURI;
 const publicAsset = path => new URL(path, bridgeUrl).toString();
+const playheadDebugEnabled = new URLSearchParams(location.search).get('playhead-debug') === '1';
 const dbPromise = openDB(DB_NAME, DB_VERSION, {
   upgrade(db) {
     if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' });
@@ -440,6 +441,7 @@ const audio = {
   stop() {
     if(this.activeRun){this.lastBeat=Math.min(this.activeRun.totalBeats,transportBeat(this.activeRun));if(presentation.isActive())presentation.position(this.lastBeat,Tone.getTransport().bpm.value);}
     this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
+    playheadDebug.pause();
     // Stop the old clock at the current audio time, not Tone.now() (which is
     // in the future). Otherwise an output-time read sees the previous run
     // through the look-ahead window during a restart or bar retry.
@@ -460,6 +462,7 @@ const audio = {
     const value=tempoAtBeat(exerciseBeat,run.tempoMap,run.sourceBpm)*run.tempoScale;
     transport.bpm.setValueAtTime(value,Tone.now());
     if(rawBeat<0)run.runPerformance=performance.now()+(-rawBeat)*60000/value;
+    playheadDebug.setTempo(requested);
     return true;
   },
   async start(options, onFrame, onDone) {
@@ -553,6 +556,7 @@ const audio = {
       if (elapsedBeats >= countBeats+remaining+scoringTailBeats) { this.stop(); onDone(); } else this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
+    playheadDebug.start({options,offset,tempoMap,sourceBpm,tempoScale,runPerformance});
     return { runPerformance, runAudio, state: this.state };
   },
   async calibration() {
@@ -894,6 +898,12 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
   }
   const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('role','group');markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
   const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
+  let referenceLine=null;
+  if(playheadDebugEnabled){
+    referenceLine=document.createElementNS('http://www.w3.org/2000/svg','line');
+    referenceLine.id='playhead-reference';referenceLine.setAttribute('x1','0');referenceLine.setAttribute('x2','0');referenceLine.setAttribute('class','playhead-reference-line');referenceLine.setAttribute('aria-hidden','true');
+    svg?.appendChild(referenceLine);
+  }
   const noteByExpectedId=new Map(),noteByBeatInstrument=new Map(),notesByRow=Array.from({length:lineCount},()=>[]);
   for(const meta of notesMeta){
     if(meta.hit?.id)noteByExpectedId.set(meta.hit.id,meta);
@@ -901,6 +911,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     notesByRow[meta.row]?.push(meta);
   }
   scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),svg,playhead:line,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  playheadDebug.attach(referenceLine);
   if(scoreScrollContainer!==element){
     scoreScrollContainer?.removeEventListener('scroll',onScoreScroll);
     element.addEventListener('scroll',onScoreScroll,{passive:true});
@@ -926,6 +937,99 @@ function positionAtBeat(beat) {
   const ratio=Math.max(0,Math.min(1,(value-bar.startBeat)/Math.max(.001,bar.endBeat-bar.startBeat)));
   return {x:bar.xStart+(bar.xEnd-bar.xStart)*ratio,y:bar.y,y1:bar.y1,y2:bar.y2,row:bar.row,bar:index};
 }
+// Temporary opt-in comparison clock for diagnosing notation playhead motion.
+// It deliberately does not feed playback, scoring, feedback, or scrolling.
+const playheadDebug={
+  enabled:playheadDebugEnabled,line:null,raf:0,run:null,runId:0,startedAt:performance.now(),frames:[],lastFrame:null,lastRendered:null,
+  attach(line){
+    if(!this.enabled)return;
+    this.line=line;
+    if(this.lastRendered)this.paint(this.lastRendered);
+  },
+  start({options,offset,tempoMap,sourceBpm,tempoScale,runPerformance}){
+    if(!this.enabled)return;
+    this.pause();
+    const countBeats=Math.max(0,Number(options.countInBeats)||0);
+    this.run={options,visibleOffset:offset,initialBeat:offset-countBeats,baseBeat:offset,basePerformance:runPerformance,tempoMap,sourceBpm,tempoScale};
+    this.runId++;this.lastFrame=null;
+    this.raf=requestAnimationFrame(now=>this.frame(now));
+  },
+  pause(){
+    if(!this.enabled)return;
+    cancelAnimationFrame(this.raf);this.raf=0;this.run=null;this.lastFrame=null;
+  },
+  hide(){
+    if(!this.enabled)return;
+    this.lastRendered=null;
+    this.line?.classList.remove('visible');
+  },
+  setTempo(bpm){
+    if(!this.enabled||!this.run)return;
+    const now=performance.now(),beat=this.beatAt(now);
+    this.run.baseBeat=beat;this.run.basePerformance=now;this.run.tempoScale=bpm/this.run.sourceBpm;
+  },
+  beatAt(now){
+    const run=this.run;if(!run)return Number.NaN;
+    let remaining=now-run.basePerformance,beat=run.baseBeat;
+    let bpm=tempoAtBeat(beat,run.tempoMap,run.sourceBpm)*run.tempoScale;
+    if(remaining<=0)return Math.max(run.initialBeat,beat+remaining*bpm/60000);
+    for(const change of run.tempoMap){
+      if(change.beat<=beat)continue;
+      const duration=(change.beat-beat)*60000/bpm;
+      if(remaining<=duration)return beat+remaining*bpm/60000;
+      remaining-=duration;beat=change.beat;bpm=change.bpm*run.tempoScale;
+    }
+    return beat+remaining*bpm/60000;
+  },
+  displayBeat(beat){
+    const run=this.run,options=run.options,musicalBeat=Math.min(beat,options.totalBeats-.000001);
+    const rangeStart=Number(options.displayRangeStart)||0,rangeBeats=Math.max(.001,Number(options.displayRangeBeats)||options.exerciseBeats);
+    const rangePosition=((musicalBeat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats;
+    const bars=options.displayBars,barIndex=Math.floor(rangePosition/options.meter);
+    return musicalBeat<run.visibleOffset?-1:Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+rangePosition-barIndex*options.meter:rangeStart+rangePosition;
+  },
+  paint(rendered){
+    const line=this.line;if(!line)return;
+    const {beat,position,visible}=rendered;
+    line.setAttribute('x1',String(position.x));line.setAttribute('x2',String(position.x));
+    line.setAttribute('y1',String(position.y1));line.setAttribute('y2',String(position.y2));
+    line.dataset.x=String(position.x);line.dataset.beat=String(beat);line.dataset.row=String(position.row);line.dataset.bar=String(position.bar);
+    line.classList.toggle('visible',visible);
+  },
+  render(now){
+    if(!this.run)return;
+    const beat=this.displayBeat(this.beatAt(now)),position=positionAtBeat(beat);
+    const rendered={beat,position,visible:beat>=0&&beat<=scoreData.totalBeats};
+    this.lastRendered=rendered;this.paint(rendered);
+    const green=scoreData.playhead,greenX=green?.classList.contains('visible')?Number(green.dataset.x):Number.NaN;
+    const previous=this.lastFrame,blueX=rendered.visible?position.x:Number.NaN;
+    const sample={
+      run:this.runId,timestamp_ms:now,elapsed_ms:now-this.startedAt,frame_interval_ms:previous?now-previous.timestamp_ms:Number.NaN,
+      green_x:greenX,blue_x:blueX,green_increment:previous&&Number.isFinite(greenX)&&Number.isFinite(previous.green_x)?greenX-previous.green_x:Number.NaN,
+      blue_increment:previous&&Number.isFinite(blueX)&&Number.isFinite(previous.blue_x)?blueX-previous.blue_x:Number.NaN,
+      position_error:Number.isFinite(greenX)&&Number.isFinite(blueX)?greenX-blueX:Number.NaN,
+      green_row:green?.classList.contains('visible')?Number(green.dataset.row):Number.NaN,blue_row:rendered.visible?position.row:Number.NaN
+    };
+    this.frames.push(sample);this.lastFrame=sample;
+  },
+  frame(now){
+    if(!this.run)return;
+    this.render(now);
+    this.raf=requestAnimationFrame(next=>this.frame(next));
+  },
+  reset(){this.frames.length=0;this.startedAt=performance.now();this.lastFrame=null;},
+  snapshot(){return {enabled:this.enabled,running:Boolean(this.run),frames:this.frames.map(frame=>({...frame}))};},
+  csv(){
+    const columns=['run','timestamp_ms','elapsed_ms','frame_interval_ms','green_x','blue_x','green_increment','blue_increment','position_error','green_row','blue_row'];
+    const value=item=>Number.isFinite(item)?String(item):'';
+    return `${columns.join(',')}\n${this.frames.map(frame=>columns.map(column=>value(frame[column])).join(',')).join('\n')}\n`;
+  },
+  export(){
+    if(!this.enabled)return false;
+    downloadText(this.csv(),'rudiment-playhead-debug.csv','text/csv');return true;
+  }
+};
+if(playheadDebugEnabled)console.info('[Rudiment playhead debug] Blue reference enabled. Export with rudiment.exportPlayheadDebugCsv().');
 function onScoreScroll(event){
   if(scoreData.container===event.currentTarget)scoreData.cameraY=scoreData.container.scrollTop;
 }
@@ -1097,6 +1201,7 @@ function clearScoreFeedback(preserveViewport=false) {
   scoreData.preserveViewportOnRewind=false;
   scoreData.cameraY=0;scoreData.container.scrollTop=0;scoreData.container.scrollLeft=0;
   updateScore(-99,empty);
+  playheadDebug.hide();
 }
 function clearScoreFeedbackPreserveViewport(){clearScoreFeedback(true);}
 
@@ -1175,13 +1280,14 @@ function trapDialogTab(event,selector){
   if(event.shiftKey&&(active===first||!root.contains(active))){event.preventDefault();last.focus();}
   else if(!event.shiftKey&&(active===last||!root.contains(active))){event.preventDefault();first.focus();}
 }
-function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
+function downloadText(value,name,type){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
+function downloadJson(value,name){downloadText(value,name,'application/json');}
 
 window.rudiment={
   bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,savedNotationTheme,saveNotationTheme,
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):Number.NaN,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
+  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),playheadDebugSnapshot:()=>playheadDebug.snapshot(),resetPlayheadDebug:()=>playheadDebug.reset(),playheadDebugCsv:()=>playheadDebug.csv(),exportPlayheadDebugCsv:()=>playheadDebug.export(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };
