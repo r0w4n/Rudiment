@@ -1,23 +1,7 @@
 import * as Tone from 'tone';
 import { WebMidi } from 'webmidi';
 import { openDB } from 'idb';
-import {
-  Renderer,
-  Stave,
-  StaveNote,
-  GraceNote,
-  GraceNoteGroup,
-  Voice,
-  Formatter,
-  Beam,
-  Annotation,
-  AnnotationVerticalJustify,
-  Articulation,
-  BarlineType,
-  Dot,
-  Fraction,
-  Tuplet,
-} from 'vexflow';
+import { Renderer, Stave, StaveNote, GraceNote, GraceNoteGroup, Voice, Formatter, Beam, Annotation, AnnotationVerticalJustify, Articulation, BarlineType, Dot, Fraction, Tuplet } from 'vexflow';
 import { createPresentationHost } from './presentation-host.mjs';
 import { createHighwaySvg } from './highway-svg.mjs';
 
@@ -25,543 +9,297 @@ const DB_NAME = 'rudiment';
 const DB_VERSION = 2;
 const STICKING_PLACEMENT = AnnotationVerticalJustify.BOTTOM;
 const SYSTEM_MARK_BASELINE_CLEARANCE = 24;
-const bridgeUrl =
-  document.currentScript?.src || document.querySelector('script[src*="bridge.js"]')?.src || document.baseURI;
-const publicAsset = (path) => new URL(path, bridgeUrl).toString();
+const bridgeUrl = document.currentScript?.src || document.querySelector('script[src*="bridge.js"]')?.src || document.baseURI;
+const publicAsset = path => new URL(path, bridgeUrl).toString();
 const dbPromise = openDB(DB_NAME, DB_VERSION, {
   upgrade(db) {
     if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' });
     if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'key' });
     if (!db.objectStoreNames.contains('imports')) db.createObjectStore('imports', { keyPath: 'hash' });
     if (!db.objectStoreNames.contains('profiles')) db.createObjectStore('profiles', { keyPath: 'id' });
-  },
-});
-let midiLoadGeneration = 0;
-async function loadSavedImport(hash) {
-  const generation = ++midiLoadGeneration;
-  try {
-    const item = await (await dbPromise).get('imports', hash);
-    if (generation !== midiLoadGeneration) return;
-    if (!item) throw new Error('This MIDI file is no longer in the local library.');
-    if (!midiFileCallback) throw new Error('MIDI import is not ready yet.');
-    midiFileCallback(new Uint8Array(item.bytes), item.name, '');
-  } catch (error) {
-    if (generation === midiLoadGeneration) throw error;
   }
-}
-async function saveLastImport(hash) {
-  const db = await dbPromise,
-    current = await db.get('settings', 'app');
-  await db.put('settings', { key: 'app', value: { ...(current?.value || {}), lastImportHash: hash || null } });
-}
+});
+let midiLoadGeneration=0;
+async function loadSavedImport(hash){const generation=++midiLoadGeneration;try{const item=await (await dbPromise).get('imports',hash);if(generation!==midiLoadGeneration)return;if(!item)throw new Error('This MIDI file is no longer in the local library.');if(!midiFileCallback)throw new Error('MIDI import is not ready yet.');midiFileCallback(new Uint8Array(item.bytes),item.name,'');}catch(error){if(generation===midiLoadGeneration)throw error;}}
+async function saveLastImport(hash){const db=await dbPromise,current=await db.get('settings','app');await db.put('settings',{key:'app',value:{...(current?.value||{}),lastImportHash:hash||null}});}
 const put = async (store, value) => (await dbPromise).put(store, value);
-const all = async (store) => (await dbPromise).getAll(store);
-const clear = async (store) => (await dbPromise).clear(store);
+const all = async store => (await dbPromise).getAll(store);
+const clear = async store => (await dbPromise).clear(store);
 // Practice duration is wall-clock time only while the musical transport is
 // playing. Checkpoints are persisted independently of completed performances,
 // so an interrupted run still contributes without re-counting on resume.
-const practiceTime = {
-  since: null,
-  timer: null,
-  pending: 0,
-  error: null,
-  writes: Promise.resolve(),
-  checkpoint() {
-    if (this.since === null) return;
-    const now = performance.now();
-    this.pending += Math.max(0, now - this.since);
-    this.since = now;
-    this.writes = this.writes
-      .catch(() => {})
-      .then(async () => {
-        const increment = this.pending;
-        if (!increment) return;
-        const db = await dbPromise,
-          tx = db.transaction('settings', 'readwrite');
-        const saved = await tx.store.get('practiceTime');
-        const total = Number(saved?.value) || 0;
-        await tx.store.put({ key: 'practiceTime', value: total + increment });
-        await tx.done;
-        this.pending -= increment;
-        this.error = null;
-      })
-      .catch((error) => {
-        this.error = error;
-      });
+const practiceTime={
+  since:null,timer:null,pending:0,error:null,writes:Promise.resolve(),
+  checkpoint(){
+    if(this.since===null)return;
+    const now=performance.now();this.pending+=Math.max(0,now-this.since);this.since=now;
+    this.writes=this.writes.catch(()=>{}).then(async()=>{
+      const increment=this.pending;if(!increment)return;
+      const db=await dbPromise,tx=db.transaction('settings','readwrite');
+      const saved=await tx.store.get('practiceTime');
+      const total=Number(saved?.value)||0;
+      await tx.store.put({key:'practiceTime',value:total+increment});await tx.done;
+      this.pending-=increment;this.error=null;
+    }).catch(error=>{this.error=error;});
   },
-  start() {
-    if (this.since !== null) return;
-    this.since = performance.now();
-    this.timer = setInterval(() => this.checkpoint(), 5000);
-  },
-  stop() {
-    if (this.since === null) return;
-    this.checkpoint();
-    this.since = null;
-    clearInterval(this.timer);
-    this.timer = null;
-  },
-  async read() {
-    if (this.since !== null) this.checkpoint();
-    await this.writes;
-    if (this.error) throw this.error;
-    return Number((await (await dbPromise).get('settings', 'practiceTime'))?.value) || 0;
-  },
-  async clearHistory() {
-    this.stop();
-    await this.writes;
-    if (this.error) throw this.error;
-    const db = await dbPromise,
-      tx = db.transaction(['sessions', 'settings'], 'readwrite');
-    await tx.objectStore('sessions').clear();
-    await tx.objectStore('settings').delete('practiceTime');
-    await tx.done;
-  },
+  start(){if(this.since!==null)return;this.since=performance.now();this.timer=setInterval(()=>this.checkpoint(),5000);},
+  stop(){if(this.since===null)return;this.checkpoint();this.since=null;clearInterval(this.timer);this.timer=null;},
+  async read(){if(this.since!==null)this.checkpoint();await this.writes;if(this.error)throw this.error;return Number((await (await dbPromise).get('settings','practiceTime'))?.value)||0;},
+  async clearHistory(){this.stop();await this.writes;if(this.error)throw this.error;const db=await dbPromise,tx=db.transaction(['sessions','settings'],'readwrite');await tx.objectStore('sessions').clear();await tx.objectStore('settings').delete('practiceTime');await tx.done;}
 };
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') practiceTime.stop();
-});
-window.addEventListener('pagehide', () => practiceTime.stop());
-const clampVelocity = (velocity) => Math.max(1, Math.min(127, Number(velocity) || 1));
-const velocityGain = (velocity) => {
-  const normalised = (clampVelocity(velocity) - 1) / 126;
-  return 0.025 + 0.975 * Math.pow(normalised, 1.7);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')practiceTime.stop();});
+window.addEventListener('pagehide',()=>practiceTime.stop());
+const clampVelocity = velocity => Math.max(1,Math.min(127,Number(velocity)||1));
+const velocityGain = velocity => {
+  const normalised=(clampVelocity(velocity)-1)/126;
+  return .025+.975*Math.pow(normalised,1.7);
 };
-const velocityLayers = (velocity) => {
-  const position = (clampVelocity(velocity) - 1) / 42;
-  const lower = Math.min(3, Math.floor(position)),
-    upper = Math.min(3, Math.ceil(position)),
-    mix = position - lower;
-  if (lower === upper) return [{ index: lower, weight: 1 }];
-  return [
-    { index: lower, weight: Math.cos((mix * Math.PI) / 2) },
-    { index: upper, weight: Math.sin((mix * Math.PI) / 2) },
-  ];
+const velocityLayers = velocity => {
+  const position=(clampVelocity(velocity)-1)/42;
+  const lower=Math.min(3,Math.floor(position)),upper=Math.min(3,Math.ceil(position)),mix=position-lower;
+  if(lower===upper)return [{index:lower,weight:1}];
+  return [{index:lower,weight:Math.cos(mix*Math.PI/2)},{index:upper,weight:Math.sin(mix*Math.PI/2)}];
 };
-const audioErrorMessage = (error) => (error instanceof Error ? error.message : String(error ?? 'Unknown audio error'));
+const audioErrorMessage = error => error instanceof Error ? error.message : String(error ?? 'Unknown audio error');
 const metronomeSampleFiles = {
-  woodblock: { accent: 'audio/woodblock-accent.wav', regular: 'audio/woodblock-regular.wav' },
-  crisp: { accent: 'audio/click-accent.wav', regular: 'audio/click-regular.wav' },
-  cowbell: { accent: 'audio/cowbell-accent.wav', regular: 'audio/cowbell-regular.wav' },
+  woodblock: { accent:'audio/woodblock-accent.wav', regular:'audio/woodblock-regular.wav' },
+  crisp: { accent:'audio/click-accent.wav', regular:'audio/click-regular.wav' },
+  cowbell: { accent:'audio/cowbell-accent.wav', regular:'audio/cowbell-regular.wav' }
 };
 const drumSampleFiles = {
-  kick: 'audio/kick.wav',
-  closed_hat: 'audio/closed-hat.wav',
-  open_hat: 'audio/open-hat.wav',
+  kick:'audio/kick.wav',
+  closed_hat:'audio/closed-hat.wav',
+  open_hat:'audio/open-hat.wav',
 };
-const metronomeSampleName = (path) => path.slice('audio/'.length, -'.wav'.length);
-const performanceProfile = {
-  enabled: globalThis.__RUDIMENT_PERF__ === true,
-  samples: new Map(),
-  record(name, value) {
-    if (!this.enabled || !Number.isFinite(value)) return;
-    const values = this.samples.get(name) ?? [];
-    values.push(value);
-    this.samples.set(name, values);
-  },
-  reset() {
-    this.samples.clear();
-  },
-  snapshot() {
-    return Object.fromEntries([...this.samples].map(([name, values]) => [name, [...values]]));
-  },
+const metronomeSampleName = path => path.slice('audio/'.length,-'.wav'.length);
+const performanceProfile={
+  enabled:globalThis.__RUDIMENT_PERF__===true,
+  samples:new Map(),
+  record(name,value){if(!this.enabled||!Number.isFinite(value))return;const values=this.samples.get(name)??[];values.push(value);this.samples.set(name,values);},
+  reset(){this.samples.clear();},
+  snapshot(){return Object.fromEntries([...this.samples].map(([name,values])=>[name,[...values]]));}
 };
 // Tone's implicit "now" includes a 100 ms scheduler look-ahead. That is
 // correct for scheduling clicks, but ahead of what the listener hears NOW.
 // Read the same transport at the audio output's current context time instead.
-const transportBeat = (run, now = performance.now()) =>
-  run.offset + Tone.getTransport().getTicksAtTime(audio.outputTime(now)) / Tone.getTransport().PPQ - run.countBeats;
-const presentation = createPresentationHost(
-  () =>
-    audio.activeRun
-      ? {
-          beat: Math.min(audio.activeRun.totalBeats, transportBeat(audio.activeRun)),
-          tempoBpm: Tone.getTransport().bpm.value,
-        }
-      : null,
-  highwayError,
-);
-let highwayHandle = null,
-  highwayObserver = null,
-  highwaySelected = false;
-function highwayError(error) {
-  highwayObserver?.disconnect();
-  highwayObserver = null;
-  highwayHandle = null;
-  const message = document.getElementById('highway-error');
-  if (message) {
-    message.textContent = `Highway unavailable: ${error instanceof Error ? error.message : String(error)}. Switch to Notation to view this exercise.`;
-    message.classList.remove('hidden');
-  }
+const transportBeat=(run,now=performance.now())=>run.offset+Tone.getTransport().getTicksAtTime(audio.outputTime(now))/Tone.getTransport().PPQ-run.countBeats;
+const presentation=createPresentationHost(()=>audio.activeRun?{beat:Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)),tempoBpm:Tone.getTransport().bpm.value}:null,highwayError);
+let highwayHandle=null,highwayObserver=null,highwaySelected=false;
+function highwayError(error){
+  highwayObserver?.disconnect();highwayObserver=null;highwayHandle=null;
+  const message=document.getElementById('highway-error');
+  if(message){message.textContent=`Highway unavailable: ${error instanceof Error?error.message:String(error)}. Switch to Notation to view this exercise.`;message.classList.remove('hidden');}
 }
-function mountHighway() {
-  const viewport = document.getElementById('highway-timeline'),
-    message = document.getElementById('highway-error');
-  if (!viewport || highwayHandle) return;
-  if (message) {
-    message.textContent = '';
-    message.classList.add('hidden');
-  }
-  try {
-    highwayHandle = presentation.mount(
-      createHighwaySvg(
-        viewport,
-        performanceProfile.enabled ? (value) => performanceProfile.record('highway_render_ms', value) : null,
-      ),
-    );
-    const resize = () => {
-      const rect = viewport.getBoundingClientRect();
-      highwayHandle?.resize({ width: rect.width, height: rect.height });
-    };
-    highwayObserver = new ResizeObserver(resize);
-    highwayObserver.observe(viewport);
-    resize();
-  } catch (error) {
-    highwayHandle?.dispose();
-    highwayError(error);
-  }
+function mountHighway(){
+  const viewport=document.getElementById('highway-timeline'),message=document.getElementById('highway-error');
+  if(!viewport||highwayHandle)return;
+  if(message){message.textContent='';message.classList.add('hidden');}
+  try{
+    highwayHandle=presentation.mount(createHighwaySvg(viewport,performanceProfile.enabled?value=>performanceProfile.record('highway_render_ms',value):null));
+    const resize=()=>{const rect=viewport.getBoundingClientRect();highwayHandle?.resize({width:rect.width,height:rect.height});};
+    highwayObserver=new ResizeObserver(resize);highwayObserver.observe(viewport);resize();
+  }catch(error){highwayHandle?.dispose();highwayError(error);}
 }
-function setHighwayMode(selected) {
-  highwaySelected = selected;
-  if (selected) mountHighway();
-  else {
-    highwayObserver?.disconnect();
-    highwayObserver = null;
-    highwayHandle?.dispose();
-    highwayHandle = null;
-  }
+function setHighwayMode(selected){
+  highwaySelected=selected;
+  if(selected)mountHighway();
+  else{highwayObserver?.disconnect();highwayObserver=null;highwayHandle?.dispose();highwayHandle=null;}
 }
-function highwayExerciseChanged() {
+function highwayExerciseChanged(){
   presentation.exerciseChanged();
-  if (highwaySelected && !presentation.isActive()) mountHighway();
+  if(highwaySelected&&!presentation.isActive())mountHighway();
 }
-function savedHighwayMode() {
-  try {
-    return localStorage.getItem('rudiment-visualisation') === 'highway';
-  } catch {
-    return false;
-  }
-}
-function saveHighwayMode(selected) {
-  try {
-    localStorage.setItem('rudiment-visualisation', selected ? 'highway' : 'notation');
-  } catch {
-    /* Storage is optional. */
-  }
-}
-function savedNotationTheme() {
-  try {
-    return localStorage.getItem('rudiment-notation-theme') === 'dark';
-  } catch {
-    return false;
-  }
-}
-function saveNotationTheme(dark) {
-  try {
-    localStorage.setItem('rudiment-notation-theme', dark ? 'dark' : 'light');
-  } catch {
-    /* Storage is optional. */
-  }
-}
-function tempoAtBeat(beat, map, initialBpm) {
-  let bpm = initialBpm;
-  for (const change of map) {
-    if (change.beat > beat) break;
-    bpm = change.bpm;
-  }
-  return bpm;
-}
-function transportPositionAtBeat(beat, meter) {
-  const bars = Math.floor(beat / meter),
-    within = beat - bars * meter;
-  return `${bars}:${within}:0`;
-}
+function savedHighwayMode(){try{return localStorage.getItem('rudiment-visualisation')==='highway';}catch{return false;}}
+function saveHighwayMode(selected){try{localStorage.setItem('rudiment-visualisation',selected?'highway':'notation');}catch{/* Storage is optional. */}}
+function savedNotationTheme(){try{return localStorage.getItem('rudiment-notation-theme')==='dark';}catch{return false;}}
+function saveNotationTheme(dark){try{localStorage.setItem('rudiment-notation-theme',dark?'dark':'light');}catch{/* Storage is optional. */}}
+function tempoAtBeat(beat,map,initialBpm){let bpm=initialBpm;for(const change of map){if(change.beat>beat)break;bpm=change.bpm;}return bpm;}
+function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),within=beat-bars*meter;return `${bars}:${within}:0`;}
 
-function positionMetronomePopover() {
-  const popup = document.getElementById('metronome-popover');
-  if (!popup || popup.classList.contains('hidden')) return;
-  popup.style.setProperty('--metronome-offset-y', '0px');
-  const bounds = popup.getBoundingClientRect(),
-    scale = bounds.width / popup.offsetWidth;
-  const offset = Math.max(8 - bounds.top, Math.min(0, window.innerHeight - 8 - bounds.bottom));
-  popup.style.setProperty('--metronome-offset-y', `${offset / scale}px`);
+function positionMetronomePopover(){
+  const popup=document.getElementById('metronome-popover');
+  if(!popup||popup.classList.contains('hidden'))return;
+  popup.style.setProperty('--metronome-offset-y','0px');
+  const bounds=popup.getBoundingClientRect(),scale=bounds.width/popup.offsetWidth;
+  const offset=Math.max(8-bounds.top,Math.min(0,window.innerHeight-8-bounds.bottom));
+  popup.style.setProperty('--metronome-offset-y',`${offset/scale}px`);
 }
 let metronomePopoverObserver;
-document.addEventListener('click', (event) => {
-  if (!(event.target instanceof Element) || !event.target.closest('#visual-metronome')) return;
-  requestAnimationFrame(() => {
-    const popup = document.getElementById('metronome-popover');
-    if (popup && !metronomePopoverObserver) {
-      metronomePopoverObserver = new ResizeObserver(positionMetronomePopover);
+document.addEventListener('click',event=>{
+  if(!(event.target instanceof Element)||!event.target.closest('#visual-metronome'))return;
+  requestAnimationFrame(()=>{
+    const popup=document.getElementById('metronome-popover');
+    if(popup&&!metronomePopoverObserver){
+      metronomePopoverObserver=new ResizeObserver(positionMetronomePopover);
       metronomePopoverObserver.observe(popup);
     }
     positionMetronomePopover();
   });
 });
-window.addEventListener('resize', positionMetronomePopover);
+window.addEventListener('resize',positionMetronomePopover);
 
 // Native selects can match :focus-visible even when opened by a pointer.
 // Keep keyboard focus visible, but do not retain that ring after mouse/touch.
-document.addEventListener(
-  'pointerdown',
-  (event) => {
-    if (event.target instanceof Element) event.target.closest('.loop-control')?.setAttribute('data-pointer-focus', '');
-  },
-  true,
-);
-document.addEventListener(
-  'keydown',
-  (event) => {
-    if (event.key === 'Tab' || (event.target instanceof Element && event.target.closest('.loop-control')))
-      document.querySelector('.loop-control')?.removeAttribute('data-pointer-focus');
-  },
-  true,
-);
+document.addEventListener('pointerdown',event=>{
+  if(event.target instanceof Element)event.target.closest('.loop-control')?.setAttribute('data-pointer-focus','');
+},true);
+document.addEventListener('keydown',event=>{
+  if(event.key==='Tab'||event.target instanceof Element&&event.target.closest('.loop-control'))document.querySelector('.loop-control')?.removeAttribute('data-pointer-focus');
+},true);
 
 // A glanceable drummer-style display: the sweep borrows the left/right motion
 // of a digital needle, while the LEDs show beat position and a stronger
 // downbeat. Pulses are queued from the same Tone callback and output timestamp
 // as the audible click, so there is no independent visual timer to drift.
 const visualMetronome = {
-  pending: [],
-  lastStep: null,
-  lastDisplayBeat: null,
-  schedule(performanceTime, beat, meter, subdivision) {
-    const step = Math.round(beat * Math.max(1, subdivision));
-    this.pending.push({ performanceTime, beat, meter: Math.max(1, Math.round(meter)), step });
+  pending: [], lastStep: null, lastDisplayBeat: null,
+  schedule(performanceTime,beat,meter,subdivision){
+    const step=Math.round(beat*Math.max(1,subdivision));
+    this.pending.push({performanceTime,beat,meter:Math.max(1,Math.round(meter)),step});
   },
-  pulse(event) {
-    const root = document.getElementById('visual-metronome');
-    if (!root) return;
-    const dots = [...root.querySelectorAll('.visual-metronome-beats i')];
-    const index = ((Math.floor(event.beat) % event.meter) + event.meter) % event.meter;
-    const dot = dots[index];
-    if (!dot) return;
-    performanceProfile.record('metronome_visual_jitter_ms', performance.now() - event.performanceTime);
-    root.dataset.pulse = String(event.step);
-    root.dataset.scheduledAt = String(event.performanceTime);
-    dot.animate(
-      [
-        { transform: 'scale(1)', opacity: 0.72, boxShadow: '0 0 0 transparent' },
-        {
-          transform: index === 0 ? 'scale(1.9)' : 'scale(1.65)',
-          opacity: 1,
-          boxShadow: index === 0 ? '0 0 11px #e7ad66' : '0 0 9px #72d1bd',
-        },
-        { transform: 'scale(1)', opacity: 0.72, boxShadow: '0 0 0 transparent' },
-      ],
-      { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' },
-    );
+  pulse(event){
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    const dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+    const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
+    const dot=dots[index];if(!dot)return;
+    performanceProfile.record('metronome_visual_jitter_ms',performance.now()-event.performanceTime);
+    root.dataset.pulse=String(event.step);root.dataset.scheduledAt=String(event.performanceTime);
+    dot.animate([
+      {transform:'scale(1)',opacity:.72,boxShadow:'0 0 0 transparent'},
+      {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1,boxShadow:index===0?'0 0 11px #e7ad66':'0 0 9px #72d1bd'},
+      {transform:'scale(1)',opacity:.72,boxShadow:'0 0 0 transparent'}
+    ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
   },
-  render(beat, meter, subdivision, now) {
-    const root = document.getElementById('visual-metronome');
-    if (!root) return;
-    meter = Math.max(1, Math.round(meter));
-    subdivision = Math.max(1, subdivision);
-    const whole = Math.floor(beat),
-      fraction = ((beat % 1) + 1) % 1;
-    const beatInBar = ((whole % meter) + meter) % meter;
-    const swing = whole % 2 === 0 ? -1 + fraction * 2 : 1 - fraction * 2;
-    root.style.setProperty('--metronome-swing', String(swing));
-    const display = `${beat < 0 ? 'count' : 'play'}:${beatInBar}:${Math.floor(beat * subdivision)}:${meter}`;
-    if (display !== this.lastDisplayBeat) {
-      this.lastDisplayBeat = display;
-      root.classList.add('active');
-      root.classList.toggle('count-in', beat < 0);
-      root.dataset.beat = String(beatInBar + 1);
-      root.dataset.step = String(Math.floor(beat * subdivision));
-      root
-        .querySelectorAll('.visual-metronome-beats i')
-        .forEach((dot, index) => dot.classList.toggle('current', index === beatInBar));
-      const label = root.querySelector('.visual-metronome-label');
-      if (label) label.textContent = beat < 0 ? 'COUNT IN' : 'PLAY';
-      root.setAttribute(
-        'aria-label',
-        `Metronome settings, ${beat < 0 ? 'COUNT IN' : 'PLAY'}, beat ${beatInBar + 1} of ${meter}`,
-      );
+  render(beat,meter,subdivision,now){
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    meter=Math.max(1,Math.round(meter));subdivision=Math.max(1,subdivision);
+    const whole=Math.floor(beat),fraction=((beat%1)+1)%1;
+    const beatInBar=((whole%meter)+meter)%meter;
+    const swing=whole%2===0?-1+fraction*2:1-fraction*2;
+    root.style.setProperty('--metronome-swing',String(swing));
+    const display=`${beat<0?'count':'play'}:${beatInBar}:${Math.floor(beat*subdivision)}:${meter}`;
+    if(display!==this.lastDisplayBeat){
+      this.lastDisplayBeat=display;
+      root.classList.add('active');root.classList.toggle('count-in',beat<0);
+      root.dataset.beat=String(beatInBar+1);root.dataset.step=String(Math.floor(beat*subdivision));
+      root.querySelectorAll('.visual-metronome-beats i').forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
+      const label=root.querySelector('.visual-metronome-label');if(label)label.textContent=beat<0?'COUNT IN':'PLAY';
+      root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
     }
-    while (this.pending.length && this.pending[0].performanceTime <= now + 8) {
-      const event = this.pending.shift();
-      if (event.step !== this.lastStep) {
-        this.lastStep = event.step;
-        this.pulse(event);
-      }
+    while(this.pending.length&&this.pending[0].performanceTime<=now+8){
+      const event=this.pending.shift();if(event.step!==this.lastStep){this.lastStep=event.step;this.pulse(event);}
     }
   },
-  stop() {
-    this.pending.length = 0;
-    this.lastStep = null;
-    this.lastDisplayBeat = null;
-    const root = document.getElementById('visual-metronome');
-    if (!root) return;
-    root.classList.remove('active', 'count-in');
-    root.style.setProperty('--metronome-swing', '0');
-    delete root.dataset.beat;
-    delete root.dataset.step;
-    delete root.dataset.pulse;
-    delete root.dataset.scheduledAt;
-    root.querySelectorAll('.visual-metronome-beats i').forEach((dot) => dot.classList.remove('current'));
-    const label = root.querySelector('.visual-metronome-label');
-    if (label) label.textContent = 'READY';
-    root.setAttribute('aria-label', 'Metronome settings, READY');
-  },
+  stop(){
+    this.pending.length=0;this.lastStep=null;this.lastDisplayBeat=null;
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    root.classList.remove('active','count-in');root.style.setProperty('--metronome-swing','0');
+    delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
+    root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>dot.classList.remove('current'));
+    const label=root.querySelector('.visual-metronome-label');if(label)label.textContent='READY';
+    root.setAttribute('aria-label','Metronome settings, READY');
+  }
 };
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
-  raw: null,
-  snareGain: null,
-  clickGain: null,
-  master: null,
-  buffers: [],
-  buffersPromise: null,
-  drumBuffers: {},
-  drumBuffersPromise: null,
-  drumSampleErrors: {},
-  drumStarts: { kick: 0, closed_hat: 0, open_hat: 0 },
-  openHatVoices: new Set(),
-  metronomeBuffers: {},
-  metronomeBuffersPromise: null,
-  metronomeSampleErrors: {},
-  layerGains: [],
-  layerPeaks: [],
-  sampleErrors: [],
-  snareStarts: 0,
-  lastSnareError: null,
-  lastMetronomeError: null,
-  voices: new Set(),
-  scheduledVoices: new Set(),
-  raf: 0,
-  generation: 0,
-  state: 'locked',
-  activeRun: null,
-  lastBeat: 0,
+  raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, drumBuffers: {}, drumBuffersPromise: null, drumSampleErrors: {}, drumStarts: {kick:0,closed_hat:0,open_hat:0}, openHatVoices:new Set(), metronomeBuffers: {}, metronomeBuffersPromise: null, metronomeSampleErrors: {}, layerGains: [], layerPeaks: [], sampleErrors: [], snareStarts: 0, lastSnareError: null, lastMetronomeError:null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
   preload() {
     this.state = 'loading';
     this.raw ??= Tone.getContext().rawContext;
     if (!this.master) {
-      this.master = this.raw.createGain();
-      this.master.gain.value = 0.84;
-      this.snareGain = this.raw.createGain();
-      this.snareGain.gain.value = 0.72;
-      this.clickGain = this.raw.createGain();
-      this.clickGain.gain.value = 1.08;
-      const limiter = this.raw.createDynamicsCompressor();
-      limiter.threshold.value = -3;
-      limiter.ratio.value = 12;
-      this.snareGain.connect(this.master);
-      this.clickGain.connect(this.master);
-      this.master.connect(limiter);
-      limiter.connect(this.raw.destination);
+      this.master = this.raw.createGain(); this.master.gain.value = .84;
+      this.snareGain = this.raw.createGain(); this.snareGain.gain.value = .72;
+      this.clickGain = this.raw.createGain(); this.clickGain.gain.value = 1.08;
+      const limiter = this.raw.createDynamicsCompressor(); limiter.threshold.value = -3; limiter.ratio.value = 12;
+      this.snareGain.connect(this.master); this.clickGain.connect(this.master); this.master.connect(limiter); limiter.connect(this.raw.destination);
     }
-    if (!this.buffersPromise) {
+    if(!this.buffersPromise){
       // PCM WAV avoids the optional AAC decoder used by several embedded Web
       // MIDI browsers while preserving the same four acoustic recordings.
-      const urls = [
-        'audio/snare-soft.wav',
-        'audio/snare-medium.wav',
-        'audio/snare-hard.wav',
-        'audio/snare-accent.wav',
-      ].map(publicAsset);
+      const urls = ['audio/snare-soft.wav','audio/snare-medium.wav','audio/snare-hard.wav','audio/snare-accent.wav'].map(publicAsset);
       // Sample loading must never hold the audio context or practice transport
       // hostage. Some Web MIDI wrapper browsers expose Web Audio but leave audio
       // decodeAudioData pending forever. Until an acoustic layer has decoded,
       // snare monitoring stays silent rather than substituting a generated sound.
-      this.buffersPromise = Promise.all(
-        urls.map(async (url, index) => {
-          try {
-            const response = await fetch(url);
-            if (!response.ok) throw new Error(String(response.status));
-            const buffer = await this.raw.decodeAudioData(await response.arrayBuffer());
-            let peak = 0;
-            for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-              const data = buffer.getChannelData(channel);
-              for (let sample = 0; sample < data.length; sample++) peak = Math.max(peak, Math.abs(data[sample]));
-            }
-            // The source recordings vary by almost 28 dB. Normalise their
-            // transients after decoding so velocity changes timbre/dynamics
-            // without making a successfully triggered layer sound missing.
-            if (!Number.isFinite(peak) || peak < 0.00001) throw new Error('Decoded sample is silent');
-            this.layerPeaks[index] = peak;
-            this.layerGains[index] = peak > 0 ? Math.min(24, Math.max(0.5, 0.32 / peak)) : 1;
-            this.buffers[index] = buffer;
-            return buffer;
-          } catch (error) {
-            this.sampleErrors[index] = audioErrorMessage(error);
-            return null;
+      this.buffersPromise = Promise.all(urls.map(async (url,index) => {
+        try {
+          const response = await fetch(url); if (!response.ok) throw new Error(String(response.status));
+          const buffer = await this.raw.decodeAudioData(await response.arrayBuffer());
+          let peak = 0;
+          for (let channel=0;channel<buffer.numberOfChannels;channel++) {
+            const data=buffer.getChannelData(channel);
+            for (let sample=0;sample<data.length;sample++) peak=Math.max(peak,Math.abs(data[sample]));
           }
-        }),
-      ).then((buffers) => {
-        this.buffers = buffers;
+          // The source recordings vary by almost 28 dB. Normalise their
+          // transients after decoding so velocity changes timbre/dynamics
+          // without making a successfully triggered layer sound missing.
+          if (!Number.isFinite(peak) || peak < .00001) throw new Error('Decoded sample is silent');
+          this.layerPeaks[index]=peak;
+          this.layerGains[index]=peak>0?Math.min(24,Math.max(.5,.32/peak)):1;
+          this.buffers[index]=buffer;
+          return buffer;
+        }
+        catch(error) { this.sampleErrors[index]=audioErrorMessage(error); return null; }
+      })).then(buffers => {
+        this.buffers=buffers;
         this.updateSampleState();
         return buffers;
       });
     }
-    if (!this.metronomeBuffersPromise) {
-      const entries = Object.entries(metronomeSampleFiles).flatMap(([, layers]) =>
-        Object.values(layers).map((path) => ({ name: metronomeSampleName(path), url: publicAsset(path) })),
+    if(!this.metronomeBuffersPromise){
+      const entries=Object.entries(metronomeSampleFiles).flatMap(([,layers])=>
+        Object.values(layers).map(path=>({name:metronomeSampleName(path),url:publicAsset(path)}))
       );
-      this.metronomeBuffersPromise = Promise.all(
-        entries.map(async ({ name, url }) => {
-          try {
-            const response = await fetch(url);
-            if (!response.ok) throw new Error(String(response.status));
-            const buffer = await this.raw.decodeAudioData(await response.arrayBuffer());
-            let peak = 0;
-            for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-              const data = buffer.getChannelData(channel);
-              for (let sample = 0; sample < data.length; sample++) peak = Math.max(peak, Math.abs(data[sample]));
-            }
-            if (!Number.isFinite(peak) || peak < 0.00001) throw new Error('Decoded sample is silent');
-            return { name, buffer };
-          } catch (error) {
-            this.metronomeSampleErrors[name] = audioErrorMessage(error);
-            return { name, buffer: null };
+      this.metronomeBuffersPromise=Promise.all(entries.map(async({name,url})=>{
+        try{
+          const response=await fetch(url);if(!response.ok)throw new Error(String(response.status));
+          const buffer=await this.raw.decodeAudioData(await response.arrayBuffer());
+          let peak=0;
+          for(let channel=0;channel<buffer.numberOfChannels;channel++){
+            const data=buffer.getChannelData(channel);
+            for(let sample=0;sample<data.length;sample++)peak=Math.max(peak,Math.abs(data[sample]));
           }
-        }),
-      ).then((entries) => {
-        this.metronomeBuffers = Object.fromEntries(entries.map(({ name, buffer }) => [name, buffer]));
+          if(!Number.isFinite(peak)||peak<.00001)throw new Error('Decoded sample is silent');
+          return {name,buffer};
+        }catch(error){
+          this.metronomeSampleErrors[name]=audioErrorMessage(error);
+          return {name,buffer:null};
+        }
+      })).then(entries=>{
+        this.metronomeBuffers=Object.fromEntries(entries.map(({name,buffer})=>[name,buffer]));
         this.updateSampleState();
         return this.metronomeBuffers;
       });
     }
-    if (!this.drumBuffersPromise) {
-      this.drumBuffersPromise = Promise.all(
-        Object.entries(drumSampleFiles).map(async ([name, path]) => {
-          try {
-            const response = await fetch(publicAsset(path));
-            if (!response.ok) throw new Error(String(response.status));
-            return [name, await this.raw.decodeAudioData(await response.arrayBuffer())];
-          } catch (error) {
-            this.drumSampleErrors[name] = audioErrorMessage(error);
-            return [name, null];
-          }
-        }),
-      ).then((entries) => {
-        this.drumBuffers = Object.fromEntries(entries);
+    if(!this.drumBuffersPromise){
+      this.drumBuffersPromise=Promise.all(Object.entries(drumSampleFiles).map(async([name,path])=>{
+        try{
+          const response=await fetch(publicAsset(path));if(!response.ok)throw new Error(String(response.status));
+          return [name,await this.raw.decodeAudioData(await response.arrayBuffer())];
+        }catch(error){
+          this.drumSampleErrors[name]=audioErrorMessage(error);
+          return [name,null];
+        }
+      })).then(entries=>{
+        this.drumBuffers=Object.fromEntries(entries);
         this.updateSampleState();
         return this.drumBuffers;
       });
     }
-    return Promise.all([this.buffersPromise, this.metronomeBuffersPromise, this.drumBuffersPromise]);
+    return Promise.all([this.buffersPromise,this.metronomeBuffersPromise,this.drumBuffersPromise]);
   },
-  updateSampleState() {
-    const drumsReady = this.buffers.some(Boolean) || Object.values(this.drumBuffers).some(Boolean),
-      metronomeReady = Object.values(this.metronomeBuffers).some(Boolean);
-    this.state = drumsReady || metronomeReady ? 'ready' : 'unavailable';
+  updateSampleState(){
+    const drumsReady=this.buffers.some(Boolean)||Object.values(this.drumBuffers).some(Boolean),metronomeReady=Object.values(this.metronomeBuffers).some(Boolean);
+    this.state=drumsReady||metronomeReady?'ready':'unavailable';
   },
-  async waitForMetronome(timbre) {
-    const layers = metronomeSampleFiles[timbre];
-    if (!layers) throw new Error(`Unknown metronome preset: ${timbre}`);
+  async waitForMetronome(timbre){
+    const layers=metronomeSampleFiles[timbre];
+    if(!layers)throw new Error(`Unknown metronome preset: ${timbre}`);
     await this.metronomeBuffersPromise;
-    const missing = Object.entries(layers).filter(([, path]) => !this.metronomeBuffers[metronomeSampleName(path)]);
-    if (missing.length) {
-      const details = missing
-        .map(
-          ([, path]) =>
-            `${metronomeSampleName(path)}: ${this.metronomeSampleErrors[metronomeSampleName(path)] || 'sample unavailable'}`,
-        )
-        .join('; ');
+    const missing=Object.entries(layers).filter(([,path])=>!this.metronomeBuffers[metronomeSampleName(path)]);
+    if(missing.length){
+      const details=missing.map(([,path])=>`${metronomeSampleName(path)}: ${this.metronomeSampleErrors[metronomeSampleName(path)]||'sample unavailable'}`).join('; ');
       throw new Error(`Unable to load metronome samples (${details})`);
     }
     return true;
@@ -570,23 +308,12 @@ const audio = {
     // Start/resume the context immediately while the Connect click still has
     // mobile browser user activation. MIDI permission UI may otherwise consume
     // that activation before the asynchronous sample decode has completed.
-    const startPromise = Tone.start();
+    const startPromise=Tone.start();
     this.preload();
-    try {
-      await startPromise;
-    } catch (error) {
-      this.state = 'locked';
-      this.lastSnareError = audioErrorMessage(error);
-      throw error;
-    }
-    if (this.buffers.length || Object.keys(this.drumBuffers).length || Object.keys(this.metronomeBuffers).length)
-      this.updateSampleState();
-    return {
-      state: this.state,
-      sampleLayers: this.buffers.filter(Boolean).length,
-      drumSampleCount: Object.values(this.drumBuffers).filter(Boolean).length,
-      metronomeSampleCount: Object.values(this.metronomeBuffers).filter(Boolean).length,
-    };
+    try { await startPromise; }
+    catch(error) { this.state='locked'; this.lastSnareError=audioErrorMessage(error); throw error; }
+    if(this.buffers.length||Object.keys(this.drumBuffers).length||Object.keys(this.metronomeBuffers).length)this.updateSampleState();
+    return { state: this.state, sampleLayers: this.buffers.filter(Boolean).length, drumSampleCount:Object.values(this.drumBuffers).filter(Boolean).length, metronomeSampleCount:Object.values(this.metronomeBuffers).filter(Boolean).length };
   },
   perfAt(audioTime) {
     const direct = performance.now() + (audioTime - this.raw.currentTime) * 1000;
@@ -599,1900 +326,873 @@ const audio = {
     return direct;
   },
   outputTime(now) {
-    const timestamp = this.raw?.getOutputTimestamp?.();
-    if (timestamp) {
-      const direct = now + (timestamp.contextTime - this.raw.currentTime) * 1000;
-      if (
-        Number.isFinite(timestamp.performanceTime) &&
-        Number.isFinite(direct) &&
-        Math.abs(timestamp.performanceTime - direct) < 120
-      )
-        return timestamp.contextTime + (now - timestamp.performanceTime) / 1000;
+    const timestamp=this.raw?.getOutputTimestamp?.();
+    if(timestamp){
+      const direct=now+(timestamp.contextTime-this.raw.currentTime)*1000;
+      if(Number.isFinite(timestamp.performanceTime)&&Number.isFinite(direct)
+        && Math.abs(timestamp.performanceTime-direct)<120)
+        return timestamp.contextTime+(now-timestamp.performanceTime)/1000;
     }
     // No reliable output timestamp: the unscheduled audio context time is
     // still preferable to Tone.now() with its intentional look-ahead.
-    return this.raw?.currentTime ?? Tone.immediate();
+    return this.raw?.currentTime??Tone.immediate();
   },
   playSnare(velocity = 105, when = null, articulation = 'center') {
-    const profileStart = performanceProfile.enabled ? performance.now() : 0;
-    if (!this.raw || this.raw.state !== 'running') {
-      this.state = 'locked';
-      return false;
-    }
-    if (Number(velocity) <= 0) return false;
-    const time = when ?? this.raw.currentTime,
-      scheduled = time > this.raw.currentTime + 0.001,
-      response = velocityGain(velocity);
-    const layers = velocityLayers(velocity).filter((layer) => this.buffers[layer.index]);
-    let started = 0;
+    const profileStart=performanceProfile.enabled?performance.now():0;
+    if (!this.raw || this.raw.state !== 'running') { this.state='locked'; return false; }
+    if(Number(velocity)<=0)return false;
+    const time = when ?? this.raw.currentTime, scheduled=time>this.raw.currentTime+.001, response=velocityGain(velocity);
+    const layers=velocityLayers(velocity).filter(layer=>this.buffers[layer.index]);
+    let started=0;
     if (layers.length) {
-      for (const layer of layers) {
+      for(const layer of layers){
         try {
-          const source = this.raw.createBufferSource(),
-            gain = this.raw.createGain();
-          source.buffer = this.buffers[layer.index];
-          const articulationRate = articulation === 'rim' ? 1.16 : articulation === 'snare_wires_off' ? 0.88 : 1;
-          const articulationGain = articulation === 'rim' ? 0.82 : articulation === 'snare_wires_off' ? 0.72 : 1;
-          source.playbackRate.value = articulationRate * (0.99 + Math.random() * 0.02);
-          gain.gain.value = (this.layerGains[layer.index] || 1) * response * layer.weight * articulationGain;
-          source.connect(gain);
-          gain.connect(this.snareGain);
-          this.voices.add(source);
-          source.onended = () => {
-            this.voices.delete(source);
-            this.scheduledVoices.delete(source);
-            source.disconnect();
-            gain.disconnect();
-          };
-          if (scheduled) this.scheduledVoices.add(source);
-          source.start(time);
-          started++;
-        } catch (error) {
-          this.lastSnareError = audioErrorMessage(error);
-        }
+          const source = this.raw.createBufferSource(), gain = this.raw.createGain(); source.buffer = this.buffers[layer.index];
+          const articulationRate=articulation==='rim'?1.16:articulation==='snare_wires_off' ? .88 : 1;
+          const articulationGain=articulation==='rim' ? .82 : articulation==='snare_wires_off' ? .72 : 1;
+          source.playbackRate.value = articulationRate * (.99 + Math.random() * .02);
+          gain.gain.value = (this.layerGains[layer.index]||1) * response * layer.weight * articulationGain;
+          source.connect(gain); gain.connect(this.snareGain);this.voices.add(source);
+          source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);source.disconnect();gain.disconnect();};
+          if(scheduled)this.scheduledVoices.add(source);
+          source.start(time);started++;
+        } catch(error) { this.lastSnareError=audioErrorMessage(error); }
       }
     }
-    this.snareStarts += started;
-    performanceProfile.record('audio_scheduling_ms', performance.now() - profileStart);
-    return started > 0;
+    this.snareStarts+=started;
+    performanceProfile.record('audio_scheduling_ms',performance.now()-profileStart);
+    return started>0;
   },
   monitorSnare(velocity = 105) {
-    if (Number(velocity) <= 0) return false;
-    if (this.playSnare(velocity)) return true;
+    if(Number(velocity)<=0)return false;
+    if(this.playSnare(velocity))return true;
     // The context is already available, so a false result here only means the
     // acoustic layer is still loading or unavailable. Do not ask Tone to unlock
     // again for every hit while preloading is in flight.
-    if (this.raw?.state === 'running') return true;
+    if(this.raw?.state==='running')return true;
     // A permission sheet, screen rotation or mobile power policy can suspend a
     // previously unlocked context. The Connect gesture has already authorised
     // audio, so make the sample graph ready for the next physical strike.
     // Auto-reconnected MIDI devices can deliver a hit before the user has
     // opened the connection panel. Create/resume the graph without replacing
     // that first strike with a generated sound.
-    this.ensure()
-      .then(() => this.playSnare(velocity))
-      .catch((error) => {
-        this.lastSnareError = audioErrorMessage(error);
-      });
+    this.ensure().then(()=>this.playSnare(velocity)).catch(error=>{this.lastSnareError=audioErrorMessage(error);});
     return true;
   },
   chokeOpenHat(when = null) {
-    const time = when ?? this.raw?.currentTime ?? 0;
-    for (const source of this.openHatVoices) {
-      try {
-        source.stop(Math.max(time, this.raw?.currentTime ?? time) + 0.012);
-      } catch {
-        /* A voice that has already ended is harmless. */
-      }
+    const time=when??this.raw?.currentTime??0;
+    for(const source of this.openHatVoices){
+      try{source.stop(Math.max(time,(this.raw?.currentTime??time))+.012);}
+      catch{/* A voice that has already ended is harmless. */}
     }
   },
-  playDrum(instrument = 'snare', articulation = 'unspecified', velocity = 105, when = null) {
-    if (instrument === 'snare') return this.playSnare(velocity, when, articulation);
-    const canonical = instrument === 'pedal_hat' ? 'closed_hat' : instrument;
-    if (!Object.hasOwn(drumSampleFiles, canonical)) return false;
-    if (!this.raw || this.raw.state !== 'running' || Number(velocity) <= 0) return false;
-    const time = when ?? this.raw.currentTime;
-    if (canonical === 'closed_hat' || articulation === 'closed' || articulation === 'pedal') this.chokeOpenHat(time);
-    const buffer = this.drumBuffers[canonical];
-    if (!buffer) return false;
-    try {
-      const source = this.raw.createBufferSource(),
-        gain = this.raw.createGain(),
-        scheduled = time > this.raw.currentTime + 0.001;
-      source.buffer = buffer;
-      source.playbackRate.value = 0.99 + Math.random() * 0.02;
-      gain.gain.value = velocityGain(velocity) * (canonical === 'kick' ? 1.15 : 0.82);
-      source.connect(gain);
-      gain.connect(this.snareGain);
+  playDrum(instrument='snare',articulation='unspecified',velocity=105,when=null) {
+    if(instrument==='snare')return this.playSnare(velocity,when,articulation);
+    const canonical=instrument==='pedal_hat'?'closed_hat':instrument;
+    if(!Object.hasOwn(drumSampleFiles,canonical))return false;
+    if(!this.raw||this.raw.state!=='running'||Number(velocity)<=0)return false;
+    const time=when??this.raw.currentTime;
+    if(canonical==='closed_hat'||articulation==='closed'||articulation==='pedal')this.chokeOpenHat(time);
+    const buffer=this.drumBuffers[canonical];
+    if(!buffer)return false;
+    try{
+      const source=this.raw.createBufferSource(),gain=this.raw.createGain(),scheduled=time>this.raw.currentTime+.001;
+      source.buffer=buffer;
+      source.playbackRate.value=.99+Math.random()*.02;
+      gain.gain.value=velocityGain(velocity)*(canonical==='kick'?1.15:.82);
+      source.connect(gain);gain.connect(this.snareGain);
       this.voices.add(source);
-      if (scheduled) this.scheduledVoices.add(source);
-      if (canonical === 'open_hat') this.openHatVoices.add(source);
-      source.onended = () => {
-        this.voices.delete(source);
-        this.scheduledVoices.delete(source);
-        this.openHatVoices.delete(source);
-        source.disconnect();
-        gain.disconnect();
-      };
+      if(scheduled)this.scheduledVoices.add(source);
+      if(canonical==='open_hat')this.openHatVoices.add(source);
+      source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);this.openHatVoices.delete(source);source.disconnect();gain.disconnect();};
       source.start(time);
-      this.drumStarts[canonical] = (this.drumStarts[canonical] ?? 0) + 1;
+      this.drumStarts[canonical]=(this.drumStarts[canonical]??0)+1;
       return true;
-    } catch (error) {
-      this.lastSnareError = audioErrorMessage(error);
-      return false;
-    }
+    }catch(error){this.lastSnareError=audioErrorMessage(error);return false;}
   },
-  monitorDrum(instrument = 'snare', articulation = 'unspecified', velocity = 105) {
-    if (Number(velocity) <= 0) return false;
-    if (this.playDrum(instrument, articulation, velocity)) return true;
-    if (this.raw?.state === 'running') return true;
-    this.ensure()
-      .then(() => this.playDrum(instrument, articulation, velocity))
-      .catch((error) => {
-        this.lastSnareError = audioErrorMessage(error);
-      });
+  monitorDrum(instrument='snare',articulation='unspecified',velocity=105){
+    if(Number(velocity)<=0)return false;
+    if(this.playDrum(instrument,articulation,velocity))return true;
+    if(this.raw?.state==='running')return true;
+    this.ensure().then(()=>this.playDrum(instrument,articulation,velocity)).catch(error=>{this.lastSnareError=audioErrorMessage(error);});
     return true;
   },
   click(time, accent = false, timbre = 'woodblock') {
-    const profileStart = performanceProfile.enabled ? performance.now() : 0;
-    const samplePath = metronomeSampleFiles[timbre]?.[accent ? 'accent' : 'regular'];
-    const sampleName = samplePath ? metronomeSampleName(samplePath) : `${timbre}-${accent ? 'accent' : 'regular'}`;
-    const buffer = this.metronomeBuffers[sampleName];
-    if (!buffer) {
-      this.lastMetronomeError = `Missing decoded sample: ${sampleName}`;
-      return false;
-    }
-    try {
-      const source = this.raw.createBufferSource();
-      source.buffer = buffer;
-      source.connect(this.clickGain);
-      source.onended = () => {
-        this.voices.delete(source);
-        this.scheduledVoices.delete(source);
-        source.disconnect();
-      };
+    const profileStart=performanceProfile.enabled?performance.now():0;
+    const samplePath=metronomeSampleFiles[timbre]?.[accent?'accent':'regular'];
+    const sampleName=samplePath?metronomeSampleName(samplePath):`${timbre}-${accent?'accent':'regular'}`;
+    const buffer=this.metronomeBuffers[sampleName];
+    if(!buffer){this.lastMetronomeError=`Missing decoded sample: ${sampleName}`;return false;}
+    try{
+      const source=this.raw.createBufferSource();source.buffer=buffer;source.connect(this.clickGain);
+      source.onended=()=>{this.voices.delete(source);this.scheduledVoices.delete(source);source.disconnect();};
       this.voices.add(source);
-      if (time > this.raw.currentTime + 0.001) this.scheduledVoices.add(source);
+      if(time>this.raw.currentTime+.001)this.scheduledVoices.add(source);
       source.start(time);
-      performanceProfile.record('metronome_audio_scheduling_ms', performance.now() - profileStart);
+      performanceProfile.record('metronome_audio_scheduling_ms',performance.now()-profileStart);
       return true;
-    } catch (error) {
-      this.lastMetronomeError = audioErrorMessage(error);
-      performanceProfile.record('metronome_audio_scheduling_ms', performance.now() - profileStart);
+    }catch(error){
+      this.lastMetronomeError=audioErrorMessage(error);
+      performanceProfile.record('metronome_audio_scheduling_ms',performance.now()-profileStart);
       return false;
     }
   },
   stop() {
-    if (this.activeRun) {
-      this.lastBeat = Math.min(this.activeRun.totalBeats, transportBeat(this.activeRun));
-      if (presentation.isActive()) presentation.position(this.lastBeat, Tone.getTransport().bpm.value);
-    }
-    this.generation++;
-    cancelAnimationFrame(this.raf);
-    this.raf = 0;
+    if(this.activeRun){this.lastBeat=Math.min(this.activeRun.totalBeats,transportBeat(this.activeRun));if(presentation.isActive())presentation.position(this.lastBeat,Tone.getTransport().bpm.value);}
+    this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
     // Stop the old clock at the current audio time, not Tone.now() (which is
     // in the future). Otherwise an output-time read sees the previous run
     // through the look-ahead window during a restart or bar retry.
-    const transport = Tone.getTransport();
-    transport.stop(this.raw?.currentTime ?? Tone.immediate());
-    transport.cancel(0);
-    transport.seconds = 0;
-    for (const source of this.scheduledVoices) {
-      try {
-        source.stop();
-      } catch (error) {
-        this.lastSnareError = audioErrorMessage(error);
-      }
+    const transport = Tone.getTransport(); transport.stop(this.raw?.currentTime??Tone.immediate()); transport.cancel(0); transport.seconds = 0;
+    for(const source of this.scheduledVoices){
+      try{source.stop();}
+      catch(error){this.lastSnareError=audioErrorMessage(error);}
     }
     this.scheduledVoices.clear();
-    this.activeRun = null;
-    visualMetronome.stop();
+    this.activeRun=null;visualMetronome.stop();
   },
   setTempo(bpm) {
-    const requested = Math.max(30, Math.min(240, Number(bpm) || 60)),
-      run = this.activeRun;
-    if (!run) return false;
-    run.tempoScale = requested / run.sourceBpm;
-    const transport = Tone.getTransport(),
-      elapsed = transport.getTicksAtTime(this.outputTime(performance.now())) / transport.PPQ;
-    const rawBeat = run.offset + elapsed - run.countBeats,
-      exerciseBeat = Math.max(run.offset, rawBeat);
-    const value = tempoAtBeat(exerciseBeat, run.tempoMap, run.sourceBpm) * run.tempoScale;
-    transport.bpm.setValueAtTime(value, Tone.now());
-    if (rawBeat < 0) run.runPerformance = performance.now() + (-rawBeat * 60000) / value;
+    const requested=Math.max(30,Math.min(240,Number(bpm)||60)),run=this.activeRun;
+    if(!run)return false;
+    run.tempoScale=requested/run.sourceBpm;
+    const transport=Tone.getTransport(),elapsed=transport.getTicksAtTime(this.outputTime(performance.now()))/transport.PPQ;
+    const rawBeat=run.offset+elapsed-run.countBeats,exerciseBeat=Math.max(run.offset,rawBeat);
+    const value=tempoAtBeat(exerciseBeat,run.tempoMap,run.sourceBpm)*run.tempoScale;
+    transport.bpm.setValueAtTime(value,Tone.now());
+    if(rawBeat<0)run.runPerformance=performance.now()+(-rawBeat)*60000/value;
     return true;
   },
   async start(options, onFrame, onDone) {
     // Invalidate the current run before audio decoding. A Stop/Restart action
     // while ensure() is pending increments generation again, preventing this
     // asynchronous start from reviving a session the user already stopped.
-    this.stop();
-    const generation = this.generation;
-    try {
+    this.stop(); const generation = this.generation;
+    try{
       await this.ensure();
-      if (generation !== this.generation) return { cancelled: true, state: this.state };
-      if (options.metronome) await this.waitForMetronome(options.timbre || 'woodblock');
-    } catch (error) {
-      if (generation !== this.generation) return { cancelled: true, state: this.state };
+      if(generation!==this.generation)return {cancelled:true,state:this.state};
+      if(options.metronome)await this.waitForMetronome(options.timbre||'woodblock');
+    }catch(error){
+      if(generation!==this.generation)return {cancelled:true,state:this.state};
       throw error;
     }
-    if (generation !== this.generation) return { cancelled: true, state: this.state };
-    const transport = Tone.getTransport(),
-      tempoMap = (options.tempoMap || []).slice().sort((a, b) => a.beat - b.beat),
-      sourceBpm = options.sourceBpm || options.bpm,
-      tempoScale = options.bpm / sourceBpm,
-      offset = options.offsetBeat || 0,
-      initialBpm = tempoAtBeat(offset, tempoMap, sourceBpm) * tempoScale,
-      countBeats = Math.max(
-        0,
-        Number.isFinite(Number(options.countInBeats))
-          ? Number(options.countInBeats)
-          : Number(options.countInBars || 0) * options.meter,
-      );
-    const remaining = Math.max(0, options.totalBeats - offset),
-      scoringTailBeats = Math.max(0, Number(options.scoringTailBeats) || 0);
-    const countInSeconds = (countBeats * 60) / initialBpm,
-      subdivision = Math.max(1, options.subdivision || 1),
-      interval = `${4 * subdivision}n`;
-    const referenceNotes = (options.referenceNotes || []).filter(
-      (note) =>
-        Number.isFinite(Number(note.beat)) &&
-        Number(note.beat) >= offset - 0.000001 &&
-        Number(note.beat) < options.totalBeats - 0.000001 &&
-        Number(note.velocity) > 0,
-    );
-    this.activeRun = {
-      tempoMap,
-      sourceBpm,
-      tempoScale,
-      offset,
-      countBeats,
-      totalBeats: options.totalBeats,
-      runPerformance: 0,
-      referenceNoteCount: referenceNotes.length,
-      metronome: options.metronome,
-      timbre: options.timbre,
-    };
-    transport.bpm.value = initialBpm;
-    transport.timeSignature = options.meter;
-    for (const change of tempoMap) {
-      if (change.beat <= offset) continue;
-      const position = transportPositionAtBeat(countBeats + change.beat - offset, options.meter);
-      transport.scheduleOnce((time) => {
-        if (generation === this.generation)
-          this.activeRun && transport.bpm.setValueAtTime(change.bpm * this.activeRun.tempoScale, time);
-      }, position);
-    }
-    for (const note of referenceNotes) {
-      const position = transportPositionAtBeat(countBeats + Number(note.beat) - offset, options.meter);
-      transport.scheduleOnce((time) => {
-        if (generation === this.generation)
-          this.playDrum(
-            note.instrument ?? 'snare',
-            note.articulation ?? 'unspecified',
-            Math.max(1, Math.min(127, Math.round(Number(note.velocity) || 1))),
-            time,
-          );
-      }, position);
-    }
-    const scheduleClick = (time, countIn = false) => {
-      if (generation !== this.generation) return;
-      const transportBeat = transport.getTicksAtTime(time) / transport.PPQ;
-      const beatStep = Math.round(
-        (countIn ? transportBeat - countBeats : offset + transportBeat - countBeats) * subdivision,
-      );
-      const beat = beatStep / subdivision;
+    if(generation!==this.generation)return {cancelled:true,state:this.state};
+    const transport = Tone.getTransport(), tempoMap=(options.tempoMap||[]).slice().sort((a,b)=>a.beat-b.beat),sourceBpm=options.sourceBpm||options.bpm,tempoScale=options.bpm/sourceBpm,offset = options.offsetBeat || 0,initialBpm=tempoAtBeat(offset,tempoMap,sourceBpm)*tempoScale,countBeats = Math.max(0,Number.isFinite(Number(options.countInBeats))?Number(options.countInBeats):Number(options.countInBars||0)*options.meter);
+    const remaining = Math.max(0, options.totalBeats - offset), scoringTailBeats=Math.max(0,Number(options.scoringTailBeats)||0);
+    const countInSeconds=countBeats*60/initialBpm,subdivision = Math.max(1, options.subdivision || 1), interval = `${4*subdivision}n`;
+    const referenceNotes=(options.referenceNotes||[]).filter(note=>Number.isFinite(Number(note.beat))&&Number(note.beat)>=offset-.000001&&Number(note.beat)<options.totalBeats-.000001&&Number(note.velocity)>0);
+    this.activeRun={tempoMap,sourceBpm,tempoScale,offset,countBeats,totalBeats:options.totalBeats,runPerformance:0,referenceNoteCount:referenceNotes.length,metronome:options.metronome,timbre:options.timbre};
+    transport.bpm.value = initialBpm; transport.timeSignature = options.meter;
+    for(const change of tempoMap){if(change.beat<=offset)continue;const position=transportPositionAtBeat(countBeats+change.beat-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.activeRun&&transport.bpm.setValueAtTime(change.bpm*this.activeRun.tempoScale,time);},position);}
+    for(const note of referenceNotes){const position=transportPositionAtBeat(countBeats+Number(note.beat)-offset,options.meter);transport.scheduleOnce(time=>{if(generation===this.generation)this.playDrum(note.instrument??'snare',note.articulation??'unspecified',Math.max(1,Math.min(127,Math.round(Number(note.velocity)||1))),time);},position);}
+    const scheduleClick=(time,countIn=false)=>{
+      if(generation!==this.generation)return;
+      const transportBeat=transport.getTicksAtTime(time)/transport.PPQ;
+      const beatStep=Math.round((countIn?transportBeat-countBeats:offset+transportBeat-countBeats)*subdivision);
+      const beat=beatStep/subdivision;
       // The transport remains alive for the scoring late-delivery drain, but
       // that silent tail is not another musical bar and must not click.
-      if (!countIn && (beat < offset - 0.000001 || beat >= options.totalBeats - 0.000001)) return;
-      visualMetronome.schedule(this.perfAt(time), beat, options.meter, subdivision);
-      const barSteps = options.meter * subdivision;
-      if (options.metronome) this.click(time, ((beatStep % barSteps) + barSteps) % barSteps === 0, options.timbre);
+      if(!countIn&&(beat<offset-.000001||beat>=options.totalBeats-.000001))return;
+      visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision);
+      const barSteps=options.meter*subdivision;
+      if(options.metronome)this.click(time,((beatStep%barSteps)+barSteps)%barSteps===0,options.timbre);
     };
     // Count-in uses its own grid. Practice resumes on the original exercise
     // grid, so a pause between beats never redefines the downbeat or shifts
     // subsequent clicks away from the written notes.
-    const firstCountStep = Math.ceil(-countBeats * subdivision - 0.000001);
-    for (let step = firstCountStep; step < 0; step++) {
-      const position = transportPositionAtBeat(countBeats + step / subdivision, options.meter);
-      transport.scheduleOnce((time) => scheduleClick(time, true), position);
+    const firstCountStep=Math.ceil(-countBeats*subdivision-.000001);
+    for(let step=firstCountStep;step<0;step++){
+      const position=transportPositionAtBeat(countBeats+step/subdivision,options.meter);
+      transport.scheduleOnce(time=>scheduleClick(time,true),position);
     }
-    const practiceStep = Math.ceil(offset * subdivision);
-    const firstPracticeBeat = countBeats + practiceStep / subdivision - offset;
-    transport.scheduleRepeat(
-      (time) => scheduleClick(time),
-      interval,
-      transportPositionAtBeat(firstPracticeBeat, options.meter),
-    );
+    const practiceStep=Math.ceil(offset*subdivision);
+    const firstPracticeBeat=countBeats+practiceStep/subdivision-offset;
+    transport.scheduleRepeat(time=>scheduleClick(time),interval,transportPositionAtBeat(firstPracticeBeat,options.meter));
     // Establish the scoring origin from the actual scheduled start. Tone
     // starts at Tone.now(), not raw.currentTime; schedule setup may itself
     // take several frames on a dense exercise.
-    const transportStart = Tone.now(),
-      runAudio = transportStart + countInSeconds,
-      runPerformance = this.perfAt(runAudio);
-    this.activeRun.runPerformance = runPerformance;
+    const transportStart=Tone.now(),runAudio=transportStart+countInSeconds,runPerformance=this.perfAt(runAudio);
+    this.activeRun.runPerformance=runPerformance;
     transport.start(transportStart);
-    const initialBeat = offset - countBeats;
-    this.lastBeat = initialBeat;
-    onFrame(initialBeat, performance.now(), runPerformance);
-    if (presentation.isActive()) presentation.position(initialBeat, transport.bpm.value);
-    let lastStateFrame = -Infinity;
-    let lastAnimationFrame = performance.now();
+    const initialBeat=offset-countBeats;
+    this.lastBeat=initialBeat;
+    onFrame(initialBeat,performance.now(),runPerformance);
+    if(presentation.isActive())presentation.position(initialBeat,transport.bpm.value);
+    let lastStateFrame=-Infinity;
+    let lastAnimationFrame=performance.now();
     const frame = () => {
       if (generation !== this.generation) return;
       // Keep the score at the exact paused position during the short audio
       // scheduling lead-in. Without the clamp, resuming visibly jumps the
       // playhead backwards before the Tone transport starts.
-      const now = performance.now(),
-        elapsedBeats = transport.getTicksAtTime(this.outputTime(now)) / transport.PPQ;
-      performanceProfile.record('animation_frame_interval_ms', now - lastAnimationFrame);
-      lastAnimationFrame = now;
-      const beat = offset + elapsedBeats - countBeats;
-      const musicalBeat = Math.min(beat, options.totalBeats - 0.000001);
-      this.lastBeat = Math.min(beat, options.totalBeats);
-      const rangeStart = Number(options.displayRangeStart) || 0,
-        rangeBeats = Math.max(0.001, Number(options.displayRangeBeats) || options.exerciseBeats);
+      const now = performance.now(), elapsedBeats=transport.getTicksAtTime(this.outputTime(now))/transport.PPQ;
+      performanceProfile.record('animation_frame_interval_ms',now-lastAnimationFrame);lastAnimationFrame=now;
+      const beat = offset + elapsedBeats-countBeats;
+      const musicalBeat=Math.min(beat,options.totalBeats-.000001);
+      this.lastBeat=Math.min(beat,options.totalBeats);
+      const rangeStart=Number(options.displayRangeStart)||0,rangeBeats=Math.max(.001,Number(options.displayRangeBeats)||options.exerciseBeats);
       // Count-in beats are transport time, not playable exercise beats. For a
       // later selected range they numerically overlap the preceding bar, so
       // keep the playhead hidden until the selected playback offset begins.
-      const position = (((musicalBeat - rangeStart) % rangeBeats) + rangeBeats) % rangeBeats;
-      const bars = options.displayBars,
-        barIndex = Math.floor(position / options.meter);
-      const scoreBeat =
-        musicalBeat < offset
-          ? -1
-          : Array.isArray(bars) && bars.length
-            ? Number(bars[Math.min(barIndex, bars.length - 1)]) * options.meter + position - barIndex * options.meter
-            : rangeStart + position;
-      if (scoreBeat >= 0 && Array.isArray(bars) && bars.length) {
-        const displayBar = Math.floor(scoreBeat / options.meter),
-          previous = this.activeRun?.lastDisplayBar;
-        if (Number.isInteger(previous) && displayBar !== previous && displayBar !== previous + 1)
-          scrollScoreToBeat(scoreBeat);
-        if (this.activeRun) this.activeRun.lastDisplayBar = displayBar;
+      const position=((musicalBeat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats;
+      const bars=options.displayBars,barIndex=Math.floor(position/options.meter);
+      const scoreBeat=musicalBeat<offset?-1:Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+position-barIndex*options.meter:rangeStart+position;
+      if(scoreBeat>=0&&Array.isArray(bars)&&bars.length){
+        const displayBar=Math.floor(scoreBeat/options.meter),previous=this.activeRun?.lastDisplayBar;
+        if(Number.isInteger(previous)&&displayBar!==previous&&displayBar!==previous+1)scrollScoreToBeat(scoreBeat);
+        if(this.activeRun)this.activeRun.lastDisplayBar=displayBar;
       }
-      updateScore(scoreBeat, undefined, true);
-      if (presentation.isActive()) presentation.position(musicalBeat, transport.bpm.value);
-      visualMetronome.render(musicalBeat, options.meter, subdivision, now);
+      updateScore(scoreBeat,undefined,true);
+      if(presentation.isActive())presentation.position(musicalBeat,transport.bpm.value);
+      visualMetronome.render(musicalBeat,options.meter,subdivision,now);
       // UI counters and scoring state do not need 60 updates per second. Keep
       // the playhead on every display frame, independent of the WASM work.
-      if (now - lastStateFrame >= 32 || beat >= options.totalBeats) {
-        onFrame(beat, now, this.activeRun?.runPerformance ?? runPerformance);
-        lastStateFrame = now;
+      if(now-lastStateFrame>=32||beat>=options.totalBeats){
+        onFrame(beat,now,this.activeRun?.runPerformance??runPerformance);
+        lastStateFrame=now;
       }
-      if (elapsedBeats >= countBeats + remaining + scoringTailBeats) {
-        this.stop();
-        onDone();
-      } else this.raf = requestAnimationFrame(frame);
+      if (elapsedBeats >= countBeats+remaining+scoringTailBeats) { this.stop(); onDone(); } else this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
     return { runPerformance, runAudio, state: this.state };
   },
   async calibration() {
-    await this.ensure();
-    await this.waitForMetronome('woodblock');
-    const beatSeconds = 0.75,
-      start = this.raw.currentTime + 0.3,
-      targets = [];
-    for (let i = 0; i < 8; i++) {
-      const time = start + i * beatSeconds;
-      this.click(time, i === 0, 'woodblock');
-      targets.push(this.perfAt(time));
-    }
+    await this.ensure();await this.waitForMetronome('woodblock');const beatSeconds = .75, start = this.raw.currentTime + .3, targets = [];
+    for (let i = 0; i < 8; i++) { const time = start + i * beatSeconds; this.click(time, i === 0, 'woodblock'); targets.push(this.perfAt(time)); }
     return targets;
-  },
+  }
 };
 
 // Fetch and decode the acoustic layers as soon as the app loads. Creating and
 // filling AudioBuffers is safe before the browser grants playback; Tone.start()
 // remains inside ensure() so autoplay rules are still respected.
-try {
-  audio.preload();
-} catch (error) {
-  audio.state = 'unavailable';
-  audio.lastSnareError = audioErrorMessage(error);
-}
+try { audio.preload(); }
+catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(error); }
 
-const SCORE_TOP_MARGIN = 30,
-  SCORE_ROW_HEIGHT = 132,
-  SCORE_BOTTOM_MARGIN = 10;
-let scoreData = {
-  notes: [],
-  svg: null,
-  playhead: null,
-  totalBeats: 16,
-  meter: 4,
-  container: null,
-  bars: [],
-  viewportWidth: 0,
-  viewportHeight: 0,
-  rowHeight: SCORE_ROW_HEIGHT,
-  maxScroll: 0,
-  cameraY: 0,
-  preserveCameraBar: null,
-  preserveViewportOnRewind: false,
-  lastPlayheadRow: -1,
-  lastPlayheadVisible: false,
-  lastBeat: -Infinity,
-  expectedJudgements: new Map(),
-  expectedByDisplayKey: new Map(),
-  unmatchedJudgements: [],
-  judgementEpoch: 0,
-};
-let pendingScoreFeedback = [],
-  pendingScoreFeedbackFrame = 0;
-let selectedBars = new Set();
-let scoreSelectionCallback = null;
-function applySelectedBarRange() {
-  if (!scoreData.svg) return;
-  for (const label of scoreData.svg.querySelectorAll('.score-measure-number[data-score-bar]')) {
-    const bar = Number(label.dataset.scoreBar);
-    label.classList.toggle('selected-bar-number', selectedBars.has(bar));
+const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
+let scoreData = { notes:[], svg:null, playhead:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+let pendingScoreFeedback=null,pendingScoreFeedbackFrame=0;
+let selectedBars=new Set();
+let scoreSelectionCallback=null;
+function applySelectedBarRange(){
+  if(!scoreData.svg)return;
+  for(const label of scoreData.svg.querySelectorAll('.score-measure-number[data-score-bar]')){
+    const bar=Number(label.dataset.scoreBar);
+    label.classList.toggle('selected-bar-number',selectedBars.has(bar));
   }
-  for (const area of scoreData.svg.querySelectorAll('.score-bar-highlight')) {
-    const bar = Number(area.dataset.scoreBar),
-      selected = selectedBars.has(bar);
-    area.classList.toggle('selected', selected);
-    area.setAttribute('aria-pressed', String(selected));
+  for(const area of scoreData.svg.querySelectorAll('.score-bar-highlight')){
+    const bar=Number(area.dataset.scoreBar),selected=selectedBars.has(bar);
+    area.classList.toggle('selected',selected);area.setAttribute('aria-pressed',String(selected));
   }
 }
-function setSelectedBars(bars) {
-  selectedBars = new Set(Array.isArray(bars) ? bars.map(Number) : []);
-  applySelectedBarRange();
-}
-function bindScoreSelection(callback) {
-  scoreSelectionCallback = callback;
-}
-let scoreResizeObserver = null;
-let scoreScrollContainer = null;
-const handText = (hand) => (hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·');
-const durationTable = [
-  [4, 'w', false, false],
-  [3, 'h', true, false],
-  [2, 'h', false, false],
-  [1.5, 'q', true, false],
-  [1, 'q', false, false],
-  [0.75, '8', true, false],
-  [2 / 3, 'q', false, true],
-  [0.5, '8', false, false],
-  [0.375, '16', true, false],
-  [1 / 3, '8', false, true],
-  [0.25, '16', false, false],
-  [1 / 6, '16', false, true],
-  [0.125, '32', false, false],
-];
-const durationSpec = (beats) =>
-  durationTable.find(([value]) => Math.abs(value - beats) < 0.001) ?? durationTable.at(-1);
-const writtenDuration = (beats) => {
-  const [, duration, , tuplet] = durationSpec(beats);
-  return tuplet ? `${duration}t` : duration;
-};
-function noteWithDuration(keys, beats, rest = false) {
-  const [, duration, dotted, tuplet] = durationSpec(beats),
-    note = new StaveNote({ keys, duration: `${duration}${rest ? 'r' : ''}`, clef: 'percussion', stemDirection: 1 });
-  if (dotted) {
-    Dot.buildAndAttach([note], { all: !rest });
-    note.applyTickMultiplier(3, 2);
-  }
-  if (tuplet) note.rudimentTuplet = true;
+function setSelectedBars(bars){selectedBars=new Set(Array.isArray(bars)?bars.map(Number):[]);applySelectedBarRange();}
+function bindScoreSelection(callback){scoreSelectionCallback=callback;}
+let scoreResizeObserver=null;
+let scoreScrollContainer=null;
+const handText = hand => hand === 'R' ? 'R' : hand === 'L' ? 'L' : '·';
+const durationTable=[[4,'w',false,false],[3,'h',true,false],[2,'h',false,false],[1.5,'q',true,false],[1,'q',false,false],[.75,'8',true,false],[2/3,'q',false,true],[.5,'8',false,false],[.375,'16',true,false],[1/3,'8',false,true],[.25,'16',false,false],[1/6,'16',false,true],[.125,'32',false,false]];
+const durationSpec = beats => durationTable.find(([value])=>Math.abs(value-beats)<.001)??durationTable.at(-1);
+const writtenDuration = beats => {const [,duration,,tuplet]=durationSpec(beats);return tuplet?`${duration}t`:duration;};
+function noteWithDuration(keys,beats,rest=false) {
+  const [,duration,dotted,tuplet]=durationSpec(beats),note=new StaveNote({keys,duration:`${duration}${rest?'r':''}`,clef:'percussion',stemDirection:1});
+  if(dotted){Dot.buildAndAttach([note],{all:!rest});note.applyTickMultiplier(3,2);}
+  if(tuplet)note.rudimentTuplet=true;
   return note;
 }
-function restValues(gap) {
-  const values = [];
-  let left = gap;
-  for (const [value] of durationTable)
-    while (left >= value - 0.001) {
-      values.push(value);
-      left -= value;
-    }
-  if (left > 0.001) values.push(0.25);
-  return values;
-}
+function restValues(gap) { const values=[];let left=gap;for(const [value] of durationTable)while(left>=value-.001){values.push(value);left-=value;}if(left>.001)values.push(.25);return values; }
 function tupletsFor(slots) {
-  const groups = [];
-  let run = [];
-  const flush = () => {
-    for (let index = 0; index + 2 < run.length; index += 3) groups.push(run.slice(index, index + 3));
-    run = [];
-  };
-  for (const slot of slots) {
-    if (slot.rudimentTuplet) run.push(slot);
-    else flush();
-  }
+  const groups=[];let run=[];
+  const flush=()=>{for(let index=0;index+2<run.length;index+=3)groups.push(run.slice(index,index+3));run=[];};
+  for(const slot of slots){if(slot.rudimentTuplet)run.push(slot);else flush();}
   flush();
-  return groups.map((notes) => new Tuplet(notes, { numNotes: 3, notesOccupied: 2, bracketed: true }));
+  return groups.map(notes=>new Tuplet(notes,{numNotes:3,notesOccupied:2,bracketed:true}));
 }
 function pitchForHit(hit) {
-  const note = Number(hit.note),
-    byNote = {
-      35: 'f/4',
-      36: 'f/4',
-      37: 'c/5/x',
-      38: 'c/5',
-      39: 'a/5/x',
-      40: 'c/5',
-      41: 'g/4',
-      42: 'g/5/x',
-      43: 'a/4',
-      44: 'g/5/x',
-      45: 'b/4',
-      46: 'g/5/x',
-      47: 'd/5',
-      48: 'e/5',
-      49: 'a/5/x',
-      50: 'f/5',
-      51: 'd/5/x',
-      52: 'a/5/x',
-      53: 'f/5/D2',
-      54: 'g/5/x',
-      55: 'a/5/x',
-      56: 'c/5',
-      57: 'a/5/x',
-      58: 'c/5/x',
-      59: 'd/5/x',
-      60: 'd/5',
-      61: 'b/4',
-      62: 'c/5/x',
-      63: 'c/5',
-      64: 'g/4',
-      65: 'd/5',
-      66: 'a/4',
-      67: 'f/5',
-      68: 'c/5',
-      69: 'g/5/x',
-      70: 'g/5/x',
-      71: 'a/5/x',
-      72: 'f/5/x',
-      73: 'c/5/x',
-      74: 'e/5/x',
-      75: 'd/5',
-      76: 'f/5',
-      77: 'b/4',
-      78: 'g/4/x',
-      79: 'c/5/x',
-      80: 'a/5/x',
-      81: 'a/5/x',
-    };
-  if (Number.isInteger(note) && byNote[note]) return byNote[note];
-  return (
-    {
-      kick: 'f/4',
-      snare: 'c/5',
-      closed_hat: 'g/5/x',
-      open_hat: 'g/5/x',
-      pedal_hat: 'g/5/x',
-      ride: 'd/5/x',
-      crash: 'a/5/x',
-      tom: 'c/5',
-      other_percussion: 'c/5/x',
-    }[hit.instrument] ?? 'c/5'
-  );
+  const note=Number(hit.note),byNote={
+    35:'f/4',36:'f/4',37:'c/5/x',38:'c/5',39:'a/5/x',40:'c/5',
+    41:'g/4',42:'g/5/x',43:'a/4',44:'g/5/x',45:'b/4',46:'g/5/x',
+    47:'d/5',48:'e/5',49:'a/5/x',50:'f/5',51:'d/5/x',52:'a/5/x',
+    53:'f/5/D2',54:'g/5/x',55:'a/5/x',56:'c/5',57:'a/5/x',
+    58:'c/5/x',59:'d/5/x',60:'d/5',61:'b/4',62:'c/5/x',63:'c/5',
+    64:'g/4',65:'d/5',66:'a/4',67:'f/5',68:'c/5',69:'g/5/x',
+    70:'g/5/x',71:'a/5/x',72:'f/5/x',73:'c/5/x',74:'e/5/x',
+    75:'d/5',76:'f/5',77:'b/4',78:'g/4/x',79:'c/5/x',
+    80:'a/5/x',81:'a/5/x'
+  };
+  if(Number.isInteger(note)&&byNote[note])return byNote[note];
+  return ({kick:'f/4',snare:'c/5',closed_hat:'g/5/x',open_hat:'g/5/x',pedal_hat:'g/5/x',ride:'d/5/x',crash:'a/5/x',tom:'c/5',other_percussion:'c/5/x'})[hit.instrument]??'c/5';
 }
 function instrumentForHit(hit) {
   // Rust classifies MIDI notes; engraving must not silently reinterpret them.
-  if (!hit.instrument) throw new Error('Notation requires a classified instrument');
+  if(!hit.instrument)throw new Error('Notation requires a classified instrument');
   return hit.instrument;
 }
 function articulationForHit(hit) {
-  return hit.articulation ?? 'unspecified';
+  return hit.articulation??'unspecified';
 }
-function renderScore(exercise, minimumRowHeightOverride = 0, layoutPass = 0, focusBarOverride = null) {
-  const profileStart = performanceProfile.enabled && layoutPass === 0 ? performance.now() : 0;
-  const element = document.getElementById('notation');
-  if (!element) return;
-  const isResize = scoreData.exercise === exercise;
-  const active = document.activeElement;
-  const focusBar =
-    focusBarOverride ??
-    (isResize && element.contains(active) && active?.classList.contains('score-bar-highlight')
-      ? Number(active.dataset.scoreBar)
-      : null);
+function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBarOverride=null) {
+  const profileStart=performanceProfile.enabled&&layoutPass===0?performance.now():0;
+  const element = document.getElementById('notation'); if (!element) return;
+  const isResize=scoreData.exercise===exercise;
+  const active=document.activeElement;
+  const focusBar=focusBarOverride??(isResize&&element.contains(active)&&active?.classList.contains('score-bar-highlight')?Number(active.dataset.scoreBar):null);
   element.innerHTML = '';
-  const previousBeat = isResize && Number.isFinite(scoreData.lastBeat) ? scoreData.lastBeat : -99;
-  const previousEpoch = isResize ? scoreData.judgementEpoch : 0;
-  const previousJudgements = isResize
-    ? [...scoreData.expectedJudgements.values(), ...scoreData.unmatchedJudgements]
-    : [];
-  if (!isResize) {
-    element.scrollTop = 0;
-    element.scrollLeft = 0;
-  }
-  const hits = exercise.hits,
-    metersPerBar = (exercise.meter_numerator * 4) / Math.max(1, exercise.meter_denominator);
-  const lastBeat = hits.reduce((last, hit) => Math.max(last, hit.notation_beat ?? hit.beat), 0);
-  const barCount = Math.max(1, Math.floor(lastBeat / metersPerBar) + 1);
-  const onsetGroupsByBar = Array.from({ length: barCount }, () => new Map()),
-    onsetBuckets = new Map(),
-    graceHits = [];
-  for (const hit of hits) {
-    const position = hit.notation_beat ?? hit.beat;
-    if (!Number.isFinite(position)) continue;
-    if (hit.grace) {
-      graceHits.push({ hit, position });
-      continue;
-    }
-    const bar = Math.floor((position + 0.001) / metersPerBar);
-    if (bar < 0 || bar >= barCount) continue;
-    const key = position.toFixed(4),
-      groups = onsetGroupsByBar[bar];
-    let group = groups.get(key);
-    if (!group) {
-      group = { position, hits: [], graceHits: [] };
-      groups.set(key, group);
-      const bucket = Math.round(position * 1000),
-        bucketGroups = onsetBuckets.get(bucket) ?? [];
-      bucketGroups.push(group);
-      onsetBuckets.set(bucket, bucketGroups);
+  const previousBeat=isResize&&Number.isFinite(scoreData.lastBeat)?scoreData.lastBeat:-99;
+  const previousJudgements=isResize?scoreData.lastJudgements:[];
+  if(!isResize){element.scrollTop=0;element.scrollLeft=0;}
+  const hits=exercise.hits,metersPerBar=exercise.meter_numerator*4/Math.max(1,exercise.meter_denominator);
+  const lastBeat=hits.reduce((last,hit)=>Math.max(last,hit.notation_beat??hit.beat),0);
+  const barCount=Math.max(1,Math.floor(lastBeat/metersPerBar)+1);
+  const onsetGroupsByBar=Array.from({length:barCount},()=>new Map()),onsetBuckets=new Map(),graceHits=[];
+  for(const hit of hits){
+    const position=hit.notation_beat??hit.beat;
+    if(!Number.isFinite(position))continue;
+    if(hit.grace){graceHits.push({hit,position});continue;}
+    const bar=Math.floor((position+.001)/metersPerBar);
+    if(bar<0||bar>=barCount)continue;
+    const key=position.toFixed(4),groups=onsetGroupsByBar[bar];
+    let group=groups.get(key);
+    if(!group){
+      group={position,hits:[],graceHits:[]};groups.set(key,group);
+      const bucket=Math.round(position*1000),bucketGroups=onsetBuckets.get(bucket)??[];
+      bucketGroups.push(group);onsetBuckets.set(bucket,bucketGroups);
     }
     group.hits.push(hit);
   }
-  for (const { hit, position } of graceHits) {
-    const bucket = Math.round(position * 1000),
-      candidates = [];
-    for (let offset = -1; offset <= 1; offset++) candidates.push(...(onsetBuckets.get(bucket + offset) ?? []));
-    const group = candidates
-      .filter((candidate) => Math.abs(candidate.position - position) < 0.001)
-      .sort((left, right) => Math.abs(left.position - position) - Math.abs(right.position - position))[0];
+  for(const {hit,position} of graceHits){
+    const bucket=Math.round(position*1000),candidates=[];
+    for(let offset=-1;offset<=1;offset++)candidates.push(...(onsetBuckets.get(bucket+offset)??[]));
+    const group=candidates
+      .filter(candidate=>Math.abs(candidate.position-position)<.001)
+      .sort((left,right)=>Math.abs(left.position-position)-Math.abs(right.position-position))[0];
     group?.graceHits.push(hit);
   }
-  const orderedOnsetsByBar = onsetGroupsByBar.map((groups) =>
-    [...groups.values()].sort((left, right) => left.position - right.position),
-  );
-  const singleLine =
-    exercise.staff_mode === 'single_line' && hits.length > 0 && hits.every((hit) => instrumentForHit(hit) === 'snare');
-  const width = Math.max(280, element.clientWidth),
-    availableWidth = Math.max(240, width - 28);
-  const compactLandscape = window.innerHeight <= 600 && window.innerWidth > window.innerHeight;
-  const scoreTopMargin = compactLandscape ? 25 : SCORE_TOP_MARGIN,
-    scoreBottomMargin = compactLandscape ? 7 : SCORE_BOTTOM_MARGIN;
-  const renderer = new Renderer(element, Renderer.Backends.SVG);
-  const notesMeta = [],
-    firstNoteByRow = [],
-    barLayouts = [],
-    staves = [],
-    barSlots = new Map(),
-    barSlotBeats = new Map(),
-    beams = [],
-    tuplets = [],
-    eventHitsByNote = new Map();
-  const firstStave = new Stave(14, scoreTopMargin, availableWidth);
-  firstStave.setConfigForLines(Array.from({ length: 5 }, (_, index) => ({ visible: !singleLine || index === 2 })));
-  firstStave
-    .setBegBarType(BarlineType.NONE)
-    .addClef('percussion')
-    .addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
-  const headerWidth = firstStave.getNoteStartX() - 14;
-  const musicWidth = Math.max(120, availableWidth - headerWidth);
-  const barsPerLine = 1;
-  const barWidth = musicWidth / barsPerLine,
-    lineCount = Math.ceil(barCount / barsPerLine);
-  const viewportHeight = Math.max(0, element.clientHeight);
-  const availableSystemHeight = Math.max(1, viewportHeight - scoreTopMargin - scoreBottomMargin);
-  const minimumRowHeight = Math.max(compactLandscape ? 84 : 94, minimumRowHeightOverride);
-  const targetSystems = Math.max(1, Math.min(lineCount, Math.floor(availableSystemHeight / minimumRowHeight) || 1));
-  const fittedRowHeight = availableSystemHeight / targetSystems;
-  const scoreRowHeight = Math.max(
-    minimumRowHeight,
-    Math.min(compactLandscape ? 118 : SCORE_ROW_HEIGHT, fittedRowHeight || SCORE_ROW_HEIGHT),
-  );
-  const height = scoreTopMargin + lineCount * scoreRowHeight + scoreBottomMargin;
-  renderer.resize(width, height);
-  const context = renderer.getContext(),
-    systemBarCounts = [],
-    systemWidths = [];
-  const beamGroups =
-    exercise.meter_numerator >= 6 && exercise.meter_numerator % 3 === 0
-      ? [new Fraction(3, Math.max(1, exercise.meter_denominator))]
-      : [new Fraction(1, Math.max(1, exercise.meter_denominator))];
-  for (let row = 0; row < lineCount; row++) {
-    const rowBarCount = Math.min(barsPerLine, barCount - row * barsPerLine),
-      staveWidth = headerWidth + rowBarCount * barWidth;
-    const stave = row === 0 ? firstStave : new Stave(14, scoreTopMargin + row * scoreRowHeight, staveWidth);
-    if (row > 0) {
-      stave.setConfigForLines(Array.from({ length: 5 }, (_, index) => ({ visible: !singleLine || index === 2 })));
-      stave
-        .setBegBarType(BarlineType.NONE)
-        .addClef('percussion')
-        .addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
+  const orderedOnsetsByBar=onsetGroupsByBar.map(groups=>[...groups.values()].sort((left,right)=>left.position-right.position));
+  const singleLine=exercise.staff_mode==='single_line'&&hits.length>0&&hits.every(hit=>instrumentForHit(hit)==='snare');
+  const width=Math.max(280,element.clientWidth),availableWidth=Math.max(240,width-28);
+  const compactLandscape=window.innerHeight<=600&&window.innerWidth>window.innerHeight;
+  const scoreTopMargin=compactLandscape?25:SCORE_TOP_MARGIN,scoreBottomMargin=compactLandscape?7:SCORE_BOTTOM_MARGIN;
+  const renderer=new Renderer(element,Renderer.Backends.SVG);
+  const notesMeta=[],firstNoteByRow=[],barLayouts=[],staves=[],barSlots=new Map(),barSlotBeats=new Map(),beams=[],tuplets=[],eventHitsByNote=new Map();
+  const firstStave=new Stave(14,scoreTopMargin,availableWidth);
+  firstStave.setConfigForLines(Array.from({length:5},(_,index)=>({visible:!singleLine||index===2})));
+  firstStave.setBegBarType(BarlineType.NONE).addClef('percussion').addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
+  const headerWidth=firstStave.getNoteStartX()-14;
+  const musicWidth=Math.max(120,availableWidth-headerWidth);
+  const barsPerLine=1;
+  const barWidth=musicWidth/barsPerLine,lineCount=Math.ceil(barCount/barsPerLine);
+  const viewportHeight=Math.max(0,element.clientHeight);
+  const availableSystemHeight=Math.max(1,viewportHeight-scoreTopMargin-scoreBottomMargin);
+  const minimumRowHeight=Math.max(compactLandscape?84:94,minimumRowHeightOverride);
+  const targetSystems=Math.max(1,Math.min(lineCount,Math.floor(availableSystemHeight/minimumRowHeight)||1));
+  const fittedRowHeight=availableSystemHeight/targetSystems;
+  const scoreRowHeight=Math.max(minimumRowHeight,Math.min(compactLandscape?118:SCORE_ROW_HEIGHT,fittedRowHeight||SCORE_ROW_HEIGHT));
+  const height=scoreTopMargin+lineCount*scoreRowHeight+scoreBottomMargin;
+  renderer.resize(width,height);
+  const context=renderer.getContext(),systemBarCounts=[],systemWidths=[];
+  const beamGroups=exercise.meter_numerator>=6&&exercise.meter_numerator%3===0
+    ?[new Fraction(3,Math.max(1,exercise.meter_denominator))]
+    :[new Fraction(1,Math.max(1,exercise.meter_denominator))];
+  for(let row=0;row<lineCount;row++){
+    const rowBarCount=Math.min(barsPerLine,barCount-row*barsPerLine),staveWidth=headerWidth+rowBarCount*barWidth;
+    const stave=row===0?firstStave:new Stave(14,scoreTopMargin+row*scoreRowHeight,staveWidth);
+    if(row>0){
+      stave.setConfigForLines(Array.from({length:5},(_,index)=>({visible:!singleLine||index===2})));
+      stave.setBegBarType(BarlineType.NONE).addClef('percussion').addTimeSignature(`${exercise.meter_numerator}/${exercise.meter_denominator}`);
     }
-    if (row === lineCount - 1) stave.setEndBarType(BarlineType.END);
-    stave.setWidth(staveWidth).setContext(context).draw();
-    staves.push(stave);
-    systemBarCounts.push(rowBarCount);
-    systemWidths.push(staveWidth);
+    if(row===lineCount-1)stave.setEndBarType(BarlineType.END);
+    stave.setWidth(staveWidth).setContext(context).draw();staves.push(stave);
+    systemBarCounts.push(rowBarCount);systemWidths.push(staveWidth);
   }
-  for (let bar = 0; bar < barCount; bar++) {
-    const row = Math.floor(bar / barsPerLine),
-      stave = staves[row];
-    const firstLine = singleLine ? 2 : 0,
-      lastLine = singleLine ? 2 : 4;
-    const xStart = stave.getNoteStartX() + (bar % barsPerLine) * barWidth;
-    barLayouts.push({
-      index: bar,
-      startBeat: bar * metersPerBar,
-      endBeat: (bar + 1) * metersPerBar,
-      row,
-      xStart,
-      xEnd: xStart + barWidth,
-      y: stave.getY(),
-      y1: stave.getYForLine(firstLine) - 12,
-      y2: stave.getYForLine(lastLine) + 12,
-    });
+  for(let bar=0;bar<barCount;bar++){
+    const row=Math.floor(bar/barsPerLine),stave=staves[row];
+    const firstLine=singleLine?2:0,lastLine=singleLine?2:4;
+    const xStart=stave.getNoteStartX()+(bar%barsPerLine)*barWidth;
+    barLayouts.push({index:bar,startBeat:bar*metersPerBar,endBeat:(bar+1)*metersPerBar,row,xStart,xEnd:xStart+barWidth,y:stave.getY(),y1:stave.getYForLine(firstLine)-12,y2:stave.getYForLine(lastLine)+12});
   }
-  for (let row = 0; row < lineCount; row++) {
-    const firstBar = row * barsPerLine,
-      lastBar = Math.min(barCount, firstBar + barsPerLine),
-      rowTickables = [];
-    for (let bar = firstBar; bar < lastBar; bar++) {
-      const start = bar * metersPerBar,
-        end = start + metersPerBar,
-        slots = [];
-      const ordered = orderedOnsetsByBar[bar];
-      let cursor = start;
-      for (let index = 0; index < ordered.length; index++) {
-        const group = ordered[index],
-          next = ordered[index + 1]?.position ?? end;
-        if (group.position > cursor + 0.001) {
-          for (const value of restValues(group.position - cursor)) {
-            const rest = noteWithDuration(['b/4'], value, true);
-            barSlotBeats.set(rest, cursor);
-            slots.push(rest);
-            cursor += value;
+  for(let row=0;row<lineCount;row++){
+    const firstBar=row*barsPerLine,lastBar=Math.min(barCount,firstBar+barsPerLine),rowTickables=[];
+    for(let bar=firstBar;bar<lastBar;bar++){
+      const start=bar*metersPerBar,end=start+metersPerBar,slots=[];
+      const ordered=orderedOnsetsByBar[bar];let cursor=start;
+      for(let index=0;index<ordered.length;index++){
+        const group=ordered[index],next=ordered[index+1]?.position??end;
+        if(group.position>cursor+.001){
+          for(const value of restValues(group.position-cursor)){
+            const rest=noteWithDuration(['b/4'],value,true);barSlotBeats.set(rest,cursor);slots.push(rest);cursor+=value;
           }
         }
-        const keys = [...new Set(group.hits.map(pitchForHit))];
-        const requestedDuration = Math.min(...group.hits.map((hit) => hit.notation_duration_beats || 0.25));
-        const value = Math.min(requestedDuration, next - group.position, end - group.position);
-        const note = noteWithDuration(keys, value);
-        eventHitsByNote.set(note, group.hits);
-        const hands = [...new Set(group.hits.map((hit) => hit.hand).filter((hand) => hand === 'R' || hand === 'L'))];
+        const keys=[...new Set(group.hits.map(pitchForHit))];
+        const requestedDuration=Math.min(...group.hits.map(hit=>hit.notation_duration_beats||.25));
+        const value=Math.min(requestedDuration,next-group.position,end-group.position);
+        const note=noteWithDuration(keys,value);
+        eventHitsByNote.set(note,group.hits);
+        const hands=[...new Set(group.hits.map(hit=>hit.hand).filter(hand=>hand==='R'||hand==='L'))];
         // Keep sticking below the staff so accents cannot displace individual hand labels.
-        if (hands.length === 1)
-          note.addModifier(
-            new Annotation(handText(hands[0])).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter', 11, '700'),
-            0,
-          );
-        if (group.hits.some((hit) => hit.accent)) note.addModifier(new Articulation('a>').setPosition(3), 0);
-        barSlotBeats.set(note, group.position);
-        slots.push(note);
-        for (const hit of group.hits) {
-          const key = pitchForHit(hit),
-            meta = {
-              note,
-              beat: hit.beat,
-              notationBeat: group.position,
-              durationBeats: value,
-              hit,
-              key,
-              headIndex: Math.max(0, keys.indexOf(key)),
-              row,
-              bar,
-            };
-          notesMeta.push(meta);
-          firstNoteByRow[row] ??= meta;
-        }
-        const ornamentHits = group.graceHits;
-        if (ornamentHits.length) {
-          const graceNotes = ornamentHits.map((hit) => {
-            const key = pitchForHit(hit),
-              graceNote = new GraceNote({
-                keys: [key],
-                duration: '16',
-                clef: 'percussion',
-                stemDirection: 1,
-                slash: true,
-              });
-            if (hit.hand === 'R' || hit.hand === 'L')
-              graceNote.addModifier(
-                new Annotation(handText(hit.hand))
-                  .setVerticalJustification(STICKING_PLACEMENT)
-                  .setFont('Inter', 8, '600'),
-                0,
-              );
-            eventHitsByNote.set(graceNote, [hit]);
-            const meta = {
-              note: graceNote,
-              beat: hit.beat,
-              notationBeat: group.position,
-              durationBeats: 0.125,
-              hit,
-              key,
-              headIndex: 0,
-              row,
-              bar,
-            };
-            notesMeta.push(meta);
-            firstNoteByRow[row] ??= meta;
+        if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter',11,'700'),0);
+        if(group.hits.some(hit=>hit.accent))note.addModifier(new Articulation('a>').setPosition(3),0);
+        barSlotBeats.set(note,group.position);slots.push(note);
+        for(const hit of group.hits){const key=pitchForHit(hit),meta={note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,key,headIndex:Math.max(0,keys.indexOf(key)),row,bar};notesMeta.push(meta);firstNoteByRow[row]??=meta;}
+        const ornamentHits=group.graceHits;
+        if(ornamentHits.length){
+          const graceNotes=ornamentHits.map(hit=>{
+            const key=pitchForHit(hit),graceNote=new GraceNote({keys:[key],duration:'16',clef:'percussion',stemDirection:1,slash:true});
+            if(hit.hand==='R'||hit.hand==='L')graceNote.addModifier(new Annotation(handText(hit.hand)).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter',8,'600'),0);
+            eventHitsByNote.set(graceNote,[hit]);
+            const meta={note:graceNote,beat:hit.beat,notationBeat:group.position,durationBeats:.125,hit,key,headIndex:0,row,bar};notesMeta.push(meta);firstNoteByRow[row]??=meta;
             return graceNote;
           });
-          const graceGroup = new GraceNoteGroup(graceNotes, false);
-          if (graceNotes.length > 1) graceGroup.beamNotes();
-          note.addModifier(graceGroup, 0);
+          const graceGroup=new GraceNoteGroup(graceNotes,false);
+          if(graceNotes.length>1)graceGroup.beamNotes();
+          note.addModifier(graceGroup,0);
         }
-        cursor = group.position + value;
+        cursor=group.position+value;
       }
-      if (cursor < end - 0.001)
-        for (const value of restValues(end - cursor)) {
-          const rest = noteWithDuration(['b/4'], value, true);
-          barSlotBeats.set(rest, cursor);
-          slots.push(rest);
-          cursor += value;
-        }
-      barSlots.set(bar, slots);
-      rowTickables.push(...slots);
+      if(cursor<end-.001)for(const value of restValues(end-cursor)){
+        const rest=noteWithDuration(['b/4'],value,true);barSlotBeats.set(rest,cursor);slots.push(rest);cursor+=value;
+      }
+      barSlots.set(bar,slots);rowTickables.push(...slots);
       tuplets.push(...tupletsFor(slots));
-      beams.push(...Beam.generateBeams(slots, { groups: beamGroups, stemDirection: 1 }));
+      beams.push(...Beam.generateBeams(slots,{groups:beamGroups,stemDirection:1}));
     }
-    const voice = new Voice({ numBeats: (lastBar - firstBar) * metersPerBar, beatValue: 4 }).setStrict(false);
+    const voice=new Voice({numBeats:(lastBar-firstBar)*metersPerBar,beatValue:4}).setStrict(false);
     voice.addTickables(rowTickables);
-    new Formatter().joinVoices([voice]).format([voice], staves[row].getNoteEndX() - staves[row].getNoteStartX());
-    const firstSlot = barSlots.get(firstBar)?.[0],
-      firstContext = firstSlot?.getTickContext();
-    const rowStartRelativeX = firstSlot && firstContext ? firstSlot.getX() + firstSlot.getGlyphWidth() / 2 : 0;
-    const rowStartX = staves[row].getNoteStartX() + rowStartRelativeX;
-    const pixelsPerBeat = barWidth / metersPerBar;
-    for (let bar = firstBar; bar < lastBar; bar++) {
-      const layout = barLayouts[bar],
-        xStart = rowStartX + (bar - firstBar) * barWidth;
-      layout.xStart = xStart;
-      layout.xEnd = xStart + barWidth;
-      for (const slot of barSlots.get(bar) ?? []) {
-        const tickContext = slot.getTickContext(),
-          xShift = slot.getX() - tickContext.getX();
-        const targetCenter =
-          rowStartRelativeX + (bar - firstBar) * barWidth + (barSlotBeats.get(slot) - layout.startBeat) * pixelsPerBeat;
-        tickContext.setX(targetCenter - xShift - slot.getGlyphWidth() / 2);
+    new Formatter().joinVoices([voice]).format([voice],staves[row].getNoteEndX()-staves[row].getNoteStartX());
+    const firstSlot=barSlots.get(firstBar)?.[0],firstContext=firstSlot?.getTickContext();
+    const rowStartRelativeX=firstSlot&&firstContext?firstSlot.getX()+firstSlot.getGlyphWidth()/2:0;
+    const rowStartX=staves[row].getNoteStartX()+rowStartRelativeX;
+    const pixelsPerBeat=barWidth/metersPerBar;
+    for(let bar=firstBar;bar<lastBar;bar++){
+      const layout=barLayouts[bar],xStart=rowStartX+(bar-firstBar)*barWidth;
+      layout.xStart=xStart;layout.xEnd=xStart+barWidth;
+      for(const slot of barSlots.get(bar)??[]){
+        const tickContext=slot.getTickContext(),xShift=slot.getX()-tickContext.getX();
+        const targetCenter=rowStartRelativeX+(bar-firstBar)*barWidth+(barSlotBeats.get(slot)-layout.startBeat)*pixelsPerBeat;
+        tickContext.setX(targetCenter-xShift-slot.getGlyphWidth()/2);
       }
     }
-    voice.draw(context, staves[row]);
-    for (const tickable of rowTickables)
-      if (tickable.isRest?.()) tickable.getSVGElement?.()?.setAttribute('data-score-rest', 'true');
+    voice.draw(context,staves[row]);
+    for(const tickable of rowTickables)if(tickable.isRest?.())tickable.getSVGElement?.()?.setAttribute('data-score-rest','true');
   }
-  for (const beam of beams) beam.setContext(context).draw();
-  for (const tuplet of tuplets) tuplet.setContext(context).draw();
-  const svg = element.querySelector('svg');
-  svg?.addEventListener('animationend', removeFinishedJudgementHalo);
-  svg?.addEventListener('animationcancel', removeFinishedJudgementHalo);
-  for (let row = 0; row < lineCount; row++) {
-    const firstNote = firstNoteByRow[row],
-      head = firstNote?.note.getSVGElement?.()?.querySelector('.vf-notehead > text');
-    const bounds = head?.getBBox();
-    if (!firstNote || !bounds) continue;
-    const layout = barLayouts[firstNote.bar],
-      target = layout.xStart + ((firstNote.notationBeat - layout.startBeat) * barWidth) / metersPerBar;
-    const correction = bounds.x + bounds.width / 2 - target;
-    for (let bar = row * barsPerLine; bar < Math.min(barCount, (row + 1) * barsPerLine); bar++) {
-      barLayouts[bar].xStart += correction;
-      barLayouts[bar].xEnd += correction;
+  for(const beam of beams)beam.setContext(context).draw();
+  for(const tuplet of tuplets)tuplet.setContext(context).draw();
+  const svg=element.querySelector('svg');
+  svg?.addEventListener('animationend',removeFinishedJudgementHalo);
+  svg?.addEventListener('animationcancel',removeFinishedJudgementHalo);
+  for(let row=0;row<lineCount;row++){
+    const firstNote=firstNoteByRow[row],head=firstNote?.note.getSVGElement?.()?.querySelector('.vf-notehead > text');
+    const bounds=head?.getBBox();
+    if(!firstNote||!bounds)continue;
+    const layout=barLayouts[firstNote.bar],target=layout.xStart+(firstNote.notationBeat-layout.startBeat)*barWidth/metersPerBar;
+    const correction=bounds.x+bounds.width/2-target;
+    for(let bar=row*barsPerLine;bar<Math.min(barCount,(row+1)*barsPerLine);bar++){
+      barLayouts[bar].xStart+=correction;barLayouts[bar].xEnd+=correction;
     }
   }
-  for (let bar = 0; bar < barCount - 1; bar++) {
-    if (barLayouts[bar].row !== barLayouts[bar + 1].row) continue;
-    const stave = staves[barLayouts[bar].row],
-      x = barLayouts[bar].xEnd - Math.min(12, barWidth * 0.06);
-    const barline = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    barline.setAttribute('class', 'score-barline');
-    barline.setAttribute('x1', String(x));
-    barline.setAttribute('x2', String(x));
-    barline.setAttribute('y1', String(singleLine ? stave.getYForLine(2) - 9 : stave.getYForLine(0)));
-    barline.setAttribute('y2', String(singleLine ? stave.getYForLine(2) + 9 : stave.getYForLine(4)));
-    barline.setAttribute('stroke', '#343a36');
-    barline.setAttribute('stroke-width', '1.2');
-    svg?.appendChild(barline);
+  for(let bar=0;bar<barCount-1;bar++){
+    if(barLayouts[bar].row!==barLayouts[bar+1].row)continue;
+    const stave=staves[barLayouts[bar].row],x=barLayouts[bar].xEnd-Math.min(12,barWidth*.06);
+    const barline=document.createElementNS('http://www.w3.org/2000/svg','line');
+    barline.setAttribute('class','score-barline');barline.setAttribute('x1',String(x));barline.setAttribute('x2',String(x));
+    barline.setAttribute('y1',String(singleLine?stave.getYForLine(2)-9:stave.getYForLine(0)));
+    barline.setAttribute('y2',String(singleLine?stave.getYForLine(2)+9:stave.getYForLine(4)));
+    barline.setAttribute('stroke','#343a36');barline.setAttribute('stroke-width','1.2');svg?.appendChild(barline);
   }
-  for (let bar = 0; bar < barCount; bar++) {
-    const stave = staves[barLayouts[bar].row],
-      label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    const x = bar === 0 || bar % barsPerLine === 0 ? stave.getX() + 6 : barLayouts[bar].xStart - 8;
-    label.setAttribute('class', 'score-measure-number');
-    label.setAttribute('x', String(x));
-    label.dataset.scoreBar = String(bar);
-    label.setAttribute('y', String(stave.getYForLine(0) - 12));
-    label.setAttribute('text-anchor', bar === 0 || bar % barsPerLine === 0 ? 'start' : 'end');
-    label.setAttribute('font-family', 'Inter, sans-serif');
-    label.setAttribute('font-size', '10');
-    label.setAttribute('font-weight', '600');
-    label.setAttribute('fill', '#666d68');
-    label.textContent = String(bar + 1);
-    svg?.appendChild(label);
+  for(let bar=0;bar<barCount;bar++){
+    const stave=staves[barLayouts[bar].row],label=document.createElementNS('http://www.w3.org/2000/svg','text');
+    const x=bar===0||bar%barsPerLine===0?stave.getX()+6:barLayouts[bar].xStart-8;
+    label.setAttribute('class','score-measure-number');label.setAttribute('x',String(x));
+    label.dataset.scoreBar=String(bar);
+    label.setAttribute('y',String(stave.getYForLine(0)-12));label.setAttribute('text-anchor',bar===0||bar%barsPerLine===0?'start':'end');
+    label.setAttribute('font-family','Inter, sans-serif');label.setAttribute('font-size','10');label.setAttribute('font-weight','600');
+    label.setAttribute('fill','#666d68');label.textContent=String(bar+1);svg?.appendChild(label);
   }
   if (svg) {
-    svg.setAttribute('role', 'group');
-    svg.setAttribute('aria-label', `${exercise.title} percussion notation with sticking`);
-    const highlights = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    for (const bar of barLayouts) {
-      const area = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-      area.setAttribute('class', 'score-bar-highlight');
-      area.dataset.scoreBar = String(bar.index);
-      const left = bar.index % barsPerLine === 0 ? 14 : Math.max(14, bar.xStart - 12),
-        right = Math.min(width - 14, bar.xEnd);
-      area.setAttribute('x', String(left));
-      area.setAttribute('y', String(scoreTopMargin + bar.row * scoreRowHeight - 12));
-      area.setAttribute('width', String(Math.max(0, right - left)));
-      area.setAttribute('height', String(scoreRowHeight - 4));
-      area.setAttribute('rx', '6');
-      area.setAttribute('role', 'button');
-      area.setAttribute('tabindex', bar.index === (focusBar ?? 0) ? '0' : '-1');
-      area.setAttribute('aria-label', `Select bar ${bar.index + 1}`);
-      area.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          event.stopPropagation();
-          scoreSelectionCallback?.(bar.index, event.shiftKey);
-        } else if (['ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown'].includes(event.key)) {
-          event.preventDefault();
-          event.stopPropagation();
-          const direction = ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1;
-          const next = highlights.children[Math.max(0, Math.min(barLayouts.length - 1, bar.index + direction))];
-          if (next) {
-            area.setAttribute('tabindex', '-1');
-            next.setAttribute('tabindex', '0');
-            next.focus();
-          }
+    svg.setAttribute('role','group');svg.setAttribute('aria-label',`${exercise.title} percussion notation with sticking`);
+    const highlights=document.createElementNS('http://www.w3.org/2000/svg','g');
+    for(const bar of barLayouts){
+      const area=document.createElementNS('http://www.w3.org/2000/svg','rect');
+      area.setAttribute('class','score-bar-highlight');area.dataset.scoreBar=String(bar.index);
+      const left=bar.index%barsPerLine===0?14:Math.max(14,bar.xStart-12),right=Math.min(width-14,bar.xEnd);
+      area.setAttribute('x',String(left));area.setAttribute('y',String(scoreTopMargin+bar.row*scoreRowHeight-12));
+      area.setAttribute('width',String(Math.max(0,right-left)));area.setAttribute('height',String(scoreRowHeight-4));
+      area.setAttribute('rx','6');area.setAttribute('role','button');area.setAttribute('tabindex',bar.index===(focusBar??0)?'0':'-1');area.setAttribute('aria-label',`Select bar ${bar.index+1}`);
+      area.addEventListener('keydown',event=>{
+        if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();scoreSelectionCallback?.(bar.index,event.shiftKey);}
+        else if(['ArrowLeft','ArrowUp','ArrowRight','ArrowDown'].includes(event.key)){
+          event.preventDefault();event.stopPropagation();
+          const direction=['ArrowLeft','ArrowUp'].includes(event.key)?-1:1;
+          const next=highlights.children[Math.max(0,Math.min(barLayouts.length-1,bar.index+direction))];
+          if(next){area.setAttribute('tabindex','-1');next.setAttribute('tabindex','0');next.focus();}
         }
       });
       highlights.appendChild(area);
     }
-    svg.insertBefore(highlights, svg.firstChild);
-    svg.addEventListener('click', (event) => {
-      const point = svg.createSVGPoint(),
-        matrix = svg.getScreenCTM();
-      if (!matrix) return;
-      point.x = event.clientX;
-      point.y = event.clientY;
-      const local = point.matrixTransform(matrix.inverse());
-      const row = Math.floor((local.y - (scoreTopMargin - 12)) / scoreRowHeight);
-      const bar = barLayouts.find(
-        (item) =>
-          item.row === row &&
-          local.x >= (item.index % barsPerLine === 0 ? 14 : Math.max(14, item.xStart - 12)) &&
-          local.x <= Math.min(width - 14, item.xEnd),
-      );
-      if (bar) scoreSelectionCallback?.(bar.index, event.shiftKey);
+    svg.insertBefore(highlights,svg.firstChild);
+    svg.addEventListener('click',event=>{
+      const point=svg.createSVGPoint(),matrix=svg.getScreenCTM();if(!matrix)return;
+      point.x=event.clientX;point.y=event.clientY;const local=point.matrixTransform(matrix.inverse());
+      const row=Math.floor((local.y-(scoreTopMargin-12))/scoreRowHeight);
+      const bar=barLayouts.find(item=>item.row===row&&local.x>=(item.index%barsPerLine===0?14:Math.max(14,item.xStart-12))&&local.x<=Math.min(width-14,item.xEnd));
+      if(bar)scoreSelectionCallback?.(bar.index,event.shiftKey);
     });
   }
-  if (svg) {
-    svg.dataset.barsPerLine = String(barsPerLine);
-    svg.dataset.staffLines = singleLine ? '1' : '5';
-    svg.dataset.systemBarCounts = JSON.stringify(systemBarCounts);
-    svg.dataset.systemWidths = JSON.stringify(systemWidths);
-    svg.dataset.staffBounds = JSON.stringify(
-      staves.map((stave) => ({
-        top: stave.getYForLine(singleLine ? 2 : 0),
-        bottom: stave.getYForLine(singleLine ? 2 : 4),
-      })),
-    );
-    svg.dataset.systemRowHeight = String(scoreRowHeight);
-    svg.dataset.systemCount = String(lineCount);
+  if(svg){
+    svg.dataset.barsPerLine=String(barsPerLine);svg.dataset.staffLines=singleLine?'1':'5';
+    svg.dataset.systemBarCounts=JSON.stringify(systemBarCounts);svg.dataset.systemWidths=JSON.stringify(systemWidths);
+    svg.dataset.staffBounds=JSON.stringify(staves.map(stave=>({top:stave.getYForLine(singleLine?2:0),bottom:stave.getYForLine(singleLine?2:4)})));
+    svg.dataset.systemRowHeight=String(scoreRowHeight);svg.dataset.systemCount=String(lineCount);
   }
   for (const meta of notesMeta) {
-    const group = meta.note.getSVGElement?.();
-    if (group) {
-      const eventHits = eventHitsByNote.get(meta.note) ?? [meta.hit];
-      group.dataset.beat = String(meta.beat);
-      group.dataset.writtenDuration = writtenDuration(meta.durationBeats);
-      group.dataset.systemRow = String(meta.row);
-      group.dataset.scoreBar = String(meta.bar);
-      group.dataset.dotted = String(durationSpec(meta.durationBeats)[2]);
-      group.dataset.tuplet = String(durationSpec(meta.durationBeats)[3]);
-      group.dataset.grace = String(Boolean(meta.hit.grace));
-      group.dataset.accent = String(Boolean(meta.hit.accent));
-      group.dataset.midiNotes = eventHits.map((candidate) => candidate.note ?? 38).join(',');
-      group.dataset.instruments = [...new Set(eventHits.map(instrumentForHit))].join(',');
-      group.dataset.articulations = [...new Set(eventHits.map(articulationForHit))].join(',');
+    const group=meta.note.getSVGElement?.();
+    if(group){
+      const eventHits=eventHitsByNote.get(meta.note)??[meta.hit];
+      group.dataset.beat=String(meta.beat);group.dataset.writtenDuration=writtenDuration(meta.durationBeats);group.dataset.systemRow=String(meta.row);group.dataset.scoreBar=String(meta.bar);
+      group.dataset.dotted=String(durationSpec(meta.durationBeats)[2]);
+      group.dataset.tuplet=String(durationSpec(meta.durationBeats)[3]);
+      group.dataset.grace=String(Boolean(meta.hit.grace));
+      group.dataset.accent=String(Boolean(meta.hit.accent));
+      group.dataset.midiNotes=eventHits.map(candidate=>candidate.note??38).join(',');
+      group.dataset.instruments=[...new Set(eventHits.map(instrumentForHit))].join(',');
+      group.dataset.articulations=[...new Set(eventHits.map(articulationForHit))].join(',');
       group.classList.add('score-note');
-      for (const [index, hit] of eventHits.entries()) {
-        if (
-          instrumentForHit(hit) !== 'open_hat' ||
-          group.querySelector(`.open-hat-articulation[data-hit-index="${index}"]`)
-        )
-          continue;
-        const key = pitchForHit(hit),
-          headIndex = [...new Set(eventHits.map(pitchForHit))].indexOf(key);
-        const head = group.querySelectorAll('.vf-notehead > text')[Math.max(0, headIndex)];
-        const bounds = head?.getBBox();
-        if (!bounds) continue;
-        const open = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        open.setAttribute('class', 'open-hat-articulation');
-        open.dataset.hitIndex = String(index);
-        open.setAttribute('cx', String(bounds.x + bounds.width / 2));
-        open.setAttribute('cy', String(bounds.y - 5));
-        open.setAttribute('r', '3.4');
-        open.setAttribute('fill', 'none');
-        open.setAttribute('stroke', 'currentColor');
-        open.setAttribute('stroke-width', '1.3');
+      for(const [index,hit] of eventHits.entries()){
+        if(instrumentForHit(hit)!=='open_hat'||group.querySelector(`.open-hat-articulation[data-hit-index="${index}"]`))continue;
+        const key=pitchForHit(hit),headIndex=[...new Set(eventHits.map(pitchForHit))].indexOf(key);
+        const head=group.querySelectorAll('.vf-notehead > text')[Math.max(0,headIndex)];
+        const bounds=head?.getBBox();if(!bounds)continue;
+        const open=document.createElementNS('http://www.w3.org/2000/svg','circle');
+        open.setAttribute('class','open-hat-articulation');open.dataset.hitIndex=String(index);
+        open.setAttribute('cx',String(bounds.x+bounds.width/2));open.setAttribute('cy',String(bounds.y-5));
+        open.setAttribute('r','3.4');open.setAttribute('fill','none');open.setAttribute('stroke','currentColor');open.setAttribute('stroke-width','1.3');
         group.appendChild(open);
       }
     }
   }
-  if (svg && lineCount > 1) {
-    const textBaseline = (text) => {
-      const matrix = text.getCTM(),
-        x = Number(text.getAttribute('x')) || 0,
-        y = Number(text.getAttribute('y')) || 0;
-      return matrix ? matrix.b * x + matrix.d * y + matrix.f : y;
+  if(svg&&lineCount>1){
+    const textBaseline=text=>{
+      const matrix=text.getCTM(),x=Number(text.getAttribute('x'))||0,y=Number(text.getAttribute('y'))||0;
+      return matrix?matrix.b*x+matrix.d*y+matrix.f:y;
     };
     // Index the SVG once. Querying the complete score separately for every
     // system made this clearance check quadratic on long exercises (625 full
     // DOM scans for the 10,000-note benchmark).
-    const stickingBaselines = Array.from({ length: lineCount }, () => []),
-      accentBaselines = Array.from({ length: lineCount }, () => []);
-    for (const text of svg.querySelectorAll('.score-note .vf-annotation > text')) {
-      const row = Number(text.closest('.score-note')?.dataset.systemRow);
-      if (Number.isInteger(row) && stickingBaselines[row]) stickingBaselines[row].push(textBaseline(text));
+    const stickingBaselines=Array.from({length:lineCount},()=>[]),accentBaselines=Array.from({length:lineCount},()=>[]);
+    for(const text of svg.querySelectorAll('.score-note .vf-annotation > text')){
+      const row=Number(text.closest('.score-note')?.dataset.systemRow);
+      if(Number.isInteger(row)&&stickingBaselines[row])stickingBaselines[row].push(textBaseline(text));
     }
-    for (const note of svg.querySelectorAll('.score-note[data-accent="true"]')) {
-      const row = Number(note.dataset.systemRow);
-      if (!Number.isInteger(row) || !accentBaselines[row]) continue;
-      for (const text of [...note.querySelectorAll(':scope > .vf-notehead > text')].slice(1))
-        accentBaselines[row].push(textBaseline(text));
+    for(const note of svg.querySelectorAll('.score-note[data-accent="true"]')){
+      const row=Number(note.dataset.systemRow);if(!Number.isInteger(row)||!accentBaselines[row])continue;
+      for(const text of [...note.querySelectorAll(':scope > .vf-notehead > text')].slice(1))accentBaselines[row].push(textBaseline(text));
     }
-    const clearances = stickingBaselines
-      .slice(0, -1)
-      .map((baselines, row) =>
-        baselines.length && accentBaselines[row + 1].length
-          ? Math.min(...accentBaselines[row + 1]) - Math.max(...baselines)
-          : null,
-      );
-    svg.dataset.systemMarkClearances = JSON.stringify(clearances);
-    const shortfall = Math.max(
-      0,
-      ...clearances.filter(Number.isFinite).map((clearance) => SYSTEM_MARK_BASELINE_CLEARANCE - clearance),
-    );
-    if (shortfall > 0.5 && layoutPass < 2) {
-      renderScore(exercise, Math.ceil(scoreRowHeight + shortfall), layoutPass + 1, focusBar);
-      if (layoutPass === 0) performanceProfile.record('notation_render_ms', performance.now() - profileStart);
+    const clearances=stickingBaselines.slice(0,-1).map((baselines,row)=>baselines.length&&accentBaselines[row+1].length?Math.min(...accentBaselines[row+1])-Math.max(...baselines):null);
+    svg.dataset.systemMarkClearances=JSON.stringify(clearances);
+    const shortfall=Math.max(0,...clearances.filter(Number.isFinite).map(clearance=>SYSTEM_MARK_BASELINE_CLEARANCE-clearance));
+    if(shortfall>.5&&layoutPass<2){
+      renderScore(exercise,Math.ceil(scoreRowHeight+shortfall),layoutPass+1,focusBar);
+      if(layoutPass===0)performanceProfile.record('notation_render_ms',performance.now()-profileStart);
       return;
     }
   }
-  const markers = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  markers.id = 'unmatched-markers';
-  markers.setAttribute('role', 'group');
-  markers.setAttribute('aria-label', 'Unmatched physical strikes');
-  svg?.appendChild(markers);
-  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-  line.id = 'playhead';
-  line.setAttribute('x1', '0');
-  line.setAttribute('x2', '0');
-  line.setAttribute('class', 'playhead-line');
-  svg?.appendChild(line);
-  const noteByExpectedId = new Map(),
-    noteByBeatInstrument = new Map(),
-    notesByRow = Array.from({ length: lineCount }, () => []);
-  for (const meta of notesMeta) {
-    if (meta.hit?.id) noteByExpectedId.set(meta.hit.id, meta);
-    noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`, meta);
+  const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('role','group');markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
+  const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
+  const noteByExpectedId=new Map(),noteByBeatInstrument=new Map(),notesByRow=Array.from({length:lineCount},()=>[]);
+  for(const meta of notesMeta){
+    if(meta.hit?.id)noteByExpectedId.set(meta.hit.id,meta);
+    noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`,meta);
     notesByRow[meta.row]?.push(meta);
   }
-  scoreData = {
-    notes: notesMeta,
-    notesByRow,
-    noteByExpectedId,
-    noteByBeatInstrument,
-    headYCache: new WeakMap(),
-    expectedJudgements: new Map(),
-    expectedByDisplayKey: new Map(),
-    unmatchedJudgements: [],
-    judgementEpoch: previousEpoch,
-    svg,
-    playhead: line,
-    totalBeats: barCount * metersPerBar,
-    meter: metersPerBar,
-    container: element,
-    bars: barLayouts,
-    viewportWidth: width,
-    viewportHeight,
-    rowHeight: scoreRowHeight,
-    maxScroll: Math.max(0, height - viewportHeight),
-    cameraY: element.scrollTop,
-    preserveCameraBar: null,
-    preserveViewportOnRewind: false,
-    lastPlayheadRow: -1,
-    lastPlayheadVisible: false,
-    exercise,
-    lastBeat: -Infinity,
-  };
-  if (scoreScrollContainer !== element) {
-    scoreScrollContainer?.removeEventListener('scroll', onScoreScroll);
-    element.addEventListener('scroll', onScoreScroll, { passive: true });
-    scoreScrollContainer = element;
+  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),svg,playhead:line,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  if(scoreScrollContainer!==element){
+    scoreScrollContainer?.removeEventListener('scroll',onScoreScroll);
+    element.addEventListener('scroll',onScoreScroll,{passive:true});
+    scoreScrollContainer=element;
   }
   applySelectedBarRange();
-  applyJudgements(previousJudgements);
-  updateScore(previousBeat, null);
-  if (focusBar !== null)
-    svg?.querySelector(`.score-bar-highlight[data-score-bar="${focusBar}"]`)?.focus({ preventScroll: true });
-  if (typeof ResizeObserver !== 'undefined') {
-    scoreResizeObserver ??= new ResizeObserver((entries) => {
-      const rect = entries[0]?.contentRect,
-        observedWidth = rect?.width ?? scoreData.container?.clientWidth ?? 0,
-        observedHeight = rect?.height ?? scoreData.container?.clientHeight ?? 0;
-      if (
-        scoreData.exercise &&
-        (Math.abs(observedWidth - scoreData.viewportWidth) > 1 ||
-          Math.abs(observedHeight - scoreData.viewportHeight) > 2)
-      )
-        renderScore(scoreData.exercise);
+  applyJudgements(previousJudgements);updateScore(previousBeat,null);
+  if(focusBar!==null)svg?.querySelector(`.score-bar-highlight[data-score-bar="${focusBar}"]`)?.focus({preventScroll:true});
+  if(typeof ResizeObserver!=='undefined'){
+    scoreResizeObserver??=new ResizeObserver(entries=>{
+      const rect=entries[0]?.contentRect,observedWidth=rect?.width??scoreData.container?.clientWidth??0,observedHeight=rect?.height??scoreData.container?.clientHeight??0;
+      if(scoreData.exercise&&(Math.abs(observedWidth-scoreData.viewportWidth)>1||Math.abs(observedHeight-scoreData.viewportHeight)>2))renderScore(scoreData.exercise);
     });
     scoreResizeObserver.observe(element);
   }
-  if (layoutPass === 0) performanceProfile.record('notation_render_ms', performance.now() - profileStart);
+  if(layoutPass===0)performanceProfile.record('notation_render_ms',performance.now()-profileStart);
 }
 function positionAtBeat(beat) {
-  const bars = scoreData.bars;
-  if (!bars.length) return { x: 0, y: 0, row: 0, bar: 0 };
-  const value = Math.max(0, Math.min(scoreData.totalBeats, beat));
-  const index = Math.min(bars.length - 1, Math.floor(value / scoreData.meter));
-  const bar = bars[index];
-  const ratio = Math.max(0, Math.min(1, (value - bar.startBeat) / Math.max(0.001, bar.endBeat - bar.startBeat)));
-  return {
-    x: bar.xStart + (bar.xEnd - bar.xStart) * ratio,
-    y: bar.y,
-    y1: bar.y1,
-    y2: bar.y2,
-    row: bar.row,
-    bar: index,
-  };
+  const bars=scoreData.bars;if(!bars.length)return {x:0,y:0,row:0,bar:0};
+  const value=Math.max(0,Math.min(scoreData.totalBeats,beat));
+  const index=Math.min(bars.length-1,Math.floor(value/scoreData.meter));
+  const bar=bars[index];
+  const ratio=Math.max(0,Math.min(1,(value-bar.startBeat)/Math.max(.001,bar.endBeat-bar.startBeat)));
+  return {x:bar.xStart+(bar.xEnd-bar.xStart)*ratio,y:bar.y,y1:bar.y1,y2:bar.y2,row:bar.row,bar:index};
 }
-function onScoreScroll(event) {
-  if (scoreData.container === event.currentTarget) scoreData.cameraY = scoreData.container.scrollTop;
+function onScoreScroll(event){
+  if(scoreData.container===event.currentTarget)scoreData.cameraY=scoreData.container.scrollTop;
 }
-function cameraAtBeat(beat, position) {
-  if (beat < 0 || position.row <= 0) return 0;
-  const firstBarInRow = scoreData.bars.find((bar) => bar.row === position.row) ?? scoreData.bars[position.bar];
-  const transitionBeats = Math.max(0.25, Math.min(1, scoreData.meter * 0.25));
-  const linear = Math.max(0, Math.min(1, (beat - firstBarInRow.startBeat) / transitionBeats));
+function cameraAtBeat(beat,position) {
+  if(beat<0||position.row<=0)return 0;
+  const firstBarInRow=scoreData.bars.find(bar=>bar.row===position.row)??scoreData.bars[position.bar];
+  const transitionBeats=Math.max(.25,Math.min(1,scoreData.meter*.25));
+  const linear=Math.max(0,Math.min(1,(beat-firstBarInRow.startBeat)/transitionBeats));
   // A musical-time smoothstep makes the page movement deterministic at every
   // refresh rate and settles the new system during its first beat.
-  const eased = linear * linear * (3 - 2 * linear);
-  const from = Math.min((position.row - 1) * scoreData.rowHeight, scoreData.maxScroll);
-  const to = Math.min(position.row * scoreData.rowHeight, scoreData.maxScroll);
-  return from + (to - from) * eased;
+  const eased=linear*linear*(3-2*linear);
+  const from=Math.min((position.row-1)*scoreData.rowHeight,scoreData.maxScroll);
+  const to=Math.min(position.row*scoreData.rowHeight,scoreData.maxScroll);
+  return from+(to-from)*eased;
 }
 function scrollScoreToBeat(beat) {
-  const { container, bars, rowHeight, maxScroll } = scoreData;
-  if (!container || !bars.length) return;
-  const position = positionAtBeat(beat);
-  const target = Math.min(position.row * rowHeight, maxScroll);
-  container.scrollTop = target;
-  container.scrollLeft = 0;
-  scoreData.cameraY = target;
+  const {container,bars,rowHeight,maxScroll}=scoreData;
+  if(!container||!bars.length)return;
+  const position=positionAtBeat(beat);
+  const target=Math.min(position.row*rowHeight,maxScroll);
+  container.scrollTop=target;
+  container.scrollLeft=0;
+  scoreData.cameraY=target;
   // The run's first score update occurs at the exact bar boundary. Preserve
   // this deliberate starting viewport through that bar instead of letting the
   // normal inter-system camera transition move it back one row.
-  scoreData.preserveCameraBar = position.bar;
-  scoreData.preserveViewportOnRewind = false;
+  scoreData.preserveCameraBar=position.bar;
+  scoreData.preserveViewportOnRewind=false;
 }
-function expectedJudgementKey(result) {
-  return result.expected_id
-    ? `id:${result.expected_id}`
-    : `beat:${Number(result.expected_beat).toFixed(6)}|${result.instrument ?? ''}`;
+function expectedJudgementKey(result){return result.expected_id?`id:${result.expected_id}`:`beat:${Number(result.expected_beat).toFixed(6)}|${result.instrument??''}`;}
+function noteForJudgement(result){
+  return (result.expected_id&&scoreData.noteByExpectedId?.get(result.expected_id))
+    ??scoreData.noteByBeatInstrument?.get(`${Number(result.expected_beat).toFixed(6)}|${result.instrument??'snare'}`)
+    ??scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001&&(!result.instrument||instrumentForHit(note.hit)===result.instrument));
 }
-function noteForJudgement(result) {
-  return (
-    (result.expected_id && scoreData.noteByExpectedId?.get(result.expected_id)) ??
-    scoreData.noteByBeatInstrument?.get(`${Number(result.expected_beat).toFixed(6)}|${result.instrument ?? 'snare'}`) ??
-    scoreData.notes.find(
-      (note) =>
-        Math.abs(note.beat - result.expected_beat) < 0.001 &&
-        (!result.instrument || instrumentForHit(note.hit) === result.instrument),
-    )
-  );
+function removeFinishedJudgementHalo(event){
+  if(event.target?.classList?.contains('judgement-halo'))event.target.remove();
 }
-function removeFinishedJudgementHalo(event) {
-  if (event.target?.classList?.contains('judgement-halo')) event.target.remove();
-}
-function removeJudgementHalos(notehead) {
-  for (const halo of notehead.querySelectorAll(':scope > .judgement-halo')) {
-    halo.getAnimations?.().forEach((animation) => animation.cancel());
+function removeJudgementHalos(notehead){
+  for(const halo of notehead.querySelectorAll(':scope > .judgement-halo')){
+    halo.getAnimations?.().forEach(animation=>animation.cancel());
     halo.remove();
   }
 }
-function clearExpectedJudgement(result, touchedGroups) {
-  const meta = noteForJudgement(result),
-    group = meta?.note.getSVGElement?.();
-  if (!group) return;
-  const noteheads = group.querySelectorAll('.vf-notehead'),
-    notehead = noteheads[meta?.headIndex ?? 0] ?? noteheads[0];
-  if (noteheads.length <= 1) delete group.dataset.judgement;
-  if (notehead) {
-    delete notehead.dataset.judgement;
-    notehead.removeAttribute('role');
-    notehead.removeAttribute('aria-label');
-    removeJudgementHalos(notehead);
-  }
+function clearExpectedJudgement(result,touchedGroups){
+  const meta=noteForJudgement(result),group=meta?.note.getSVGElement?.();if(!group)return;
+  const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
+  if(noteheads.length<=1)delete group.dataset.judgement;
+  if(notehead){delete notehead.dataset.judgement;notehead.removeAttribute('role');notehead.removeAttribute('aria-label');removeJudgementHalos(notehead);}
   touchedGroups.add(group);
 }
-function paintExpectedJudgement(result, touchedGroups) {
-  const meta = noteForJudgement(result),
-    group = meta?.note.getSVGElement?.();
-  if (!group) return;
-  const judgement =
-    result.judgement === 'on_time'
-      ? result.excellent
-        ? 'perfect'
-        : 'good'
-      : result.excellent
-        ? 'perfect'
-        : result.judgement;
-  const noteheads = group.querySelectorAll('.vf-notehead'),
-    notehead = noteheads[meta?.headIndex ?? 0] ?? noteheads[0];
-  if (noteheads.length <= 1) group.dataset.judgement = judgement;
-  if (notehead) {
-    const hasOffset = judgement !== 'missed' && Number.isFinite(result.error_ms);
-    notehead.dataset.judgement = judgement;
-    notehead.setAttribute('role', 'img');
-    notehead.setAttribute(
-      'aria-label',
-      `${judgement.replace('_', ' ')}${hasOffset ? ` ${Number(result.error_ms) >= 0 ? '+' : ''}${Number(result.error_ms).toFixed(0)} milliseconds` : ''}`,
-    );
-  }
-  if (['perfect', 'good', 'early', 'late'].includes(judgement)) {
-    const head = notehead?.querySelector(':scope > text');
-    if (notehead && head) {
-      const bounds = head.getBBox(),
-        halo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      halo.setAttribute('class', 'judgement-halo');
-      halo.setAttribute('cx', String(bounds.x + bounds.width / 2));
-      halo.setAttribute('cy', String(bounds.y + bounds.height / 2));
-      halo.setAttribute('r', String(Math.max(6, bounds.width * 0.84)));
-      notehead.insertBefore(halo, head);
+function paintExpectedJudgement(result,touchedGroups){
+  const meta=noteForJudgement(result),group=meta?.note.getSVGElement?.();if(!group)return;
+  const judgement=result.judgement==='on_time'?(result.excellent?'perfect':'good'):(result.excellent?'perfect':result.judgement);
+  const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
+  if(noteheads.length<=1)group.dataset.judgement=judgement;
+  if(notehead){const hasOffset=judgement!=='missed'&&Number.isFinite(result.error_ms);notehead.dataset.judgement=judgement;notehead.setAttribute('role','img');notehead.setAttribute('aria-label',`${judgement.replace('_',' ')}${hasOffset?` ${Number(result.error_ms)>=0?'+':''}${Number(result.error_ms).toFixed(0)} milliseconds`:''}`);}
+  if(['perfect','good','early','late'].includes(judgement)){
+    const head=notehead?.querySelector(':scope > text');
+    if(notehead&&head){
+      const bounds=head.getBBox(),halo=document.createElementNS('http://www.w3.org/2000/svg','circle');
+      halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(bounds.x+bounds.width/2));halo.setAttribute('cy',String(bounds.y+bounds.height/2));halo.setAttribute('r',String(Math.max(6,bounds.width*.84)));
+      notehead.insertBefore(halo,head);
     }
   }
   touchedGroups.add(group);
 }
-function nearestNoteInRow(row, beat) {
-  const notes = scoreData.notesByRow?.[row] ?? [];
-  if (!notes.length) return null;
-  let low = 0,
-    high = notes.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if (notes[middle].beat < beat) low = middle + 1;
-    else high = middle;
-  }
-  const after = notes[Math.min(low, notes.length - 1)],
-    before = notes[Math.max(0, low - 1)];
-  return Math.abs(before.beat - beat) <= Math.abs(after.beat - beat) ? before : after;
+function nearestNoteInRow(row,beat){
+  const notes=scoreData.notesByRow?.[row]??[];if(!notes.length)return null;
+  let low=0,high=notes.length;
+  while(low<high){const middle=(low+high)>>1;if(notes[middle].beat<beat)low=middle+1;else high=middle;}
+  const after=notes[Math.min(low,notes.length-1)],before=notes[Math.max(0,low-1)];
+  return Math.abs(before.beat-beat)<=Math.abs(after.beat-beat)?before:after;
 }
-function noteHeadY(meta, fallback) {
-  const head = meta?.note.getSVGElement?.()?.querySelectorAll('.vf-notehead > text')[meta?.headIndex ?? 0];
-  if (!head) return fallback;
-  const cached = scoreData.headYCache?.get(head);
-  if (Number.isFinite(cached)) return cached;
-  const bounds = head.getBBox(),
-    matrix = head.getCTM(),
-    value = matrix
-      ? matrix.b * (bounds.x + bounds.width / 2) + matrix.d * (bounds.y + bounds.height / 2) + matrix.f
-      : fallback;
-  scoreData.headYCache?.set(head, value);
-  return value;
-}
-function judgementKey(result) {
-  return result.expected_id ? `e:${result.iteration ?? ''}:${result.expected_id}` : expectedJudgementKey(result);
-}
-function removalKey(removal) {
-  return removal.expected_id ? `e:${removal.iteration ?? ''}:${removal.expected_id}` : expectedJudgementKey(removal);
-}
-function sameJudgement(left, right) {
-  return (
-    left === right ||
-    Boolean(
-      left &&
-      right &&
-      left.expected_id === right.expected_id &&
-      left.iteration === right.iteration &&
-      left.expected_beat === right.expected_beat &&
-      left.actual_beat === right.actual_beat &&
-      left.instrument === right.instrument &&
-      left.judgement === right.judgement &&
-      left.error_ms === right.error_ms &&
-      left.excellent === right.excellent &&
-      left.note_score === right.note_score &&
-      left.confirmed === right.confirmed,
-    )
-  );
-}
-function finishTouchedGroups(touchedGroups) {
-  for (const group of touchedGroups) {
-    const perfect = [...group.querySelectorAll('.vf-notehead')].some((head) => head.dataset.judgement === 'perfect');
-    group.classList.toggle('excellent-flash', perfect);
-  }
-}
-function indexExpectedJudgement(result, key) {
-  const displayKey = expectedJudgementKey(result);
-  let keys = scoreData.expectedByDisplayKey.get(displayKey);
-  if (!keys) {
-    keys = new Set();
-    scoreData.expectedByDisplayKey.set(displayKey, keys);
-  }
-  keys.add(key);
-  return displayKey;
-}
-function upsertExpectedJudgement(result, touchedGroups) {
-  const key = judgementKey(result);
-  if (!key) return;
-  const previous = scoreData.expectedJudgements.get(key);
-  if (previous && sameJudgement(previous, result)) return;
-  if (previous) {
-    const displayKey = expectedJudgementKey(previous),
-      keys = scoreData.expectedByDisplayKey.get(displayKey);
-    keys?.delete(key);
-    if (keys && !keys.size) scoreData.expectedByDisplayKey.delete(displayKey);
-    clearExpectedJudgement(previous, touchedGroups);
-  }
-  scoreData.expectedJudgements.set(key, result);
-  indexExpectedJudgement(result, key);
-  paintExpectedJudgement(result, touchedGroups);
-}
-function removeExpectedJudgement(removal, touchedGroups) {
-  const key = removalKey(removal);
-  if (!key) return;
-  const previous = scoreData.expectedJudgements.get(key);
-  if (!previous) return;
-  scoreData.expectedJudgements.delete(key);
-  const displayKey = expectedJudgementKey(previous),
-    keys = scoreData.expectedByDisplayKey.get(displayKey);
-  keys?.delete(key);
-  clearExpectedJudgement(previous, touchedGroups);
-  if (!keys || !keys.size) {
-    scoreData.expectedByDisplayKey.delete(displayKey);
-    return;
-  }
-  const remaining = scoreData.expectedJudgements.get(keys.values().next().value);
-  if (remaining) paintExpectedJudgement(remaining, touchedGroups);
-}
-function resetJudgementProjection() {
-  const touchedGroups = new Set();
-  for (const result of scoreData.expectedJudgements.values()) clearExpectedJudgement(result, touchedGroups);
-  finishTouchedGroups(touchedGroups);
-  scoreData.expectedJudgements.clear();
-  scoreData.expectedByDisplayKey.clear();
-  scoreData.unmatchedJudgements = [];
-  scoreData.svg?.querySelector('#unmatched-markers')?.replaceChildren();
-}
-function renderUnmatchedMarkers() {
-  const markers = scoreData.svg?.querySelector('#unmatched-markers');
-  if (!markers) return;
-  markers.replaceChildren();
-  for (const result of scoreData.unmatchedJudgements) {
-    if (!Number.isFinite(result.actual_beat) || !['extra', 'wrong_instrument'].includes(result.judgement)) continue;
-    const position = positionAtBeat(result.actual_beat),
-      nearest = nearestNoteInRow(position.row, result.actual_beat);
-    const y = noteHeadY(nearest, (position.y1 + position.y2) / 2);
-    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    circle.setAttribute('class', 'unmatched-hit-marker');
-    circle.setAttribute('cx', String(position.x));
-    circle.setAttribute('cy', String(y));
-    circle.setAttribute('r', '4');
-    circle.dataset.beat = String(result.actual_beat);
-    circle.dataset.systemRow = String(position.row);
-    circle.dataset.judgement = result.judgement;
-    circle.setAttribute('aria-label', `Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);
-    markers.appendChild(circle);
-  }
-}
-function applyJudgementDelta(delta) {
-  if (!delta || Array.isArray(delta) || !scoreData.svg || !scoreData.notes.length) return;
-  const profileStart = performanceProfile.enabled ? performance.now() : 0;
-  const epoch = Number.isFinite(delta.epoch) ? delta.epoch : scoreData.judgementEpoch;
-  if (delta.reset === true || epoch !== scoreData.judgementEpoch) resetJudgementProjection();
-  scoreData.judgementEpoch = epoch;
-  const touchedGroups = new Set();
-  for (const removal of delta.removes ?? []) removeExpectedJudgement(removal, touchedGroups);
-  for (const result of delta.upserts ?? []) upsertExpectedJudgement(result, touchedGroups);
-  finishTouchedGroups(touchedGroups);
-  if (Array.isArray(delta.unmatched)) {
-    scoreData.unmatchedJudgements = delta.unmatched;
-    renderUnmatchedMarkers();
-  }
-  performanceProfile.record('feedback_paint_work_ms', performance.now() - profileStart);
-  performanceProfile.record('feedback_upserts', delta.upserts?.length ?? 0);
-  performanceProfile.record('feedback_removes', delta.removes?.length ?? 0);
+function noteHeadY(meta,fallback){
+  const head=meta?.note.getSVGElement?.()?.querySelectorAll('.vf-notehead > text')[meta?.headIndex??0];
+  if(!head)return fallback;
+  const cached=scoreData.headYCache?.get(head);if(Number.isFinite(cached))return cached;
+  const bounds=head.getBBox(),matrix=head.getCTM(),value=matrix?matrix.b*(bounds.x+bounds.width/2)+matrix.d*(bounds.y+bounds.height/2)+matrix.f:fallback;
+  scoreData.headYCache?.set(head,value);return value;
 }
 function applyJudgements(judgements) {
-  if (!Array.isArray(judgements) || !scoreData.svg || !scoreData.notes.length) return;
-  const profileStart = performanceProfile.enabled ? performance.now() : 0;
-  const nextKeys = new Set(),
-    unmatched = [];
-  for (const result of judgements) {
-    const key = judgementKey(result);
-    if (key) nextKeys.add(key);
-    if (
-      !(result.expected_id || Number.isFinite(result.expected_beat)) &&
-      Number.isFinite(result.actual_beat) &&
-      (result.judgement === 'extra' || result.judgement === 'wrong_instrument')
-    )
-      unmatched.push(result);
+  const profileStart=performanceProfile.enabled?performance.now():0;
+  const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
+  scoreData.lastJudgements=judgements;
+  const previous=scoreData.appliedExpectedJudgements??new Map(),next=new Map(),touchedGroups=new Set();
+  for(const result of judgements)if(Number.isFinite(result.expected_beat))next.set(expectedJudgementKey(result),result);
+  for(const [key,result] of previous)if(!next.has(key)||JSON.stringify(next.get(key))!==JSON.stringify(result))clearExpectedJudgement(result,touchedGroups);
+  for(const [key,result] of next)if(!previous.has(key)||JSON.stringify(previous.get(key))!==JSON.stringify(result))paintExpectedJudgement(result,touchedGroups);
+  for(const group of touchedGroups){
+    const perfect=[...group.querySelectorAll('.vf-notehead')].some(head=>head.dataset.judgement==='perfect');
+    group.classList.toggle('excellent-flash',perfect);
   }
-  const touchedGroups = new Set();
-  for (const [key, result] of [...scoreData.expectedJudgements])
-    if (!nextKeys.has(key)) removeExpectedJudgement(result, touchedGroups);
-  for (const result of judgements)
-    if (result.expected_id || Number.isFinite(result.expected_beat)) upsertExpectedJudgement(result, touchedGroups);
-  finishTouchedGroups(touchedGroups);
-  scoreData.unmatchedJudgements = unmatched;
-  renderUnmatchedMarkers();
-  performanceProfile.record('feedback_paint_work_ms', performance.now() - profileStart);
+  scoreData.appliedExpectedJudgements=next;
+  const markers=scoreData.svg.querySelector('#unmatched-markers');markers?.replaceChildren();
+  for(const result of judgements.filter(item=>!Number.isFinite(item.expected_beat)&&Number.isFinite(item.actual_beat)&&(item.judgement==='extra'||item.judgement==='wrong_instrument'))){
+    const position=positionAtBeat(result.actual_beat),nearest=nearestNoteInRow(position.row,result.actual_beat);
+    const y=noteHeadY(nearest,(position.y1+position.y2)/2);
+    const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',String(position.x));circle.setAttribute('cy',String(y));circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
+  }
+  performanceProfile.record('feedback_paint_work_ms',performance.now()-profileStart);
 }
-function applyScoreFeedback(feedback) {
-  if (Array.isArray(feedback)) applyJudgements(feedback);
-  else if (feedback && typeof feedback === 'object') applyJudgementDelta(feedback);
-}
-function updateScore(beat, judgements, loopAware = false) {
-  const profileStart = performanceProfile.enabled ? performance.now() : 0;
-  const hasJudgements = Array.isArray(judgements) || (judgements && typeof judgements === 'object');
-  if (hasJudgements) cancelQueuedScoreFeedback();
-  const { notes, svg, container } = scoreData;
-  if (!svg || !notes.length) return;
-  if (hasJudgements) applyScoreFeedback(judgements);
-  const previousBeat = scoreData.lastBeat;
-  const position = positionAtBeat(beat),
-    playhead = scoreData.playhead;
-  const rewound = beat >= 0 && previousBeat >= 0 && beat < previousBeat - 0.001;
+function updateScore(beat, judgements, loopAware=false) {
+  const profileStart=performanceProfile.enabled?performance.now():0;
+  const hasJudgements=Array.isArray(judgements);
+  if(hasJudgements)cancelQueuedScoreFeedback();
+  const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
+  if(hasJudgements)applyJudgements(judgements);
+  const previousBeat=scoreData.lastBeat;
+  const position=positionAtBeat(beat),playhead=scoreData.playhead;
+  const rewound=beat>=0&&previousBeat>=0&&beat<previousBeat-.001;
   // Reading layout after mutating the score forces a synchronous SVG layout
   // on every frame. Only a rewind needs to inspect the actual viewport.
-  const targetAlreadyVisible =
-    rewound &&
-    position.y1 >= container.scrollTop - 1 &&
-    position.y2 <= container.scrollTop + scoreData.viewportHeight + 1;
-  const previousBar = previousBeat >= 0 ? Math.floor(Math.max(0, previousBeat - 0.000001) / scoreData.meter) : -1;
-  if (
-    rewound &&
-    (loopAware || scoreData.preserveViewportOnRewind) &&
-    (previousBar === position.bar || targetAlreadyVisible)
-  )
-    scoreData.preserveCameraBar = position.bar;
-  if (beat >= 0) scoreData.preserveViewportOnRewind = false;
-  scoreData.lastBeat = beat;
-  if (playhead) {
+  const targetAlreadyVisible=rewound&&position.y1>=container.scrollTop-1&&position.y2<=container.scrollTop+scoreData.viewportHeight+1;
+  const previousBar=previousBeat>=0?Math.floor(Math.max(0,previousBeat-.000001)/scoreData.meter):-1;
+  if(rewound&&(loopAware||scoreData.preserveViewportOnRewind)&&(previousBar===position.bar||targetAlreadyVisible))scoreData.preserveCameraBar=position.bar;
+  if(beat>=0)scoreData.preserveViewportOnRewind=false;
+  scoreData.lastBeat=beat;
+  if(playhead){
     // Keep the playhead in the SVG coordinate system. A composited CSS 3D
     // transform can stop repainting in WebKit when y1/y2 change at a system
     // boundary, leaving the line apparently frozen at the start of bar two.
-    playhead.setAttribute('x1', String(position.x));
-    playhead.setAttribute('x2', String(position.x));
-    playhead.dataset.x = String(position.x);
-    if (performanceProfile.enabled) playhead.dataset.beat = String(beat);
-    if (position.row !== scoreData.lastPlayheadRow) {
-      playhead.setAttribute('y1', String(position.y1));
-      playhead.setAttribute('y2', String(position.y2));
-      playhead.dataset.row = String(position.row);
-      playhead.dataset.bar = String(position.bar);
-      scoreData.lastPlayheadRow = position.row;
-    }
-    const visible = beat >= 0 && beat <= scoreData.totalBeats;
-    if (visible !== scoreData.lastPlayheadVisible) {
-      playhead.classList.toggle('visible', visible);
-      scoreData.lastPlayheadVisible = visible;
-    }
+    playhead.setAttribute('x1',String(position.x));
+    playhead.setAttribute('x2',String(position.x));
+    playhead.dataset.x=String(position.x);
+    if(performanceProfile.enabled)playhead.dataset.beat=String(beat);
+    if(position.row!==scoreData.lastPlayheadRow){playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);scoreData.lastPlayheadRow=position.row;}
+    const visible=beat>=0&&beat<=scoreData.totalBeats;
+    if(visible!==scoreData.lastPlayheadVisible){playhead.classList.toggle('visible',visible);scoreData.lastPlayheadVisible=visible;}
   }
-  if (beat >= 0) {
-    const preservedBar = scoreData.preserveCameraBar;
-    const stillPreserving =
-      preservedBar !== null && (position.bar === preservedBar || beat <= (preservedBar + 1) * scoreData.meter + 0.001);
+  if(beat>=0){
+    const preservedBar=scoreData.preserveCameraBar;
+    const stillPreserving=preservedBar!==null&&(position.bar===preservedBar||beat<=(preservedBar+1)*scoreData.meter+.001);
     // A scroll listener tracks a deliberate seek's viewport without reading
     // layout on every ordinary playback frame.
-    if (!stillPreserving) {
-      scoreData.preserveCameraBar = null;
-      const cameraY = cameraAtBeat(beat, position);
-      if (Math.abs(cameraY - scoreData.cameraY) > 0.05) {
-        container.scrollTop = cameraY;
-        scoreData.cameraY = cameraY;
-      }
+    if(!stillPreserving){
+      scoreData.preserveCameraBar=null;
+      const cameraY=cameraAtBeat(beat,position);
+      if(Math.abs(cameraY-scoreData.cameraY)>.05){container.scrollTop=cameraY;scoreData.cameraY=cameraY;}
     }
   }
-  performanceProfile.record('score_update_ms', performance.now() - profileStart);
+  performanceProfile.record('score_update_ms',performance.now()-profileStart);
 }
-function cancelQueuedScoreFeedback() {
-  if (pendingScoreFeedbackFrame) cancelAnimationFrame(pendingScoreFeedbackFrame);
-  pendingScoreFeedbackFrame = 0;
-  pendingScoreFeedback = [];
+function cancelQueuedScoreFeedback(){
+  if(pendingScoreFeedbackFrame)cancelAnimationFrame(pendingScoreFeedbackFrame);
+  pendingScoreFeedbackFrame=0;pendingScoreFeedback=null;
 }
-function queueScoreFeedback(feedback) {
-  if (!Array.isArray(feedback) && (!feedback || typeof feedback !== 'object')) return;
-  // Each packet is already a bounded delta. Keep their order: an upsert and a
-  // later removal (or vice versa) must not be reordered.
-  pendingScoreFeedback.push(feedback);
-  if (pendingScoreFeedbackFrame) return;
-  pendingScoreFeedbackFrame = requestAnimationFrame(() => {
-    pendingScoreFeedbackFrame = 0;
-    const pending = pendingScoreFeedback;
-    pendingScoreFeedback = [];
+function queueScoreFeedback(judgements){
+  if(!Array.isArray(judgements))return;
+  // A scoring update is a replacement projection, not an append-only event:
+  // a later hit may correct an earlier provisional match. Retain only the
+  // newest projection when several MIDI messages arrive in one browser turn.
+  pendingScoreFeedback=judgements;
+  if(pendingScoreFeedbackFrame)return;
+  pendingScoreFeedbackFrame=requestAnimationFrame(()=>{
+    pendingScoreFeedbackFrame=0;
+    const pending=pendingScoreFeedback;pendingScoreFeedback=null;
     // Feedback may arrive between transport frames with an older Rust UI
     // progress value. Paint it without moving the transport-owned playhead.
-    if (scoreData.svg && scoreData.notes.length) for (const packet of pending) applyScoreFeedback(packet);
+    if(pending&&scoreData.svg&&scoreData.notes.length)applyJudgements(pending);
   });
 }
-function clearScoreFeedback(preserveViewport = false) {
+function clearScoreFeedback(preserveViewport=false) {
   cancelQueuedScoreFeedback();
-  resetJudgementProjection();
-  for (const meta of scoreData.notes) {
-    const group = meta.note.getSVGElement?.();
-    if (!group) continue;
-    delete group.dataset.judgement;
-    group.classList.remove('excellent-flash');
-    for (const head of group.querySelectorAll('.vf-notehead')) {
-      delete head.dataset.judgement;
-      head.removeAttribute('role');
-      head.removeAttribute('aria-label');
-      removeJudgementHalos(head);
-    }
-    group.getAnimations?.().forEach((animation) => animation.cancel());
+  const empty=[];
+  for(const meta of scoreData.notes){
+    const group=meta.note.getSVGElement?.();if(!group)continue;
+    delete group.dataset.judgement;group.classList.remove('excellent-flash');
+    for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');removeJudgementHalos(head);}
+    group.getAnimations?.().forEach(animation=>animation.cancel());
   }
-  scoreData.expectedJudgements = new Map();
-  scoreData.expectedByDisplayKey = new Map();
-  scoreData.unmatchedJudgements = [];
+  scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;
+  scoreData.appliedExpectedJudgements=new Map();
   scoreData.svg?.querySelector('#unmatched-markers')?.replaceChildren();
-  if (preserveViewport) {
-    scoreData.cameraY = scoreData.container.scrollTop;
-    scoreData.preserveViewportOnRewind = true;
-    return;
-  }
-  scoreData.lastBeat = -Infinity;
-  scoreData.preserveCameraBar = null;
-  scoreData.preserveViewportOnRewind = false;
-  scoreData.cameraY = 0;
-  scoreData.container.scrollTop = 0;
-  scoreData.container.scrollLeft = 0;
-  updateScore(-99, undefined);
+  if(preserveViewport){scoreData.cameraY=scoreData.container.scrollTop;scoreData.preserveViewportOnRewind=true;return;}
+  scoreData.lastBeat=-Infinity;
+  scoreData.preserveCameraBar=null;
+  scoreData.preserveViewportOnRewind=false;
+  scoreData.cameraY=0;scoreData.container.scrollTop=0;scoreData.container.scrollLeft=0;
+  updateScore(-99,empty);
 }
-function clearScoreFeedbackPreserveViewport() {
-  clearScoreFeedback(true);
-}
+function clearScoreFeedbackPreserveViewport(){clearScoreFeedback(true);}
 
-const MIDI_INPUT_ID_KEY = 'rudiment-midi-input',
-  MIDI_INPUT_IDENTITY_KEY = 'rudiment-midi-input-identity';
-let selectedInput = null,
-  midiCallback = null,
-  midiBound = false;
-const portInfo = (input) => ({
-  id: input.id,
-  name: input.name || 'Unnamed MIDI input',
-  manufacturer: input.manufacturer || 'Unknown manufacturer',
-  state: input.state,
-  connection: input.connection,
-});
-const connectedMidiInputs = () =>
-  WebMidi.inputs.filter((input) => input.state === 'connected' && input.connection === 'open');
-function rememberMidiInput(input) {
-  if (!input) return;
-  localStorage.setItem(MIDI_INPUT_ID_KEY, input.id);
-  localStorage.setItem(
-    MIDI_INPUT_IDENTITY_KEY,
-    JSON.stringify({ name: input.name || '', manufacturer: input.manufacturer || '' }),
-  );
+const MIDI_INPUT_ID_KEY='rudiment-midi-input',MIDI_INPUT_IDENTITY_KEY='rudiment-midi-input-identity';
+let selectedInput = null, midiCallback = null, midiBound = false;
+const portInfo = input => ({id:input.id,name:input.name||'Unnamed MIDI input',manufacturer:input.manufacturer||'Unknown manufacturer',state:input.state,connection:input.connection});
+const connectedMidiInputs = () => WebMidi.inputs.filter(input=>input.state==='connected'&&input.connection==='open');
+function rememberMidiInput(input){
+  if(!input)return;
+  localStorage.setItem(MIDI_INPUT_ID_KEY,input.id);
+  localStorage.setItem(MIDI_INPUT_IDENTITY_KEY,JSON.stringify({name:input.name||'',manufacturer:input.manufacturer||''}));
 }
-function rememberedMidiIdentity() {
-  try {
-    return JSON.parse(localStorage.getItem(MIDI_INPUT_IDENTITY_KEY) || 'null');
-  } catch {
-    return null;
-  }
+function rememberedMidiIdentity(){
+  try{return JSON.parse(localStorage.getItem(MIDI_INPUT_IDENTITY_KEY)||'null');}
+  catch{return null;}
 }
-function sendMidiState(extra = {}) {
-  midiCallback?.({
-    kind: 'state',
-    ports: WebMidi.enabled ? WebMidi.inputs.map(portInfo) : [],
-    selectedId: selectedInput?.id || null,
-    ...extra,
-  });
-}
+function sendMidiState(extra={}) { midiCallback?.({kind:'state',ports:WebMidi.enabled?WebMidi.inputs.map(portInfo):[],selectedId:selectedInput?.id||null,...extra}); }
 function bindMidiInputs() {
-  if (!WebMidi.enabled) return;
-  for (const input of WebMidi.inputs) {
-    input.removeListener('midimessage');
-    input.addListener('midimessage', (event) => {
-      const profileStart = performanceProfile.enabled ? performance.now() : 0;
-      // Never merge multiple kits implicitly. With no selected port, input is
-      // deliberately silent until the user chooses one.
-      if (!selectedInput || selectedInput.id !== input.id) return;
-      const raw = Array.from(event.rawData || []),
-        status = raw[0] || 0,
-        data1 = raw[1] || 0,
-        data2 = raw[2] || 0,
-        command = status & 0xf0,
-        channel = (status & 0x0f) + 1;
-      const type =
-        command === 0x90
-          ? data2 === 0
-            ? 'note_off'
-            : 'note_on'
-          : command === 0x80
-            ? 'note_off'
-            : command === 0xb0
-              ? 'cc'
-              : 'other';
-      midiCallback?.({
-        kind: 'message',
-        type,
-        note: data1,
-        velocity: data2,
-        channel,
-        timestamp: event.timestamp,
-        rawBytes: raw,
-        inputId: input.id,
-        inputName: input.name || 'MIDI input',
-      });
-      performanceProfile.record('midi_callback_ms', performance.now() - profileStart);
-    });
-  }
+  if(!WebMidi.enabled)return;
+  for(const input of WebMidi.inputs){input.removeListener('midimessage');input.addListener('midimessage',event=>{
+    const profileStart=performanceProfile.enabled?performance.now():0;
+    // Never merge multiple kits implicitly. With no selected port, input is
+    // deliberately silent until the user chooses one.
+    if(!selectedInput||selectedInput.id!==input.id)return;
+    const raw=Array.from(event.rawData||[]),status=raw[0]||0,data1=raw[1]||0,data2=raw[2]||0,command=status&0xf0,channel=(status&0x0f)+1;
+    const type=command===0x90?(data2===0?'note_off':'note_on'):command===0x80?'note_off':command===0xb0?'cc':'other';
+    midiCallback?.({kind:'message',type,note:data1,velocity:data2,channel,timestamp:event.timestamp,rawBytes:raw,inputId:input.id,inputName:input.name||'MIDI input'});
+    performanceProfile.record('midi_callback_ms',performance.now()-profileStart);
+  });}
 }
-function choosePreferredInput() {
-  const inputs = connectedMidiInputs();
-  const savedId = localStorage.getItem(MIDI_INPUT_ID_KEY),
-    savedIdentity = rememberedMidiIdentity();
-  const identityMatches = savedIdentity
-    ? inputs.filter(
-        (input) =>
-          (input.name || '') === savedIdentity.name && (input.manufacturer || '') === savedIdentity.manufacturer,
-      )
-    : [];
-  selectedInput =
-    inputs.find((input) => input.id === savedId) ||
-    (identityMatches.length === 1 ? identityMatches[0] : null) ||
-    (selectedInput && inputs.find((input) => input.id === selectedInput.id)) ||
-    (inputs.length === 1 ? inputs[0] : null) ||
-    null;
+function choosePreferredInput(){
+  const inputs=connectedMidiInputs();
+  const savedId=localStorage.getItem(MIDI_INPUT_ID_KEY),savedIdentity=rememberedMidiIdentity();
+  const identityMatches=savedIdentity?inputs.filter(input=>(input.name||'')===savedIdentity.name&&(input.manufacturer||'')===savedIdentity.manufacturer):[];
+  selectedInput=inputs.find(input=>input.id===savedId)
+    ||(identityMatches.length===1?identityMatches[0]:null)
+    ||(selectedInput&&inputs.find(input=>input.id===selectedInput.id))
+    ||(inputs.length===1?inputs[0]:null)
+    ||null;
   rememberMidiInput(selectedInput);
 }
-function bindMidiLifecycle() {
-  if (midiBound) return;
-  WebMidi.addListener('connected', (event) => {
-    if (event.port?.type !== 'input') return;
-    bindMidiInputs();
-    choosePreferredInput();
-    sendMidiState({ permission: 'granted', reconnected: true });
-  });
-  WebMidi.addListener('disconnected', (event) => {
-    if (event.port?.type !== 'input') return;
-    const selectedDisconnected = event.port.id === selectedInput?.id;
-    if (selectedDisconnected) selectedInput = null;
-    bindMidiInputs();
-    choosePreferredInput();
-    sendMidiState({ disconnectedId: selectedDisconnected ? event.port.id : null, permission: 'granted' });
-  });
-  midiBound = true;
-}
+function bindMidiLifecycle(){if(midiBound)return;WebMidi.addListener('connected',event=>{if(event.port?.type!=='input')return;bindMidiInputs();choosePreferredInput();sendMidiState({permission:'granted',reconnected:true});});WebMidi.addListener('disconnected',event=>{if(event.port?.type!=='input')return;const selectedDisconnected=event.port.id===selectedInput?.id;if(selectedDisconnected)selectedInput=null;bindMidiInputs();choosePreferredInput();sendMidiState({disconnectedId:selectedDisconnected?event.port.id:null,permission:'granted'});});midiBound=true;}
 async function connectMidi(callback) {
-  midiCallback = callback;
+  midiCallback=callback;
   try {
-    if (!WebMidi.enabled) await WebMidi.enable({ sysex: false });
-    bindMidiLifecycle();
-    bindMidiInputs();
-    choosePreferredInput();
-    sendMidiState({ permission: 'granted' });
-  } catch (error) {
-    sendMidiState({ error: error?.message || 'MIDI permission was denied.', permission: 'denied' });
-  }
+    if(!WebMidi.enabled)await WebMidi.enable({sysex:false});
+    bindMidiLifecycle();bindMidiInputs();choosePreferredInput();sendMidiState({permission:'granted'});
+  } catch(error) { sendMidiState({error:error?.message||'MIDI permission was denied.',permission:'denied'}); }
 }
-async function autoConnectMidi(callback) {
-  midiCallback = callback;
-  if (!navigator.requestMIDIAccess) {
-    sendMidiState({ permission: 'unsupported' });
-    return;
-  }
-  await connectMidi(callback);
-}
-function selectMidi(id) {
-  selectedInput = connectedMidiInputs().find((input) => input.id === id) || null;
-  rememberMidiInput(selectedInput);
-  sendMidiState({ permission: 'granted' });
-}
+async function autoConnectMidi(callback){midiCallback=callback;if(!navigator.requestMIDIAccess){sendMidiState({permission:'unsupported'});return;}await connectMidi(callback);}
+function selectMidi(id){selectedInput=connectedMidiInputs().find(input=>input.id===id)||null;rememberMidiInput(selectedInput);sendMidiState({permission:'granted'});}
 
-async function readFile(file, callback, maxFileBytes) {
-  if (!file) return;
-  const generation = ++midiLoadGeneration;
-  if (file.size > maxFileBytes) {
-    callback(new Uint8Array(), file.name, `Files larger than ${maxFileBytes / 1024 / 1024} MB are not supported.`);
-    return;
-  }
-  try {
-    const bytes = await file.arrayBuffer();
-    if (generation === midiLoadGeneration) callback(new Uint8Array(bytes), file.name, '');
-  } catch (error) {
-    if (generation === midiLoadGeneration)
-      callback(new Uint8Array(), file.name, error?.message || 'Could not read file.');
-  }
-}
-function chooseMidi(callback, maxFileBytes) {
-  midiFileCallback = callback;
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.mid,.midi,audio/midi';
-  input.onchange = () => readFile(input.files?.[0], callback, maxFileBytes);
-  input.click();
-}
-async function loadBundled(url, callback, saveToLibrary = false, displayName = '') {
-  const generation = ++midiLoadGeneration;
-  try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const bytes = await response.arrayBuffer();
-    if (generation === midiLoadGeneration)
-      callback(new Uint8Array(bytes), displayName || url.split('/').pop(), '', saveToLibrary);
-  } catch (error) {
-    if (generation === midiLoadGeneration)
-      callback(new Uint8Array(), displayName || url, error?.message || 'Could not load bundled exercise.');
-  }
-}
-async function loadBundledFromLibrary(url, displayName = '') {
-  if (!midiFileCallback) return;
-  return loadBundled(url, midiFileCallback, false, displayName);
-}
+async function readFile(file,callback,maxFileBytes){if(!file)return;const generation=++midiLoadGeneration;if(file.size>maxFileBytes){callback(new Uint8Array(),file.name,`Files larger than ${maxFileBytes/1024/1024} MB are not supported.`);return;}try{const bytes=await file.arrayBuffer();if(generation===midiLoadGeneration)callback(new Uint8Array(bytes),file.name,'');}catch(error){if(generation===midiLoadGeneration)callback(new Uint8Array(),file.name,error?.message||'Could not read file.');}}
+function chooseMidi(callback,maxFileBytes){midiFileCallback=callback;const input=document.createElement('input');input.type='file';input.accept='.mid,.midi,audio/midi';input.onchange=()=>readFile(input.files?.[0],callback,maxFileBytes);input.click();}
+async function loadBundled(url,callback,saveToLibrary=false,displayName=''){const generation=++midiLoadGeneration;try{const response=await fetch(url);if(!response.ok)throw new Error(`HTTP ${response.status}`);const bytes=await response.arrayBuffer();if(generation===midiLoadGeneration)callback(new Uint8Array(bytes),displayName||url.split('/').pop(),'',saveToLibrary);}catch(error){if(generation===midiLoadGeneration)callback(new Uint8Array(),displayName||url,error?.message||'Could not load bundled exercise.');}}
+async function loadBundledFromLibrary(url,displayName=''){if(!midiFileCallback)return;return loadBundled(url,midiFileCallback,false,displayName);}
 let dropController;
 let midiFileCallback;
-function bindDrop(callback, maxFileBytes) {
-  midiFileCallback = callback;
+function bindDrop(callback,maxFileBytes){
+  midiFileCallback=callback;
   dropController?.abort();
   dropController = new AbortController();
-  const element = document.getElementById('score-card');
-  if (!element) return;
-  const options = { signal: dropController.signal };
-  const over = (event) => {
-    event.preventDefault();
-    element.classList.add('dragging');
-  };
-  element.addEventListener('dragover', over, options);
-  element.addEventListener('dragleave', () => element.classList.remove('dragging'), options);
-  element.addEventListener(
-    'drop',
-    (event) => {
-      event.preventDefault();
-      element.classList.remove('dragging');
-      readFile(event.dataTransfer?.files?.[0], callback, maxFileBytes);
-    },
-    options,
-  );
+  const element=document.getElementById('score-card');if(!element)return;
+  const options={signal:dropController.signal};
+  const over=event=>{event.preventDefault();element.classList.add('dragging');};
+  element.addEventListener('dragover',over,options);
+  element.addEventListener('dragleave',()=>element.classList.remove('dragging'),options);
+  element.addEventListener('drop',event=>{event.preventDefault();element.classList.remove('dragging');readFile(event.dataTransfer?.files?.[0],callback,maxFileBytes);},options);
 }
-function trapDialogTab(event, selector) {
-  if (event.key !== 'Tab') return;
-  const root = document.querySelector(selector);
-  if (!root) return;
-  const focusable = [
-    ...root.querySelectorAll(
-      'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
-    ),
-  ].filter((element) => element.getClientRects().length > 0);
-  if (!focusable.length) {
-    event.preventDefault();
-    return;
-  }
-  const first = focusable[0],
-    last = focusable.at(-1),
-    active = document.activeElement;
-  if (event.shiftKey && (active === first || !root.contains(active))) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && (active === last || !root.contains(active))) {
-    event.preventDefault();
-    first.focus();
-  }
+function trapDialogTab(event,selector){
+  if(event.key!=='Tab')return;
+  const root=document.querySelector(selector);if(!root)return;
+  const focusable=[...root.querySelectorAll('button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>element.getClientRects().length>0);
+  if(!focusable.length){event.preventDefault();return;}
+  const first=focusable[0],last=focusable.at(-1),active=document.activeElement;
+  if(event.shiftKey&&(active===first||!root.contains(active))){event.preventDefault();last.focus();}
+  else if(!event.shiftKey&&(active===last||!root.contains(active))){event.preventDefault();first.focus();}
 }
-function downloadJson(value, name) {
-  const anchor = document.createElement('a');
-  anchor.href = URL.createObjectURL(new Blob([value], { type: 'application/json' }));
-  anchor.download = name;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(anchor.href), 500);
-}
+function downloadJson(value,name){const anchor=document.createElement('a');anchor.href=URL.createObjectURL(new Blob([value],{type:'application/json'}));anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(anchor.href),500);}
 
-window.rudiment = {
-  bindPresentationSnapshot: (provider) => presentation.bind(provider),
-  unbindPresentation: () => {
-    setHighwayMode(false);
-    presentation.unbind();
-  },
-  presentationActive: () => presentation.isActive(),
-  mountPresentationRenderer: (renderer, lanes) => presentation.mount(renderer, lanes),
-  presentationExerciseChanged: highwayExerciseChanged,
-  presentationConfiguration: (value) => presentation.configure(value),
-  presentationJudgements: (value) => presentation.judgements(value),
-  savedHighwayMode,
-  saveHighwayMode,
-  setHighwayMode,
-  savedNotationTheme,
-  saveNotationTheme,
-  ensureAudio: () => audio.ensure(),
-  audioState: () => audio.state,
-  audioDiagnostics: () => ({
-    state: audio.state,
-    contextState: audio.raw?.state ?? 'uninitialised',
-    activeRun: Boolean(audio.activeRun),
-    currentBeat: audio.activeRun
-      ? Math.min(audio.activeRun.totalBeats, transportBeat(audio.activeRun))
-      : audio.lastBeat,
-    referenceNoteCount: audio.activeRun?.referenceNoteCount ?? 0,
-    runMetronome: audio.activeRun?.metronome ?? false,
-    runTimbre: audio.activeRun?.timbre ?? null,
-    activeVoices: audio.voices.size,
-    scheduledVoices: audio.scheduledVoices.size,
-    openHatVoices: audio.openHatVoices.size,
-    snareGain: audio.snareGain?.gain.value ?? 0,
-    clickGain: audio.clickGain?.gain.value ?? 0,
-    sampleLayers: audio.buffers.filter(Boolean).length,
-    drumSampleCount: Object.values(audio.drumBuffers).filter(Boolean).length,
-    drumSampleErrors: { ...audio.drumSampleErrors },
-    drumStarts: { ...audio.drumStarts },
-    metronomeSampleCount: Object.values(audio.metronomeBuffers).filter(Boolean).length,
-    metronomeSampleNames: Object.keys(audio.metronomeBuffers),
-    metronomeSampleErrors: { ...audio.metronomeSampleErrors },
-    sampleErrors: [...audio.sampleErrors],
-    snareStarts: audio.snareStarts,
-    lastSnareError: audio.lastSnareError,
-    lastMetronomeError: audio.lastMetronomeError,
-    transportBpm: Tone.getTransport().bpm.value,
-    transportTicks: Tone.getTransport().ticks,
-    layerPeaks: [...audio.layerPeaks],
-    layerGains: [...audio.layerGains],
-    velocityGains: Array.from({ length: 127 }, (_, index) => velocityGain(index + 1)),
-    velocityLayers: Array.from({ length: 127 }, (_, index) => velocityLayers(index + 1)),
-  }),
-  identifyMetronomeBuffer: (buffer) =>
-    Object.entries(audio.metronomeBuffers).find(([, sample]) => sample === buffer)?.[0] ?? null,
-  playSnare: (velocity) => audio.monitorSnare(velocity),
-  playDrum: (instrument, articulation, velocity) => audio.monitorDrum(instrument, articulation, velocity),
-  previewClick: async (timbre, accent = true) => {
-    await audio.ensure();
-    await audio.waitForMetronome(timbre);
-    audio.click(audio.raw.currentTime + 0.03, accent, timbre);
-  },
-  setVolumes: (snare, click) => {
-    if (audio.snareGain) audio.snareGain.gain.value = snare;
-    if (audio.clickGain) audio.clickGain.gain.value = click * 1.5;
-  },
-  startAudio: (options, frame, done) => audio.start(options, frame, done),
-  setAudioTempo: (bpm) => audio.setTempo(bpm),
-  currentAudioBeat: () =>
-    audio.activeRun ? Math.min(audio.activeRun.totalBeats, transportBeat(audio.activeRun)) : Number.NaN,
-  stopAudio: () => audio.stop(),
-  startCalibration: () => audio.calibration(),
-  renderScore,
-  setSelectedBars,
-  bindScoreSelection,
-  scrollScoreToBeat,
-  updateScore,
-  queueScoreFeedback,
-  clearScoreFeedback,
-  clearScoreFeedbackPreserveViewport,
-  connectMidi,
-  autoConnectMidi,
-  selectMidi,
-  chooseMidi,
-  loadBundled,
-  loadBundledFromLibrary,
-  bindDrop,
-  trapDialogTab,
-  performanceDiagnostics: () => performanceProfile.snapshot(),
-  resetPerformanceDiagnostics: () => performanceProfile.reset(),
-  saveSession: (record) => put('sessions', record),
-  loadSessions: () => all('sessions'),
-  clearHistory: () => practiceTime.clearHistory(),
-  setPracticeActive: (active) => (active ? practiceTime.start() : practiceTime.stop()),
-  loadPracticeTime: () => practiceTime.read(),
-  saveSettings: (value) => put('settings', { key: 'app', value }),
-  loadSettings: async () => (await (await dbPromise).get('settings', 'app'))?.value || {},
-  saveProfile: (profile) => put('profiles', profile),
-  loadProfiles: () => all('profiles'),
-  resetLocalSetup: async () => {
-    await (await dbPromise).delete('settings', 'app');
-    await clear('profiles');
-    localStorage.removeItem(MIDI_INPUT_ID_KEY);
-    localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);
-  },
-  saveImport: (hash, name, bytes, metadata) =>
-    put('imports', { hash, name, bytes: Array.from(bytes), metadata, schemaVersion: 1 }),
-  loadImports: () => all('imports'),
-  loadImport: (hash) =>
-    (async () => {
-      const db = await dbPromise;
-      return db.get('imports', hash);
-    })(),
-  loadSavedImport,
-  deleteImport: (hash) =>
-    (async () => {
-      const db = await dbPromise;
-      return db.delete('imports', hash);
-    })(),
-  saveLastImport,
-  exportHistory: async () => downloadJson(JSON.stringify(await all('sessions'), null, 2), 'rudiment-history.json'),
+window.rudiment={
+  bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,savedNotationTheme,saveNotationTheme,
+  ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
+  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):Number.NaN,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
+  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),
+  saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
+  saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };

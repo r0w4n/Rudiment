@@ -24,11 +24,7 @@ export function createPresentationHost(currentPosition, onError = () => {}) {
     active = null;
     timelineSignature = '';
     if (previous) {
-      try {
-        previous.dispose();
-      } catch (error) {
-        console.error('Presentation disposal failed', error);
-      }
+      try { previous.dispose(); } catch (error) { console.error('Presentation disposal failed', error); }
     }
   }
 
@@ -36,16 +32,11 @@ export function createPresentationHost(currentPosition, onError = () => {}) {
   /** @param {(controller: Controller) => void} callback */
   function forward(callback) {
     if (!active) return;
-    try {
-      callback(active);
-    } catch (error) {
+    try { callback(active); }
+    catch (error) {
       dispose();
       console.error('Presentation renderer detached', error);
-      try {
-        onError(error);
-      } catch (notificationError) {
-        console.error('Presentation error notification failed', notificationError);
-      }
+      try { onError(error); } catch (notificationError) { console.error('Presentation error notification failed', notificationError); }
     }
   }
 
@@ -58,27 +49,16 @@ export function createPresentationHost(currentPosition, onError = () => {}) {
       controller.setTimeline(config.bars, config.endBeat);
       timelineSignature = signature;
     }
-    controller.setPlayback(config.phase, config.tempoBpm, {
-      loops: config.loops,
-      repeatUntilGood: config.repeatUntilGood,
-      barAttempt: config.barAttempt,
-    });
+    controller.setPlayback(config.phase, config.tempoBpm, { loops: config.loops, repeatUntilGood: config.repeatUntilGood, barAttempt: config.barAttempt });
     const transport = currentPosition();
     controller.setPosition(transport?.beat ?? config.position, transport?.tempoBpm ?? config.tempoBpm);
   }
 
   return Object.freeze({
     /** @param {() => Snapshot} provider */
-    bind(provider) {
-      snapshot = provider;
-    },
-    unbind() {
-      snapshot = null;
-      dispose();
-    },
-    isActive() {
-      return active !== null;
-    },
+    bind(provider) { snapshot = provider; },
+    unbind() { snapshot = null; dispose(); },
+    isActive() { return active !== null; },
     /** @param {Renderer} renderer
      * @param {readonly Lane[]} [lanes]
      */
@@ -92,54 +72,37 @@ export function createPresentationHost(currentPosition, onError = () => {}) {
         controller.setExercise(state.exercise);
         controller.setVisibleSpan(6, 6);
         configure(controller, state.config);
-        controller.setJudgements(state.judgements, undefined, state.judgementEpoch ?? 0);
+        controller.setJudgements(state.judgements);
       } catch (error) {
-        try {
-          controller.dispose();
-        } catch (disposeError) {
-          console.error('Presentation disposal failed', disposeError);
-        }
+        try { controller.dispose(); } catch (disposeError) { console.error('Presentation disposal failed', disposeError); }
         timelineSignature = '';
         throw error;
       }
       active = controller;
       return Object.freeze({
         /** @param {import('./presentation-types.mjs').Viewport} viewport */
-        resize(viewport) {
-          if (active === controller) forward((current) => current.resize(viewport));
-        },
-        dispose() {
-          if (active === controller) dispose();
-        },
+        resize(viewport) { if (active === controller) forward(current => current.resize(viewport)); },
+        dispose() { if (active === controller) dispose(); },
       });
     },
     exerciseChanged() {
       const provider = snapshot;
       if (!provider) return;
-      forward((controller) => {
+      forward(controller => {
         const state = provider();
         controller.setExercise(state.exercise);
         timelineSignature = '';
         configure(controller, state.config);
-        controller.setJudgements(state.judgements, undefined, state.judgementEpoch ?? 0);
+        controller.setJudgements(state.judgements);
       });
     },
     /** @param {Configuration} config */
-    configure(config) {
-      forward((controller) => configure(controller, config));
-    },
-    /** @param {Judgement[] | {epoch:number,reset?:boolean,upserts?:Judgement[],removes?:{expected_id:string,iteration?:number|null}[],unmatched?:Judgement[]}} payload */
-    judgements(payload) {
-      forward((controller) => {
-        if (Array.isArray(payload)) controller.setJudgements(payload);
-        else controller.applyJudgementDelta(payload);
-      });
-    },
+    configure(config) { forward(controller => configure(controller, config)); },
+    /** @param {Judgement[]} results */
+    judgements(results) { forward(controller => controller.setJudgements(results)); },
     /** @param {number} beat
      * @param {number} tempoBpm
      */
-    position(beat, tempoBpm) {
-      forward((controller) => controller.setPosition(beat, tempoBpm));
-    },
+    position(beat, tempoBpm) { forward(controller => controller.setPosition(beat, tempoBpm)); },
   });
 }
