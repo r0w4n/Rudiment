@@ -1,0 +1,78 @@
+name: OpenCode Go smoke test
+
+# Infrastructure connectivity test only: verifies that OpenCode can be
+# installed on a GitHub-hosted runner, authenticate against OpenCode Go with
+# the OPENCODE_GO_API_KEY repository secret, and complete a trivial prompt.
+# This workflow does not deploy, build or modify the application.
+#
+# Triggers:
+# - workflow_dispatch: manual runs. Note that GitHub only offers manual
+#   dispatch for workflow files present on the default branch; until this file
+#   is merged to main, trigger the initial test via pull_request.
+# - pull_request: restricted to this file so the test can run from a feature
+#   branch (secrets are available for same-repository pull requests).
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Model for the smoke test (provider/model format)'
+        required: false
+        type: string
+        default: 'opencode-go/glm-5.3-flash'
+  pull_request:
+    paths:
+      - '.github/workflows/opencode-smoke-test.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencode-go-smoke-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  smoke-test:
+    name: OpenCode Go connectivity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install OpenCode (official npm package)
+        run: |
+          npm install -g @opencode/cli
+          opencode --version
+
+      - name: Run smoke test
+        env:
+          # The opencode-go provider resolves its credential from the
+          # OPENCODE_API_KEY environment variable (environment auth method).
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          MODEL: ${{ inputs.model || 'opencode-go/glm-5.3-flash' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${OPENCODE_API_KEY}" ]; then
+            echo "::error::Secret OPENCODE_GO_API_KEY is not set on the repository."
+            exit 1
+          fi
+
+          echo "Smoke test model: ${MODEL}"
+
+          # Run in a throwaway directory so the agent is not given access to
+          # the checkout, tools or repository instructions; this keeps the
+          # test a pure connectivity check and prevents any repo changes.
+          cd "${RUNNER_TEMP}"
+
+          RESPONSE="$(opencode run --archived --model "${MODEL}" \
+            'Reply with exactly: OpenCode Go is connected.')"
+
+          echo "---- OpenCode response ----"
+          printf '%s\n' "${RESPONSE}"
+          echo "---------------------------"
+
+          if printf '%s' "${RESPONSE}" | grep -qF 'OpenCode Go is connected'; then
+            echo '::notice::OpenCode Go connectivity test passed.'
+          else
+            echo '::error::OpenCode did not return the expected response.'
+            exit 1
+          fi
