@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
+pub mod adaptive;
+
 pub const SCORING_VERSION: &str = "v4";
 pub const SCORING_INVALID_HIT_PENALTY: f64 = 50.0;
 pub const SCORING_LOCAL_WORK_LIMIT: usize = 16_384;
