@@ -2358,6 +2358,25 @@ test('note glyphs keep their color and opacity as the playhead passes',async({pa
   expect(after.fill).toBe('rgb(0, 0, 0)');
 });
 
+test('notation theme switching keeps light bar numbers visible and re-themes without a reload',async({page})=>{
+  await page.goto('/');
+  await expect(page.locator('#notation svg')).toHaveCount(1);
+  await expect(page.locator('.score-measure-number').first()).toBeVisible();
+  const notationColors=()=>{
+    return page.evaluate(()=>{
+      const number=document.querySelector('.score-measure-number') as SVGTextElement|null;
+      if(!number)throw new Error('notation chrome missing');
+      return {measureNumber:getComputedStyle(number).fill};
+    });
+  };
+  const light=await notationColors();
+  expect(light.measureNumber).toBe('rgb(102, 109, 104)');
+  await page.getByRole('button',{name:'Notation theme: Light. Switch to Dark'}).click();
+  expect(await notationColors()).toEqual({measureNumber:'rgb(158, 169, 163)'});
+  await page.getByRole('button',{name:'Notation theme: Dark. Switch to Light'}).click();
+  expect(await notationColors()).toEqual(light);
+});
+
 test('notehead feedback and unmatched strike markers stay at their own timestamps',async({page})=>{
   await page.goto('/');
   const hit=page.locator('.score-note[data-beat="1"]');
