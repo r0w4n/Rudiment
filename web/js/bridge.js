@@ -12,6 +12,9 @@ const SYSTEM_MARK_BASELINE_CLEARANCE = 24;
 const bridgeUrl = document.currentScript?.src || document.querySelector('script[src*="bridge.js"]')?.src || document.baseURI;
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 const playheadDebugEnabled = new URLSearchParams(location.search).get('playhead-debug') === '1';
+if(playheadDebugEnabled)document.documentElement.dataset.playheadDebug='1';
+const metronomeVisualEnabled = !['0','off','false'].includes((new URLSearchParams(location.search).get('metronome-animation')||'').toLowerCase());
+const visualHitsEnabled = !['0','off','false'].includes((new URLSearchParams(location.search).get('visual-hits')||(new URLSearchParams(location.search).get('feedback')||'')).toLowerCase());
 const dbPromise = openDB(DB_NAME, DB_VERSION, {
   upgrade(db) {
     if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' });
@@ -155,6 +158,7 @@ document.addEventListener('keydown',event=>{
 const visualMetronome = {
   pending: [], lastStep: null, lastDisplayBeat: null,
   schedule(performanceTime,beat,meter,subdivision){
+    if(!metronomeVisualEnabled)return;
     const step=Math.round(beat*Math.max(1,subdivision));
     this.pending.push({performanceTime,beat,meter:Math.max(1,Math.round(meter)),step});
   },
@@ -172,6 +176,7 @@ const visualMetronome = {
     ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
   },
   render(beat,meter,subdivision,now){
+    if(!metronomeVisualEnabled)return;
     const root=document.getElementById('visual-metronome');if(!root)return;
     meter=Math.max(1,Math.round(meter));subdivision=Math.max(1,subdivision);
     const whole=Math.floor(beat),fraction=((beat%1)+1)%1;
@@ -870,6 +875,18 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
       }
     }
   }
+  // Cache notehead geometry so feedback painting never forces SVG layout.
+  for(const meta of notesMeta){
+    const group=meta.note.getSVGElement?.();
+    const head=group?.querySelectorAll('.vf-notehead > text')?.[meta.headIndex??0];
+    if(!head)continue;
+    try{
+      const bounds=head.getBBox();
+      meta.headBounds={cx:bounds.x+bounds.width/2,cy:bounds.y+bounds.height/2,r:Math.max(6,bounds.width*.84)};
+      const matrix=head.getCTM();
+      meta.headCenterY=matrix?matrix.b*(bounds.x+bounds.width/2)+matrix.d*(bounds.y+bounds.height/2)+matrix.f:(bounds.y+bounds.height/2);
+    }catch{}
+  }
   if(svg&&lineCount>1){
     const textBaseline=text=>{
       const matrix=text.getCTM(),x=Number(text.getAttribute('x'))||0,y=Number(text.getAttribute('y'))||0;
@@ -898,12 +915,6 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
   }
   const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('role','group');markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
   const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
-  let referenceLine=null;
-  if(playheadDebugEnabled){
-    referenceLine=document.createElementNS('http://www.w3.org/2000/svg','line');
-    referenceLine.id='playhead-reference';referenceLine.setAttribute('x1','0');referenceLine.setAttribute('x2','0');referenceLine.setAttribute('class','playhead-reference-line');referenceLine.setAttribute('aria-hidden','true');
-    svg?.appendChild(referenceLine);
-  }
   const noteByExpectedId=new Map(),noteByBeatInstrument=new Map(),notesByRow=Array.from({length:lineCount},()=>[]);
   for(const meta of notesMeta){
     if(meta.hit?.id)noteByExpectedId.set(meta.hit.id,meta);
@@ -911,7 +922,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     notesByRow[meta.row]?.push(meta);
   }
   scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),svg,playhead:line,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
-  playheadDebug.attach(referenceLine);
+  playheadDebug.attachContainer(element);
   if(scoreScrollContainer!==element){
     scoreScrollContainer?.removeEventListener('scroll',onScoreScroll);
     element.addEventListener('scroll',onScoreScroll,{passive:true});
@@ -940,10 +951,17 @@ function positionAtBeat(beat) {
 // Temporary opt-in comparison clock for diagnosing notation playhead motion.
 // It deliberately does not feed playback, scoring, feedback, or scrolling.
 const playheadDebug={
-  enabled:playheadDebugEnabled,line:null,raf:0,run:null,runId:0,startedAt:performance.now(),frames:[],lastFrame:null,lastRendered:null,
-  attach(line){
-    if(!this.enabled)return;
-    this.line=line;
+  enabled:playheadDebugEnabled,container:null,overlay:null,raf:0,run:null,runId:0,startedAt:performance.now(),frames:[],lastFrame:null,lastRendered:null,
+  attachContainer(container){
+    if(!this.enabled||!container)return;
+    this.container=container;
+    if(!container.style.position)container.style.position='relative';
+    if(!this.overlay||!this.overlay.isConnected){
+      this.overlay=document.createElement('div');
+      this.overlay.className='playhead-reference-overlay';
+      this.overlay.setAttribute('aria-hidden','true');
+    }
+    if(this.overlay.parentNode!==container)container.appendChild(this.overlay);
     if(this.lastRendered)this.paint(this.lastRendered);
   },
   start({options,offset,tempoMap,sourceBpm,tempoScale,runPerformance}){
@@ -961,7 +979,7 @@ const playheadDebug={
   hide(){
     if(!this.enabled)return;
     this.lastRendered=null;
-    this.line?.classList.remove('visible');
+    this.overlay?.classList.remove('visible');
   },
   setTempo(bpm){
     if(!this.enabled||!this.run)return;
@@ -989,12 +1007,13 @@ const playheadDebug={
     return musicalBeat<run.visibleOffset?-1:Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+rangePosition-barIndex*options.meter:rangeStart+rangePosition;
   },
   paint(rendered){
-    const line=this.line;if(!line)return;
+    const overlay=this.overlay;if(!overlay)return;
     const {beat,position,visible}=rendered;
-    line.setAttribute('x1',String(position.x));line.setAttribute('x2',String(position.x));
-    line.setAttribute('y1',String(position.y1));line.setAttribute('y2',String(position.y2));
-    line.dataset.x=String(position.x);line.dataset.beat=String(beat);line.dataset.row=String(position.row);line.dataset.bar=String(position.bar);
-    line.classList.toggle('visible',visible);
+    overlay.style.top=`${position.y1}px`;
+    overlay.style.height=`${Math.max(1,position.y2-position.y1)}px`;
+    overlay.style.transform=`translate3d(${position.x}px,0,0)`;
+    overlay.classList.toggle('visible',visible);
+    overlay.dataset.x=String(position.x);overlay.dataset.beat=String(beat);overlay.dataset.row=String(position.row);overlay.dataset.bar=String(position.bar);
   },
   render(now){
     if(!this.run)return;
@@ -1079,10 +1098,14 @@ function paintExpectedJudgement(result,touchedGroups){
   if(noteheads.length<=1)group.dataset.judgement=judgement;
   if(notehead){const hasOffset=judgement!=='missed'&&Number.isFinite(result.error_ms);notehead.dataset.judgement=judgement;notehead.setAttribute('role','img');notehead.setAttribute('aria-label',`${judgement.replace('_',' ')}${hasOffset?` ${Number(result.error_ms)>=0?'+':''}${Number(result.error_ms).toFixed(0)} milliseconds`:''}`);}
   if(['perfect','good','early','late'].includes(judgement)){
+    const bounds=meta?.headBounds;
     const head=notehead?.querySelector(':scope > text');
-    if(notehead&&head){
-      const bounds=head.getBBox(),halo=document.createElementNS('http://www.w3.org/2000/svg','circle');
-      halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(bounds.x+bounds.width/2));halo.setAttribute('cy',String(bounds.y+bounds.height/2));halo.setAttribute('r',String(Math.max(6,bounds.width*.84)));
+    if(notehead&&(bounds||head)){
+      const cx=bounds?bounds.cx:(()=>{const b=head.getBBox();return b.x+b.width/2;})();
+      const cy=bounds?bounds.cy:(()=>{const b=head.getBBox();return b.y+b.height/2;})();
+      const r=bounds?bounds.r:(()=>{const b=head.getBBox();return Math.max(6,b.width*.84);})();
+      const halo=document.createElementNS('http://www.w3.org/2000/svg','circle');
+      halo.setAttribute('class','judgement-halo');halo.setAttribute('cx',String(cx));halo.setAttribute('cy',String(cy));halo.setAttribute('r',String(r));
       notehead.insertBefore(halo,head);
     }
   }
@@ -1096,6 +1119,7 @@ function nearestNoteInRow(row,beat){
   return Math.abs(before.beat-beat)<=Math.abs(after.beat-beat)?before:after;
 }
 function noteHeadY(meta,fallback){
+  if(Number.isFinite(meta?.headCenterY))return meta.headCenterY;
   const head=meta?.note.getSVGElement?.()?.querySelectorAll('.vf-notehead > text')[meta?.headIndex??0];
   if(!head)return fallback;
   const cached=scoreData.headYCache?.get(head);if(Number.isFinite(cached))return cached;
@@ -1103,6 +1127,7 @@ function noteHeadY(meta,fallback){
   scoreData.headYCache?.set(head,value);return value;
 }
 function applyJudgements(judgements) {
+  if(!visualHitsEnabled)return;
   const profileStart=performanceProfile.enabled?performance.now():0;
   const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
   scoreData.lastJudgements=judgements;
@@ -1110,10 +1135,6 @@ function applyJudgements(judgements) {
   for(const result of judgements)if(Number.isFinite(result.expected_beat))next.set(expectedJudgementKey(result),result);
   for(const [key,result] of previous)if(!next.has(key)||JSON.stringify(next.get(key))!==JSON.stringify(result))clearExpectedJudgement(result,touchedGroups);
   for(const [key,result] of next)if(!previous.has(key)||JSON.stringify(previous.get(key))!==JSON.stringify(result))paintExpectedJudgement(result,touchedGroups);
-  for(const group of touchedGroups){
-    const perfect=[...group.querySelectorAll('.vf-notehead')].some(head=>head.dataset.judgement==='perfect');
-    group.classList.toggle('excellent-flash',perfect);
-  }
   scoreData.appliedExpectedJudgements=next;
   const markers=scoreData.svg.querySelector('#unmatched-markers');markers?.replaceChildren();
   for(const result of judgements.filter(item=>!Number.isFinite(item.expected_beat)&&Number.isFinite(item.actual_beat)&&(item.judgement==='extra'||item.judgement==='wrong_instrument'))){
@@ -1126,9 +1147,10 @@ function applyJudgements(judgements) {
 function updateScore(beat, judgements, loopAware=false) {
   const profileStart=performanceProfile.enabled?performance.now():0;
   const hasJudgements=Array.isArray(judgements);
-  if(hasJudgements)cancelQueuedScoreFeedback();
   const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
-  if(hasJudgements)applyJudgements(judgements);
+  // Keep playhead/scroll work on the transport frame; coalesce feedback paint
+  // to the next animation frame so SVG mutations never block the playhead.
+  if(hasJudgements)queueScoreFeedback(judgements);
   const previousBeat=scoreData.lastBeat;
   const position=positionAtBeat(beat),playhead=scoreData.playhead;
   const rewound=beat>=0&&previousBeat>=0&&beat<previousBeat-.001;
@@ -1170,6 +1192,7 @@ function cancelQueuedScoreFeedback(){
 }
 function queueScoreFeedback(judgements){
   if(!Array.isArray(judgements))return;
+  if(!visualHitsEnabled)return;
   // A scoring update is a replacement projection, not an append-only event:
   // a later hit may correct an earlier provisional match. Retain only the
   // newest projection when several MIDI messages arrive in one browser turn.
@@ -1186,7 +1209,7 @@ function queueScoreFeedback(judgements){
 function clearScoreFeedback(preserveViewport=false) {
   cancelQueuedScoreFeedback();
   const empty=[];
-  for(const meta of scoreData.notes){
+  if(visualHitsEnabled)for(const meta of scoreData.notes){
     const group=meta.note.getSVGElement?.();if(!group)continue;
     delete group.dataset.judgement;group.classList.remove('excellent-flash');
     for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');head.querySelector('.judgement-halo')?.remove();}

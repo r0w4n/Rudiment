@@ -1972,7 +1972,7 @@ test('opt-in playhead diagnostic compares wall-clock motion and follows pause, r
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
 
-  const reference=page.locator('#playhead-reference');
+  const reference=page.locator('.playhead-reference-overlay');
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
   await expect(reference).toHaveClass(/visible/);
   await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.playheadDebugSnapshot().frames.length)).toBeGreaterThan(8);
