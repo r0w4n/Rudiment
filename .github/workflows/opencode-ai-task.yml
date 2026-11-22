@@ -17,6 +17,15 @@ name: OpenCode AI task
 # waits for manual review. Changes touching .github/ or .githooks/ are rejected
 # before anything is pushed.
 #
+# CI on AI-generated pull requests (per GitHub's "Events that trigger
+# workflows" documentation): pull_request runs (opened/synchronize/reopened)
+# created with GITHUB_TOKEN are held and require approval from a user with
+# write access, approved from the pull request page. Pending runs report no
+# status, so required status checks cannot pass until they are approved and
+# succeed. This requires Settings > Actions > Workflow permissions > "Allow
+# GitHub Actions to create and approve pull requests" to be enabled for the
+# implement job to create the PR at all.
+#
 # workflow_dispatch exists for testing: it re-checks authorisation for a given
 # issue number against live repository data. dry_run=true (the default) stops
 # before any model call. Dispatch mode cannot verify who applied the label
@@ -292,44 +301,7 @@ jobs:
       - name: Verify and guard the result
         run: |
           set -euo pipefail
-          CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-          if [ "${CURRENT_BRANCH}" != "${BRANCH}" ]; then
-            echo "::error::OpenCode did not create or switch to branch ${BRANCH} (still on '${CURRENT_BRANCH}')."
-            exit 1
-          fi
-
-          COMMIT_COUNT="$(git rev-list --count "origin/${DEFAULT_BRANCH}..HEAD")"
-          if [ "${COMMIT_COUNT}" -lt 1 ]; then
-            echo "::error::No commits were made on ${BRANCH}."
-            exit 1
-          fi
-
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::OpenCode left uncommitted changes:"
-            git status --porcelain
-            exit 1
-          fi
-
-          FORBIDDEN="$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" -- .github/ .githooks/ || true)"
-          if [ -n "${FORBIDDEN}" ]; then
-            echo "::error::The implementation modified protected CI or security paths. Pushing is blocked pending manual approval:"
-            echo "${FORBIDDEN}"
-            exit 1
-          fi
-
-          {
-            echo "## OpenCode AI task — issue #${ISSUE_NUMBER}"
-            echo
-            echo "Branch: \`${BRANCH}\` — commits:"
-            echo
-            git log --oneline "origin/${DEFAULT_BRANCH}..HEAD"
-            echo
-            echo "Changed files:"
-            echo
-            '```'
-            git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD"
-            '```'
-          } >>"${GITHUB_STEP_SUMMARY}"
+          bash scripts/opencode-ai-task/verify-result.sh
 
       - name: Push branch and open draft pull request
         env:
@@ -353,6 +325,7 @@ jobs:
             echo
             echo "- Created automatically by OpenCode from issue #${ISSUE_NUMBER} (model: \`${MODEL}\`)."
             echo "- Draft pull request: nothing is merged, deployed or pushed to \`${DEFAULT_BRANCH}\` until you review and approve it."
+            echo "- CI checks for this PR were created by \`GITHUB_TOKEN\` and are held for approval; approve the workflow runs from the pull request page to start the repository checks."
             echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
             echo "Closes #${ISSUE_NUMBER}"
@@ -371,8 +344,20 @@ jobs:
             --title "ai: issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
             --body-file "${PR_BODY_FILE}"
 
+          # GITHUB_TOKEN-created pull_request events require approval before
+          # their workflow runs execute (GitHub documentation, "Events that
+          # trigger workflows"). Point the reviewer at the PR so the repo's
+          # quality, performance and CodeQL checks can be approved and run.
+          PR_URL="$(gh pr view "${BRANCH}" --repo "${GITHUB_REPOSITORY}" --json url --jq '.url')"
+          echo "::notice::Draft pull request created: ${PR_URL}"
+          echo "::notice::Its CI workflow runs are held for approval; approve them from the pull request page to start the repository checks."
+
       - name: Collect failure diagnostics
         if: failure()
+        env:
+          # Used only to redact the key value from diagnostic files before they
+          # are uploaded; the value is never printed.
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
           set -euo pipefail
           DIAG="${RUNNER_TEMP}/opencode-diagnostics"
@@ -384,8 +369,20 @@ jobs:
             git diff "origin/${DEFAULT_BRANCH}...HEAD" >"${DIAG}/diff.patch" 2>/dev/null || true
             git status --porcelain >"${DIAG}/status.txt" 2>/dev/null || true
           fi
-          cp -f "${SPEC_FILE}" "${DIAG}/" 2>/dev/null || true
-          [ -f "${PR_SUMMARY_FILE}" ] && cp -f "${PR_SUMMARY_FILE}" "${DIAG}/" || true
+          if [ -n "${SPEC_FILE:-}" ] && [ -f "${SPEC_FILE}" ]; then
+            cp -f "${SPEC_FILE}" "${DIAG}/"
+          fi
+          if [ -n "${PR_SUMMARY_FILE:-}" ] && [ -f "${PR_SUMMARY_FILE}" ]; then
+            cp -f "${PR_SUMMARY_FILE}" "${DIAG}/"
+          fi
+          # Redact the API key value from every diagnostic file before upload;
+          # the key is never printed.
+          if [ -n "${OPENCODE_API_KEY}" ]; then
+            find "${DIAG}" -type f \
+              -exec sed -i.bak "s|${OPENCODE_API_KEY}|[REDACTED-OPENCODE-KEY]|g" {} + \
+              2>/dev/null || true
+            find "${DIAG}" -name '*.bak' -delete 2>/dev/null || true
+          fi
           echo "Diagnostics collected in ${DIAG}"
 
       - name: Upload failure diagnostics
