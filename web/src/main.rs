@@ -3637,7 +3637,7 @@ fn App() -> impl IntoView {
                   <button id="visual-metronome" class="visual-metronome" type="button" aria-label=move || format!("Metronome settings, {:.0} BPM", bpm.get()) aria-haspopup="dialog" aria-controls="metronome-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Metronome)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Metronome){None}else{Some(ContextPopup::Metronome)})>
                     <span class="visual-metronome-sweep" aria-hidden="true"><i></i></span>
                     <span class="visual-metronome-beats" aria-hidden="true">{move || (0..beats_per_bar(&exercise.get()).round().max(1.0) as usize).map(|_|view!{<i></i>}).collect_view()}</span>
-                    <small class="visual-metronome-label" aria-hidden="true">{move || format!("{:.0}", bpm.get())}</small>
+                    <small class="visual-metronome-label" aria-hidden="true">{move || format!("{:.0} BPM", bpm.get())}</small>
                   </button>
                     <div id="metronome-popover" class=move || if context_popup.get()==Some(ContextPopup::Metronome){"bar-selection-popover metronome-popover"}else{"bar-selection-popover metronome-popover hidden"} role="dialog" aria-label="Metronome">
                       <div class="bar-selection-popover-head"><strong>"Metronome"</strong><button class="bar-selection-close" type="button" aria-label="Close metronome settings" on:click=move |_|{context_popup.set(None);focus_popup_trigger(ContextPopup::Metronome);}><X size=15/></button></div>
