@@ -2458,6 +2458,9 @@ fn App() -> impl IntoView {
         if adaptive_session_active.get_untracked() {
             return;
         }
+        if adaptive_enabled.get_untracked() {
+            adaptive_original_bpm.set(value.clamp(30.0, 240.0));
+        }
         let value = value.clamp(30.0, 240.0);
         bpm.set(value);
         if matches!(
