@@ -425,6 +425,9 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .visualisation-selector button:hover,.notation-theme-toggle:hover{color:var(--ink)}
 .notation-theme-toggle{width:44px;padding:0;display:grid;place-items:center;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
 .notation-theme-toggle[aria-pressed=true]{background:var(--panel-2);color:var(--ink)}
+.score-card:not(.notation-dark) .visualisation-selector{background:var(--paper);border-color:#c9c4b7}
+.score-card:not(.notation-dark) .visualisation-selector button,.score-card:not(.notation-dark) .notation-theme-toggle{background:var(--paper);color:var(--paper-ink);border-color:#c9c4b7}
+.score-card:not(.notation-dark) .visualisation-selector button.active,.score-card:not(.notation-dark) .notation-theme-toggle[aria-pressed=true]{background:#e6e1d6;color:var(--paper-ink)}
 .score-card.notation-dark{background:var(--panel);border-color:var(--line);color:var(--ink);box-shadow:none;color-scheme:dark}
 .notation-dark .score-meta,.notation-dark .position-row{border-color:var(--line);color:var(--muted)}
 .notation-dark .notation svg{fill:var(--ink);stroke:var(--ink)}

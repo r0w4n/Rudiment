@@ -65,7 +65,7 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(page.locator('.live-assessment')).toHaveCount(0);
   await expect(page.locator('#visual-metronome')).toBeVisible();
   await expect(page.locator('.visual-metronome-beats i')).toHaveCount(4);
-  await expect(page.locator('.visual-metronome-label')).toHaveText('READY');
+  await expect(page.locator('.visual-metronome-label')).toHaveText('60 BPM');
   await expect(page.getByRole('button', { name: /Stop/ })).toHaveCount(0);
   const transportButtons=await page.locator('.transport').evaluate(element=>{
     const restart=element.querySelector('.restart-button')!.getBoundingClientRect();
@@ -298,7 +298,7 @@ test('visual metronome pulses from the audible transport clock and marks the dow
   await expect(page.locator('.visual-metronome-beats i.current')).toHaveCount(1);
   await page.getByRole('button', { name: /Pause/ }).click();
   await expect(visual).not.toHaveClass(/active/);
-  await expect(page.locator('.visual-metronome-label')).toHaveText('READY');
+  await expect(page.locator('.visual-metronome-label')).toHaveText('60 BPM');
 });
 
 test('pausing during count-in resumes the remaining count-in', async ({ page }) => {
