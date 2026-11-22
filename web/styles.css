@@ -163,7 +163,7 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .visual-metronome-beats i:first-child{width:7px;height:7px;border:1px solid #ba7f3888;background:#d69d5544}
 .visual-metronome-beats i.current{background:#43ad91;box-shadow:0 0 6px #43ad9177;opacity:1}
 .visual-metronome-beats i:first-child.current{background:#d89442;box-shadow:0 0 8px #d8944288}
-.visual-metronome-label{grid-column:3;grid-row:1;text-align:right;font-size:11px;line-height:1;font-weight:800;color:#65706a;margin-left:6px}
+.visual-metronome-label{grid-column:3;grid-row:1;text-align:right;font-size:11px;line-height:1;font-weight:800;color:#65706a;margin-left:6px;white-space:nowrap}
 .visual-metronome.active .visual-metronome-sweep i{background:#248f73}
 .visual-metronome.count-in .visual-metronome-label{color:#a56d2d}
 @media(max-width:700px){.score-meta{gap:6px}.score-meta>.visual-metronome{width:76px;grid-template-columns:34px 1fr;column-gap:5px}.visual-metronome-sweep{width:34px}.visual-metronome-sweep i{transform:translate3d(calc(var(--metronome-swing)*11px),0,0)}.visual-metronome-beats{gap:3px}.visual-metronome-label{display:none}}
