@@ -7,6 +7,29 @@ async function setTempo(page: Page, value: string) {
   await page.getByLabel('Close metronome settings').click();
 }
 
+const topNavSelectors = ['#midi-library-trigger', '#stats-trigger', '#settings-trigger', '.topbar .status-pill', '.topbar .brand'];
+
+// Guards the iPad top-navigation touch fix: every control must keep a
+// 44x44 CSS-pixel target, use `touch-action: manipulation` so WebKit's
+// double-tap-to-zoom recognizer cannot swallow rapid taps, and win
+// elementFromPoint at its own centre so no invisible layer intercepts it.
+async function expectTopNavTouchReady(page: Page) {
+  for (const selector of topNavSelectors) {
+    const control = page.locator(selector).first();
+    await control.scrollIntoViewIfNeeded();
+    const box = await control.boundingBox();
+    expect(box?.width, `${selector} touch width`).toBeGreaterThanOrEqual(44);
+    expect(box?.height, `${selector} touch height`).toBeGreaterThanOrEqual(44);
+    const selfHit = await control.evaluate(element => {
+      const bounds = element.getBoundingClientRect();
+      const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+      return hit === element || (hit instanceof Node && element.contains(hit));
+    });
+    expect(selfHit, `${selector} is hit-tested at its own centre`).toBe(true);
+    expect(await control.evaluate(element => getComputedStyle(element).touchAction), `${selector} touch-action`).toBe('manipulation');
+  }
+}
+
 test('acoustic snare layers preload before the first audio interaction', async ({ page }) => {
   const requested:string[]=[];
   page.on('request',request=>{if(/\/audio\/(?:snare-.*|(?:woodblock|click|cowbell)-(?:accent|regular))\.wav$/.test(new URL(request.url()).pathname))requested.push(request.url());});
@@ -579,7 +602,48 @@ test('top controls remain interactive in browser fullscreen', async ({page}) => 
   await page.getByRole('button',{name:'Open settings'}).click();
   await expect(page.getByRole('dialog',{name:'Sound & drums'})).toBeVisible();
   await page.getByRole('button',{name:'Close settings'}).first().click();
+  await expectTopNavTouchReady(page);
   await page.evaluate(()=>document.exitFullscreen());
+});
+
+test('top navigation controls provide 44px touch targets with unobstructed hit areas', async ({page}) => {
+  await page.goto('/');
+  await expectTopNavTouchReady(page);
+});
+
+test.describe('iPad landscape touch navigation', () => {
+  test.use({ viewport: { width: 1194, height: 834 }, hasTouch: true });
+
+  test('top navigation controls open and close dialogs with single taps', async ({page}) => {
+    await page.goto('/');
+    await page.locator('#stats-trigger').tap();
+    await expect(page.getByRole('dialog',{name:'Performance history'})).toBeVisible();
+    await page.getByRole('button',{name:'Close statistics'}).tap();
+    await page.locator('#settings-trigger').tap();
+    await expect(page.getByRole('dialog',{name:'Sound & drums'})).toBeVisible();
+    await page.getByRole('button',{name:'Close settings'}).first().tap();
+    await page.locator('#midi-library-trigger').tap();
+    await expect(page.getByRole('dialog',{name:'MIDI library'})).toBeVisible();
+    await page.getByRole('button',{name:'Close MIDI library'}).tap();
+    await expectTopNavTouchReady(page);
+  });
+
+  test('touch targets stay aligned with visible controls in browser fullscreen', async ({page}) => {
+    await page.goto('/');
+    await page.evaluate(()=>{
+      document.querySelector('.brand')!.addEventListener('click',event=>{
+        event.preventDefault();
+        void document.documentElement.requestFullscreen().catch(error=>{(window as any).__fullscreenError=String(error);});
+      },{once:true});
+    });
+    await page.locator('.brand').tap();
+    const fullscreenError=await page.evaluate(()=>(window as any).__fullscreenError);
+    test.skip(fullscreenError==='TypeError: not granted',`Fullscreen API was rejected by the browser: ${fullscreenError}`);
+    expect(fullscreenError).toBeUndefined();
+    await expect.poll(()=>page.evaluate(()=>Boolean(document.fullscreenElement))).toBe(true);
+    await expectTopNavTouchReady(page);
+    await page.evaluate(()=>document.exitFullscreen());
+  });
 });
 
 test('built-in difficulty filter finds playable beginner, intermediate and advanced exercises', async ({page}) => {
