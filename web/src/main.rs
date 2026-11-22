@@ -223,6 +223,8 @@ extern "C" {
     fn update_score(beat: f64, judgements: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = queueScoreFeedback)]
     fn queue_score_feedback(judgements: JsValue);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = flushScoreFeedback)]
+    fn flush_score_feedback();
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedback)]
     fn clear_score_feedback();
     #[wasm_bindgen(js_namespace = rudiment, js_name = clearScoreFeedbackPreserveViewport)]
@@ -2205,6 +2207,7 @@ fn App() -> impl IntoView {
             paused_run_start_ms.set(Some(run_start_ms.get_untracked()));
         }
         stop_audio();
+        flush_score_feedback();
         phase.set("paused".into());
     });
     let start_holder: StartSlot = Rc::new(RefCell::new(None));
