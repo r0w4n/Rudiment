@@ -276,8 +276,8 @@ test('contextual metronome and bar controls pass axe and restore focus', async (
     await expect(page.getByRole('dialog', { name: dialogName })).toBeVisible();
     if (dialogName === 'Metronome') {
       const dialog = page.getByRole('dialog', { name: dialogName });
-      await dialog.getByLabel('Increase tempo').focus();
-      await page.keyboard.press('Space');
+      await dialog.getByLabel('Tempo slider').focus();
+      await page.keyboard.press('ArrowRight');
       await expect(dialog.getByLabel('Tempo in BPM')).toHaveValue('61');
       await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
     }
