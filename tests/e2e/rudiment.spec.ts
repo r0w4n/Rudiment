@@ -611,6 +611,22 @@ test('top navigation controls provide 44px touch targets with unobstructed hit a
   await expectTopNavTouchReady(page);
 });
 
+// iPadOS WebKit keeps stale tap hit-test geometry for composited layers
+// (backdrop-filter / position:fixed) after a viewport resize, which made
+// top navigation and dialog close buttons need 5-10 taps in full-screen.
+// These layers must never rely on backdrop-filter again.
+test('top bar and dialog overlays do not use backdrop-filter', async ({page}) => {
+  await page.goto('/');
+  const results = await page.evaluate(() => ['.topbar', '.drawer-backdrop', '.stats-backdrop', '.result-backdrop', '.delete-confirm-backdrop'].map(selector => {
+    const element = document.querySelector(selector);
+    return { selector, present: Boolean(element), backdropFilter: element ? getComputedStyle(element).backdropFilter : 'none' };
+  }));
+  for (const result of results) {
+    expect(result.backdropFilter, `${result.selector} backdrop-filter`).toBe('none');
+  }
+  expect(results.filter(result => result.present).map(result => result.selector)).toEqual(['.topbar', '.drawer-backdrop', '.stats-backdrop', '.result-backdrop']);
+});
+
 test.describe('iPad landscape touch navigation', () => {
   test.use({ viewport: { width: 1194, height: 834 }, hasTouch: true });
 
