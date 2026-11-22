@@ -58,6 +58,26 @@ output time (`getOutputTimestamp()` where available and valid, raw
 clock, extrapolator or audio scheduler. Frames delayed by scoring or browser
 work render the current transport beat on the next opportunity.
 
+An iPadOS field report (2022 iPad Air, 60 Hz) described both the notation
+playhead and the opt-in wall-clock reference overlay lurching together, with
+no MIDI hits and even at 30 BPM. Lock-step motion of both rAF loops rules out
+the audio-clock bridge and feedback painting; it means frames themselves
+stall. Auditing periodic work found exactly one main-thread activity during
+otherwise steady practice: the practice-duration checkpoint wrote an
+IndexedDB readwrite transaction every 5 seconds (`bridge.js`
+`practiceTime`). That cadence is now 30 seconds; `stop()` on pause,
+navigation, visibility change and pagehide still persists immediately and
+`loadPracticeTime()` forces a checkpoint on read, so only a hard crash can
+lose up to 30 seconds of a non-scored duration counter. A Playwright WebKit
+probe (macOS, headless and headed, using the `?playhead-debug=1`
+instrumentation) measured p50 17 ms frame intervals with no stalls over
+32-second runs both before and after the change, so desktop WebKit does not
+reproduce the report and the improvement must be confirmed on the device.
+A low-cadence hidden-SVG playhead mirror was also tried and reverted: the
+performance-correctness suite samples `#playhead` `data-beat` per frame as
+the notation timeline readout (0.12-beat budget at 240 BPM), which a 100 ms
+mirror cadence violates.
+
 The optional Highway previously allocated/froze note and grid snapshots and
 walked the whole visible SVG on every frame. It now retains guarded static
 beat-window projections, updating only the moving SVG group between window

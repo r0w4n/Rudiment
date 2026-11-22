@@ -46,7 +46,15 @@ const practiceTime={
       this.pending-=increment;this.error=null;
     }).catch(error=>{this.error=error;});
   },
-  start(){if(this.since!==null)return;this.since=performance.now();this.timer=setInterval(()=>this.checkpoint(),5000);},
+  // iPadOS Safari commits IndexedDB readwrite transactions on the main
+  // thread's schedule, so a 5 s cadence put one on that schedule during
+  // otherwise idle playback; an iPad field report of lock-step playhead
+  // hitches matched that periodic signature. stop() (pause, navigation,
+  // visibility change, pagehide) still persists immediately, so only a hard
+  // crash can lose up to 30 s of wall-clock duration — a counter, not scored
+  // history. Desktop WebKit pacing measurements do not reproduce the hitch,
+  // so on-device confirmation is still required.
+  start(){if(this.since!==null)return;this.since=performance.now();this.timer=setInterval(()=>this.checkpoint(),30000);},
   stop(){if(this.since===null)return;this.checkpoint();this.since=null;clearInterval(this.timer);this.timer=null;},
   async read(){if(this.since!==null)this.checkpoint();await this.writes;if(this.error)throw this.error;return Number((await (await dbPromise).get('settings','practiceTime'))?.value)||0;},
   async clearHistory(){this.stop();await this.writes;if(this.error)throw this.error;const db=await dbPromise,tx=db.transaction(['sessions','settings'],'readwrite');await tx.objectStore('sessions').clear();await tx.objectStore('settings').delete('practiceTime');await tx.done;}
@@ -1206,7 +1214,11 @@ function updateScore(beat, judgements, loopAware=false) {
     // The SVG line stays hidden (CSS visibility) and only mirrors the
     // attributes and classes tests and the diagnostic harness observe; a
     // WebKit bug in composited SVG 3D transforms froze the old CSS-transform
-    // line at system boundaries, so geometry stays in SVG coordinates.
+    // line at system boundaries, so geometry stays in SVG coordinates. The
+    // mirror keeps full frame rate: the browser performance-correctness
+    // suite samples data-beat per frame as the notation view's timeline
+    // readout, and measured WebKit pacing shows no per-frame stall to trade
+    // against that contract.
     playhead.setAttribute('x1',String(position.x));
     playhead.setAttribute('x2',String(position.x));
     playhead.dataset.x=String(position.x);
