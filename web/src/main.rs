@@ -1572,7 +1572,7 @@ fn MetronomeSettings(
 ) -> impl IntoView {
     let tempo_input = change_tempo.clone();
     let tempo_input2 = change_tempo.clone();
-    let tempo_input3 = change_tempo.clone();
+    let _tempo_input3 = change_tempo.clone();
     let tempo_commit = change_tempo.clone();
     let tempo_commit2 = change_tempo.clone();
     let tempo_enter = change_tempo;
@@ -3290,8 +3290,8 @@ fn App() -> impl IntoView {
     let key_reset_run = reset_run.clone();
     let key_start_new_run = start_new_run.clone();
     let key_hit = hit_input.clone();
-    let key_pause_run = pause_run.clone();
-    let key_resume_run = resume_run.clone();
+    let _key_pause_run = pause_run.clone();
+    let _key_resume_run = resume_run.clone();
     // Capture activation before component handlers run. Transport and restart
     // own their toggle/reset semantics; loading a file still replaces the run.
     let interaction_pause = pause_run.clone();
