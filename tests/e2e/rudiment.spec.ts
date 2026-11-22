@@ -1941,8 +1941,11 @@ test('past unplayed notes become missed while future notes stay neutral and the 
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   // SVG lines have a zero-width bounding box, so Playwright correctly reports
-  // no box even while the stroked playhead is visibly rendered.
+  // no box even while the stroked playhead is visibly rendered. The visible
+  // playhead is the composited overlay; the SVG line mirrors attributes only.
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  await expect(page.locator('.playhead-overlay')).toHaveClass(/visible/);
+  await expect(page.locator('#playhead')).toHaveCSS('visibility','hidden');
   const first=Number(await page.locator('#playhead').getAttribute('data-x'));
   await expect.poll(async()=>Number(await page.locator('#playhead').getAttribute('data-x')),{timeout:1500}).toBeGreaterThan(first);
   expect(Number(await page.locator('#playhead').getAttribute('x1'))).toBeGreaterThan(0);
@@ -2032,6 +2035,40 @@ test('playhead continues moving after entering bar two', async ({ page }) => {
   expect(motion.maximum - motion.minimum).toBeGreaterThan(100);
   await expect(page.locator('#playhead')).not.toHaveAttribute('style', /transform/);
   await page.getByRole('button', { name: /Restart/ }).click();
+});
+
+test('composited overlay is the visible playhead and reserves geometry writes for row changes',async({page})=>{
+  await page.goto('/');
+  await page.evaluate(()=>{
+    const hits=Array.from({length:16},(_,index)=>({beat:index*.5,notation_beat:index*.5,notation_duration_beats:.5,instrument:'snare',articulation:'center',note:38,hand:index%2===0?'R':'L',accent:false}));
+    (window as unknown as {rudiment:{renderScore(exercise:unknown):void}}).rudiment.renderScore({title:'Overlay Test',meter_numerator:4,meter_denominator:4,hits});
+  });
+  const overlay=page.locator('.playhead-overlay');
+  await expect(overlay).toHaveCount(1);
+  await expect(page.locator('#playhead')).toHaveCSS('visibility','hidden');
+  await expect(overlay).toHaveCSS('visibility','visible');
+  await expect(overlay).toHaveCSS('will-change','transform');
+  const result=await page.evaluate(()=>{
+    const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    const overlayElement=document.querySelector<HTMLElement>('.playhead-overlay')!;
+    const line=document.querySelector('#playhead')!;
+    const read=()=>({top:overlayElement.style.top,height:overlayElement.style.height,transform:overlayElement.style.transform});
+    app.updateScore(.1,[]);const firstRow=read();
+    app.updateScore(2.5,[]);const sameRow=read();
+    // Read both writers in the same turn: the overlay transform and the
+    // mirrored data-x come from the same authoritative position.
+    const overlayX=Number(/translate3d\(([-\d.]+)px/.exec(overlayElement.style.transform)?.[1]);
+    const lineX=Number(line.getAttribute('data-x'));
+    app.updateScore(8.1,[]);const nextRow=read();
+    return {firstRow,sameRow,nextRow,overlayX,lineX};
+  });
+  // Within one system the overlay moves only by transform; geometry writes
+  // happen only at row boundaries so WebKit keeps the composited layer live.
+  expect(result.sameRow.top).toBe(result.firstRow.top);
+  expect(result.sameRow.height).toBe(result.firstRow.height);
+  expect(result.sameRow.transform).not.toBe(result.firstRow.transform);
+  expect(result.nextRow.top).not.toBe(result.firstRow.top);
+  expect(result.overlayX).toBeCloseTo(result.lineX,3);
 });
 
 test('count-in for a selected bar never traverses the preceding bar', async ({ page }) => {

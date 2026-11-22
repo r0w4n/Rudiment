@@ -5,7 +5,9 @@ Implemented and validated. Follow-up round removed the remaining paint bottlenec
 (SVG drop-shadow filters on feedback) after user reported continued stutter.
 Third pass implemented the low-risk scaling optimisations (items 2–5 from the
 review): cheap feedback diffing, painted-only clearing, cached DOM refs and
-O(1) scroll row lookup.
+O(1) scroll row lookup. Fourth pass moved the production playhead into a
+composited HTML overlay (handover item 1) and throttled the non-playhead UI
+work (handover item 4, minus the metronome pulse, which is unchanged).
 
 ## Completed work
 - Decoupled notation feedback painting from the transport/playhead frame.
@@ -231,3 +233,95 @@ existing diagnostic playhead and a real Chrome performance trace:
 The existing `playhead-debug` diagnostic (`?playhead-debug=1`) exports CSV via
 `rudiment.exportPlayheadDebugCsv()` and compares the green production playhead
 with the blue reference overlay.
+
+## Fourth pass: composited playhead overlay and throttled per-frame UI
+
+Implements handover items 1 and 4 (except the metronome pulse sub-item) from
+the "Remaining playhead smoothness work" handover above. Items 2 (feedback
+overlay) and 3 (scroll cost) remain deferred until the overlay is measured on
+real hardware.
+
+### 1. Composited playhead overlay (highest impact)
+- `renderScore` now also appends a `.playhead-overlay` HTML div (aria-hidden)
+  inside `#notation`, which becomes the visible playhead.
+- Per frame `updateScore` writes only `transform: translate3d(x, 0, 0)` on the
+  overlay — a compositor-only change that no longer invalidates the engraved
+  score SVG. Overlay `top`/`height` are written only at row boundaries, the
+  shape the handover prescribed for WebKit safety.
+- The SVG `<line id="playhead">` stays in the DOM but is styled
+  `visibility: hidden` and never paints. It keeps mirroring `x1`/`x2`, `y1`/
+  `y2`, `data-x`, `data-row`, `data-bar`, `data-beat` and the `visible` class
+  exactly as before, so every existing test, the `playhead-debug` diagnostic
+  and the historical WebKit-freeze workaround stay valid.
+- `#notation` gains `position: relative` so the overlay is positioned in the
+  scrolled score coordinate space (same technique the diagnostic overlay uses).
+- Overlay CSS mirrors the old line: 3px `#14896d`, `opacity .85` when visible,
+  `will-change: transform`, `pointer-events: none`.
+
+Residual risk: the WebKit layer-freeze warning in the handover applies to
+geometry changes on composited layers. Overlay geometry now changes only at
+row boundaries (not per frame), which the handover expected to be safe, but
+this must be confirmed on real iPad hardware in Safari — headless Chrome tests
+cannot establish that.
+
+### 4. Throttled non-playhead UI work
+- `web/src/main.rs`: new `displayed_bar` Memo derives the one-based bar index
+  from `progress` and `bar_sequence`; the bar label view now runs only when
+  the displayed bar (or selection/attempt state) actually changes instead of
+  on every ~32 ms transport frame.
+- New `timeline_beat` signal samples the same beat for the thin timeline bar
+  at ~10 Hz (plus a forced update on a run's final frame); pause/reset/launch
+  sites update it immediately so the resting bar stays correct.
+- `performanceProfile.record` now bounds each metric's sample history
+  (4096, dropping the oldest quarter when full) so endurance runs no longer
+  accumulate unbounded arrays and their GC noise.
+- The metronome CSS custom property (`bridge.js` `--metronome-swing`) is
+  unchanged: it drives the pendulum animation and is secondary.
+
+### Test additions
+- `tests/e2e/rudiment.spec.ts`: new deterministic test asserting the overlay
+  is the visible playhead (hidden SVG line, `will-change: transform`), moves
+  only by `transform` within a row, writes geometry only at row boundaries,
+  and mirrors the hidden line's `data-x`.
+- The continuous-motion playback test now also asserts the SVG line stays
+  `visibility: hidden` while the overlay carries the `visible` class.
+
+### Validation (fourth pass)
+- `npm run lint` (ESLint + TypeScript): passed.
+- `cargo test --workspace --locked`: 28 passed, 1 ignored.
+- `npm run qa:quick`: passed (formatting, cargo check, clippy).
+- `npm run qa:unit`: passed (Rust + JS unit tests).
+- `npx playwright test tests/e2e/performance-correctness.spec.ts`: 4 passed.
+- `npx playwright test tests/e2e/rudiment.spec.ts`: 90 tests, all passing
+  (also green inside `qa:browser`).
+- `npm run qa:browser -- --skip-build`: passed (156.6 s, full e2e set).
+- `npm run qa:a11y -- --skip-build`: passed (11.1 s).
+- `npm run qa:performance -- --skip-build` (`perf:fast:measure` with
+  baseline `--enforce`): passed all absolute gates.
+- Diagnostic (not strict) comparison vs `tests/performance/baseline.json`,
+  same machine but baseline recorded on an older Chrome: `score_update_ms`
+  p95 1.10 → 0.10 ms, `midi_event_to_paint_ms` p95 38.96 → 14.67 ms;
+  `midi_callback_ms` 0.30 → 0.50 ms (0.2 ms absolute). Treat as direction,
+  not proof — per project policy these are headless numbers and cannot
+  establish real-device smoothness.
+
+### Pre-existing flake observed (not caused by this pass)
+`Restart clears painted note feedback` (rudiment.spec.ts:134) intermittently
+fails in full-suite runs on this machine: at 240 BPM the
+`.score-note[data-judgement]` count passes through its expected value 1 for
+only ~100–200 ms and a loaded Playwright poll can skip it (observed 0 → 2).
+Reproduced identically on unmodified `main` (c57bb93) built in a separate
+worktree, and passes 4/4 in isolation. Left unfixed as out of scope; a
+tolerant poll (e.g. `expect.poll(...).toBeLessThanOrEqual(1)` bounded by a
+frame wait) would remove the flake.
+
+### Remaining after this pass
+- Handover item 2 (move feedback halos/markers into the overlay layer) and
+  item 3 (row-transition scroll cost) stay deferred until the overlay is
+  measured on real hardware.
+- The metronome per-frame CSS custom property is unchanged.
+- Real-iPad/Safari validation of row-boundary overlay geometry changes (the
+  WebKit composited-layer freeze risk) is still outstanding; headless Chrome
+  tests cannot cover it.
+
+

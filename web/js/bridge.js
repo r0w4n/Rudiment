@@ -76,10 +76,15 @@ const drumSampleFiles = {
   open_hat:'audio/open-hat.wav',
 };
 const metronomeSampleName = path => path.slice('audio/'.length,-'.wav'.length);
+const PERFORMANCE_SAMPLE_CAP=4096;
 const performanceProfile={
   enabled:globalThis.__RUDIMENT_PERF__===true,
   samples:new Map(),
-  record(name,value){if(!this.enabled||!Number.isFinite(value))return;const values=this.samples.get(name)??[];values.push(value);this.samples.set(name,values);},
+  // Bounded history: endurance runs must not accumulate unbounded arrays whose
+  // GC pauses skew the very timings being measured. Dropping the oldest
+  // quarter once the cap is reached keeps recording amortised O(1); the cap
+  // retains minutes of per-frame samples, far above the QA budgets' minimums.
+  record(name,value){if(!this.enabled||!Number.isFinite(value))return;const values=this.samples.get(name)??[];if(values.length>=PERFORMANCE_SAMPLE_CAP)values.splice(0,PERFORMANCE_SAMPLE_CAP>>2);values.push(value);this.samples.set(name,values);},
   reset(){this.samples.clear();},
   snapshot(){return Object.fromEntries([...this.samples].map(([name,values])=>[name,[...values]]));}
 };
@@ -575,7 +580,7 @@ try { audio.preload(); }
 catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(error); }
 
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
-let scoreData = { notes:[], svg:null, playhead:null, markerLayer:null, paintedGroups:new Set(), totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[] };
+let scoreData = { notes:[], svg:null, playhead:null, playheadOverlay:null, markerLayer:null, paintedGroups:new Set(), totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[] };
 let pendingScoreFeedback=null,pendingScoreFeedbackFrame=0;
 let selectedBars=new Set();
 let scoreSelectionCallback=null;
@@ -919,13 +924,18 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
   }
   const markers=document.createElementNS('http://www.w3.org/2000/svg','g');markers.id='unmatched-markers';markers.setAttribute('role','group');markers.setAttribute('aria-label','Unmatched physical strikes');svg?.appendChild(markers);
   const line = document.createElementNS('http://www.w3.org/2000/svg','line'); line.id='playhead'; line.setAttribute('x1','0');line.setAttribute('x2','0');line.setAttribute('class','playhead-line'); svg?.appendChild(line);
+  // The visible playhead is a composited HTML overlay above the engraved
+  // score: mutating the SVG line's geometry every frame invalidated and
+  // repainted the whole notation SVG. The hidden line above keeps the
+  // historical #playhead attributes/classes for tests and diagnostics.
+  const overlay=document.createElement('div'); overlay.className='playhead-overlay'; overlay.setAttribute('aria-hidden','true'); element.appendChild(overlay);
   const noteByExpectedId=new Map(),noteByBeatInstrument=new Map(),notesByRow=Array.from({length:lineCount},()=>[]);
   for(const meta of notesMeta){
     if(meta.hit?.id)noteByExpectedId.set(meta.hit.id,meta);
     noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`,meta);
     notesByRow[meta.row]?.push(meta);
   }
-  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),markerLayer:markers,paintedGroups:new Set(),svg,playhead:line,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[]};
+  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),markerLayer:markers,paintedGroups:new Set(),svg,playhead:line,playheadOverlay:overlay,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[]};
   playheadDebug.attachContainer(element);
   if(scoreScrollContainer!==element){
     scoreScrollContainer?.removeEventListener('scroll',onScoreScroll);
@@ -1191,16 +1201,31 @@ function updateScore(beat, judgements, loopAware=false) {
   if(beat>=0)scoreData.preserveViewportOnRewind=false;
   scoreData.lastBeat=beat;
   if(playhead){
-    // Keep the playhead in the SVG coordinate system. A composited CSS 3D
-    // transform can stop repainting in WebKit when y1/y2 change at a system
-    // boundary, leaving the line apparently frozen at the start of bar two.
+    // The overlay is the visible playhead: only its transform changes per
+    // frame, so the compositor moves it without repainting the score SVG.
+    // The SVG line stays hidden (CSS visibility) and only mirrors the
+    // attributes and classes tests and the diagnostic harness observe; a
+    // WebKit bug in composited SVG 3D transforms froze the old CSS-transform
+    // line at system boundaries, so geometry stays in SVG coordinates.
     playhead.setAttribute('x1',String(position.x));
     playhead.setAttribute('x2',String(position.x));
     playhead.dataset.x=String(position.x);
     if(performanceProfile.enabled)playhead.dataset.beat=String(beat);
-    if(position.row!==scoreData.lastPlayheadRow){playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);scoreData.lastPlayheadRow=position.row;}
+    const overlay=scoreData.playheadOverlay;
+    if(position.row!==scoreData.lastPlayheadRow){
+      playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);
+      // WebKit freezes composited layers whose geometry mutates every frame;
+      // write overlay geometry only at row boundaries and transform per frame.
+      if(overlay){overlay.style.top=`${position.y1}px`;overlay.style.height=`${Math.max(1,position.y2-position.y1)}px`;}
+      scoreData.lastPlayheadRow=position.row;
+    }
+    if(overlay)overlay.style.transform=`translate3d(${position.x}px,0,0)`;
     const visible=beat>=0&&beat<=scoreData.totalBeats;
-    if(visible!==scoreData.lastPlayheadVisible){playhead.classList.toggle('visible',visible);scoreData.lastPlayheadVisible=visible;}
+    if(visible!==scoreData.lastPlayheadVisible){
+      playhead.classList.toggle('visible',visible);
+      overlay?.classList.toggle('visible',visible);
+      scoreData.lastPlayheadVisible=visible;
+    }
   }
   if(beat>=0){
     const preservedBar=scoreData.preserveCameraBar;

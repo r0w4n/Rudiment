@@ -1691,6 +1691,18 @@ fn App() -> impl IntoView {
     let selection_changed = RwSignal::new(false);
     let context_popup = RwSignal::new(None::<ContextPopup>);
     let progress = RwSignal::new(-1.0);
+    // Per-frame `progress` updates re-ran the bar label and timeline views on
+    // every transport frame even when the displayed bar had not changed.
+    // `displayed_bar` memoises the label's one-based bar index (its closure
+    // re-evaluates per frame but only notifies the view when the bar changes);
+    // `timeline_beat` samples the same beat at ~10 Hz for the thin progress
+    // bar. Scoring, pause/resume and the transport keep using `progress`.
+    let displayed_bar = Memo::new(move |_| {
+        let sequence = bar_sequence.get();
+        let beat: f64 = progress.get();
+        (sequence.display_beat(beat.max(sequence.origin)) / sequence.bar_beats).floor() as usize + 1
+    });
+    let timeline_beat = RwSignal::new(-1.0);
     let run_start_ms = RwSignal::new(0.0);
     let paused_run_start_ms = RwSignal::new(None::<f64>);
     let run_expected = RwSignal::new(Arc::new(Vec::<ExpectedHit>::new()));
@@ -1968,6 +1980,7 @@ fn App() -> impl IntoView {
                 "starting".into()
             });
             progress.set(offset - count_beats);
+            timeline_beat.set(offset - count_beats);
             let current_exercise = exercise.get_untracked();
             let bar_beats = beats_per_bar(&current_exercise);
             let exercise_length = exercise_beats(&current_exercise);
@@ -2044,7 +2057,8 @@ fn App() -> impl IntoView {
             let scoring_for_frame = scoring_for_launch.clone();
             let frame_sequence = sequence.clone();
             let last_scoring_revision = Cell::new(u64::MAX);
-            let frame = Closure::wrap(Box::new(move |beat: f64, _now: f64, start: f64| {
+            let timeline_last_ms = Cell::new(f64::NEG_INFINITY);
+            let frame = Closure::wrap(Box::new(move |beat: f64, now: f64, start: f64| {
                 let score_tempo_map = runtime_tempo_map.get_untracked();
                 let scoring_bpm = score_tempo_map
                     .first()
@@ -2076,6 +2090,12 @@ fn App() -> impl IntoView {
                 run_start_ms.set(session_start);
                 let visible_beat = beat.min(segment_end - 0.000_001);
                 progress.set(visible_beat);
+                // ~10 Hz is plenty for the 3 px timeline; the final frame of a
+                // run still lands the bar exactly at its end position.
+                if beat >= segment_end - 0.000_001 || now - timeline_last_ms.get() >= 100.0 {
+                    timeline_last_ms.set(now);
+                    timeline_beat.set(visible_beat);
+                }
                 if repeat_enabled
                     && !origin_set.replace(true)
                     && accepted_observed.get_untracked().is_empty()
@@ -2326,6 +2346,7 @@ fn App() -> impl IntoView {
             audio_position
         };
         progress.set(position);
+        timeline_beat.set(position);
         if run_start_ms.get_untracked() > 0.0 {
             paused_run_start_ms.set(Some(run_start_ms.get_untracked()));
         }
@@ -2375,6 +2396,7 @@ fn App() -> impl IntoView {
         live_matched_expected.set(HashSet::new());
         result.set(None);
         progress.set(-1.0);
+        timeline_beat.set(-1.0);
         clear_score_feedback();
         phase.set("idle".into());
         if adaptive_session_active.get_untracked() {
@@ -2410,6 +2432,7 @@ fn App() -> impl IntoView {
             live_matched_expected.set(HashSet::new());
             result.set(None);
             progress.set(-1.0);
+            timeline_beat.set(-1.0);
             clear_score_feedback();
             phase.set("idle".into());
         }
@@ -2575,6 +2598,7 @@ fn App() -> impl IntoView {
             live_matched_expected.set(HashSet::new());
             result.set(None);
             progress.set(-1.0);
+            timeline_beat.set(-1.0);
             clear_score_feedback();
             scroll_score_to_beat(start_beat);
             launch(
@@ -2834,6 +2858,7 @@ fn App() -> impl IntoView {
                 live.set(vec![]);
                 live_matched_expected.set(HashSet::new());
                 progress.set(-1.0);
+                timeline_beat.set(-1.0);
                 clear_score_feedback();
                 phase.set("idle".into());
                 if adaptive_session_active.get_untracked() {
@@ -3663,7 +3688,7 @@ fn App() -> impl IntoView {
               <div class=move || if import_error.get().is_some(){"error-row"}else{"error-row hidden"}>{move || import_error.get().unwrap_or_default()}</div>
               <div class="position-row">
                 <div class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-control open"}else{"bar-selection-control"}>
-                  <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-controls="bar-selection-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Bars)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Bars){None}else{Some(ContextPopup::Bars)})><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let sequence=bar_sequence.get();let total=sequence.total_bars;let current=(sequence.display_beat(progress.get().max(sequence.origin))/sequence.bar_beats).floor() as usize+1;if repeat_bar_until_good.get(){format!("BAR {current} / {total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {total}")}}}</span></button>
+                  <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-controls="bar-selection-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Bars)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Bars){None}else{Some(ContextPopup::Bars)})><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let sequence=bar_sequence.get();let total=sequence.total_bars;let current=displayed_bar.get();if repeat_bar_until_good.get(){format!("BAR {current} / {total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {total}")}}}</span></button>
                   <div id="bar-selection-popover" class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-popover"}else{"bar-selection-popover hidden"} role="dialog" aria-label="Bar selection">
                     <div class="bar-selection-popover-head"><strong>"Practise bars"</strong><button class="bar-selection-close" type="button" aria-label="Close bar selection" on:click=move |_|{context_popup.set(None);focus_popup_trigger(ContextPopup::Bars);}><X size=15/></button></div>
                     <div class="bar-checkboxes" role="group" aria-label="Individual practice bars">{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;let toggle=toggle_bar.get_value();(0..count).map(|bar|{let toggle=toggle.clone();view!{<label><input type="checkbox" disabled=move || adaptive_session_active.get() aria-label=format!("Bar {}",bar+1) prop:checked=move || selected_bars.get().binary_search(&bar).is_ok() on:change=move |_|toggle(bar)/><span>{format!("Bar {}",bar+1)}</span></label>}}).collect_view()}}</div>
@@ -3671,7 +3696,7 @@ fn App() -> impl IntoView {
                     <small>{move || {let bars=selected_bars.get();if bars.is_empty(){"All bars · Performance when played once".into()}else{format!("{} selected · Practice",bars.iter().map(|bar|format!("{}",bar+1)).collect::<Vec<_>>().join(", "))}}}</small>
                   </div>
                 </div>
-                <div class="timeline"><i style=move || {let sequence=bar_sequence.get();format!("width:{:.2}%",((progress.get().max(sequence.origin)-sequence.origin)/sequence.length()*100.0).rem_euclid(100.0).clamp(0.0,100.0))}></i></div>
+                <div class="timeline"><i style=move || {let sequence=bar_sequence.get();format!("width:{:.2}%",((timeline_beat.get().max(sequence.origin)-sequence.origin)/sequence.length()*100.0).rem_euclid(100.0).clamp(0.0,100.0))}></i></div>
                 <select class="loop-control" disabled=move || adaptive_session_active.get() aria-label=move || format!("Loops: {}", match loops.get(){2=>"2 LOOPS",4=>"4 LOOPS",0=>"∞ LOOP",_=>"1 / 1 LOOP"}) title="Choose how many times to play the selected bars" prop:value=move || loops.get().to_string() on:change={let save=save_loops.clone();move |event|{let value=event_target_value(&event).parse().unwrap_or(1);if phase.get_untracked()=="paused" && value!=loops.get_untracked(){selection_changed.set(true);}loops.set(value);save();}}><option value="1">"1 / 1 LOOP"</option><option value="2">"2 LOOPS"</option><option value="4">"4 LOOPS"</option><option value="0">"∞ LOOP"</option></select>
               </div>
               <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>
@@ -3715,7 +3740,7 @@ fn App() -> impl IntoView {
                   }.into_any()}).unwrap_or_else(||().into_any())}
                 </section>
                 </div>
-                <footer class="summary-footer"><p>{move || displayed_result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>{move || if historical_result.get().is_some(){"Back to history"}else{"Back to score"}}</button><button class=move || if historical_result.get().is_some(){"primary hidden"}else{"primary"} on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
+                <footer class="summary-footer"><p>{move || displayed_result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>{move || if historical_result.get().is_some(){"Back to history"}else{"Back to score"}}</button><button class=move || if historical_result.get().is_some(){"primary hidden"}else{"primary"} on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);timeline_beat.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
                 </section>
               </div>
             </section>
