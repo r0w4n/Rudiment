@@ -504,3 +504,5 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .adaptive-status p{margin:0;color:#94a19a;font-size:11px;line-height:1.4}
 .adaptive-status button{min-height:32px;padding:0 12px;border:1px solid #3a4741;border-radius:9px;background:#1b231f;color:#cbd6d0;font-size:11px;font-weight:800}
 .adaptive-status button.primary{background:linear-gradient(180deg,#82dbc7,#62c4ae);color:#09241d;border-color:#62c4ae}
+
+.tempo-control input{min-height:24px;min-width:24px}
