@@ -799,7 +799,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     barline.setAttribute('class','score-barline');barline.setAttribute('x1',String(x));barline.setAttribute('x2',String(x));
     barline.setAttribute('y1',String(singleLine?stave.getYForLine(2)-9:stave.getYForLine(0)));
     barline.setAttribute('y2',String(singleLine?stave.getYForLine(2)+9:stave.getYForLine(4)));
-    barline.setAttribute('stroke','#343a36');barline.setAttribute('stroke-width','1.2');svg?.appendChild(barline);
+    barline.setAttribute('stroke-width','1.2');svg?.appendChild(barline);
   }
   for(let bar=0;bar<barCount;bar++){
     const stave=staves[barLayouts[bar].row],label=document.createElementNS('http://www.w3.org/2000/svg','text');
@@ -808,7 +808,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     label.dataset.scoreBar=String(bar);
     label.setAttribute('y',String(stave.getYForLine(0)-12));label.setAttribute('text-anchor',bar===0||bar%barsPerLine===0?'start':'end');
     label.setAttribute('font-family','Inter, sans-serif');label.setAttribute('font-size','10');label.setAttribute('font-weight','600');
-    label.setAttribute('fill','#666d68');label.textContent=String(bar+1);svg?.appendChild(label);
+    label.textContent=String(bar+1);svg?.appendChild(label);
   }
   if (svg) {
     svg.setAttribute('role','group');svg.setAttribute('aria-label',`${exercise.title} percussion notation with sticking`);

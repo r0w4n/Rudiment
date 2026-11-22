@@ -432,8 +432,23 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .notation-dark .score-meta,.notation-dark .position-row{border-color:var(--line);color:var(--muted)}
 .notation-dark .notation svg{fill:var(--ink);stroke:var(--ink)}
 .notation-dark .notation .vf-stave{stroke:var(--muted)}
+.notation-dark .notation .vf-stavenote .vf-notehead{fill:var(--ink);stroke:var(--ink)}
+.notation-dark .notation .vf-notehead{fill:var(--ink);stroke:var(--ink)}
+.notation-dark .notation .vf-stem{stroke:var(--ink);stroke-width:1.2}
+.notation-dark .notation .vf-beam{stroke:var(--ink);stroke-width:1.2}
+.notation-dark .notation .vf-rest{fill:var(--ink)}
+.notation-dark .notation .vf-time-signature{fill:var(--ink);stroke:var(--ink)}
+.notation-dark .notation .vf-accidental{fill:var(--ink);stroke:var(--ink)}
+.notation-dark .notation .vf-text{fill:var(--ink);font:700 11px Inter,sans-serif}
+.notation-dark .notation .vf-annotation{fill:var(--ink);font:700 11px Inter,sans-serif}
+.notation-dark .notation .vf-annotation.vf-sticking{fill:var(--ink);fill-opacity:.9}
 .notation-dark .score-barline{stroke:var(--muted)!important}
+.notation-dark .notation .vf-barline{stroke:var(--muted)!important}
+.notation-dark .notation .vf-annotation.vf-accent{fill:var(--teal);stroke:var(--teal)}
+.notation-dark .notation .vf-annotation.vf-accent>text{fill:var(--teal)}
 .notation-dark .score-measure-number{fill:var(--muted)}
+.notation-dark .notation .vf-text.vf-measure-number{fill:var(--muted)}
+.notation-dark .notation .vf-measure-number{fill:var(--muted)}
 .notation-dark .score-measure-number.selected-bar-number{fill:var(--teal)!important}
 .notation-dark .score-bar-highlight.selected{fill:var(--teal);fill-opacity:.13}
 .notation-dark .score-bar-highlight:focus-visible{stroke:var(--teal)}
