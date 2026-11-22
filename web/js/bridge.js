@@ -189,7 +189,6 @@ const visualMetronome = {
       root.classList.add('active');root.classList.toggle('count-in',beat<0);
       root.dataset.beat=String(beatInBar+1);root.dataset.step=String(Math.floor(beat*subdivision));
       root.querySelectorAll('.visual-metronome-beats i').forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
-      const label=root.querySelector('.visual-metronome-label');if(label)label.textContent=beat<0?'COUNT IN':'PLAY';
       root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
     }
     while(this.pending.length&&this.pending[0].performanceTime<=now+8){
@@ -202,8 +201,6 @@ const visualMetronome = {
     root.classList.remove('active','count-in');root.style.setProperty('--metronome-swing','0');
     delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
     root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>dot.classList.remove('current'));
-    const label=root.querySelector('.visual-metronome-label');if(label)label.textContent='READY';
-    root.setAttribute('aria-label','Metronome settings, READY');
   }
 };
 
