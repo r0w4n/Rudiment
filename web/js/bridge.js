@@ -578,7 +578,7 @@ try { audio.preload(); }
 catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(error); }
 
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
-let scoreData = { notes:[], svg:null, playhead:null, totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[], judgementSignature:'' };
+let scoreData = { notes:[], svg:null, playhead:null, markerLayer:null, paintedGroups:new Set(), totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[] };
 let pendingScoreFeedback=null,pendingScoreFeedbackFrame=0;
 let selectedBars=new Set();
 let scoreSelectionCallback=null;
@@ -875,10 +875,17 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
       }
     }
   }
-  // Cache notehead geometry so feedback painting never forces SVG layout.
+  // Cache feedback DOM refs and notehead geometry so painting never queries
+  // the score tree or forces SVG layout during hits.
   for(const meta of notesMeta){
     const group=meta.note.getSVGElement?.();
-    const head=group?.querySelectorAll('.vf-notehead > text')?.[meta.headIndex??0];
+    if(group){
+      const noteheads=group.querySelectorAll('.vf-notehead');
+      const notehead=noteheads[meta.headIndex??0]??noteheads[0];
+      meta.group=group;meta.noteheads=noteheads;meta.notehead=notehead;
+      meta.headText=notehead?.querySelector(':scope > text')??null;
+    }
+    const head=meta.headText;
     if(!head)continue;
     try{
       const bounds=head.getBBox();
@@ -921,7 +928,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`,meta);
     notesByRow[meta.row]?.push(meta);
   }
-  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),svg,playhead:line,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[],judgementSignature:''};
+  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),markerLayer:markers,paintedGroups:new Set(),svg,playhead:line,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[]};
   playheadDebug.attachContainer(element);
   if(scoreScrollContainer!==element){
     scoreScrollContainer?.removeEventListener('scroll',onScoreScroll);
@@ -1054,7 +1061,8 @@ function onScoreScroll(event){
 }
 function cameraAtBeat(beat,position) {
   if(beat<0||position.row<=0)return 0;
-  const firstBarInRow=scoreData.bars.find(bar=>bar.row===position.row)??scoreData.bars[position.bar];
+  // barsPerLine is always 1, so the row index is the bar index.
+  const firstBarInRow=scoreData.bars[position.row]??scoreData.bars[position.bar]??scoreData.bars[0];
   const transitionBeats=Math.max(.25,Math.min(1,scoreData.meter*.25));
   const linear=Math.max(0,Math.min(1,(beat-firstBarInRow.startBeat)/transitionBeats));
   // A musical-time smoothstep makes the page movement deterministic at every
@@ -1079,27 +1087,45 @@ function scrollScoreToBeat(beat) {
   scoreData.preserveViewportOnRewind=false;
 }
 function expectedJudgementKey(result){return result.expected_id?`id:${result.expected_id}`:`beat:${Number(result.expected_beat).toFixed(6)}|${result.instrument??''}`;}
+// Compare the fields that affect notation feedback without serialising the
+// whole projection. Long sessions accumulate confirmed judgements, so avoiding
+// JSON.stringify here keeps each new hit O(fields) instead of O(JSON bytes).
+function sameJudgement(left,right){
+  if(left===right)return true;
+  if(!left||!right)return false;
+  return left.expected_id===right.expected_id
+    &&left.iteration===right.iteration
+    &&left.expected_beat===right.expected_beat
+    &&left.actual_beat===right.actual_beat
+    &&left.instrument===right.instrument
+    &&left.judgement===right.judgement
+    &&left.error_ms===right.error_ms
+    &&left.excellent===right.excellent
+    &&left.note_score===right.note_score
+    &&left.event_id===right.event_id
+    &&left.confirmed===right.confirmed;
+}
 function noteForJudgement(result){
   return (result.expected_id&&scoreData.noteByExpectedId?.get(result.expected_id))
     ??scoreData.noteByBeatInstrument?.get(`${Number(result.expected_beat).toFixed(6)}|${result.instrument??'snare'}`)
     ??scoreData.notes.find(note=>Math.abs(note.beat-result.expected_beat)<.001&&(!result.instrument||instrumentForHit(note.hit)===result.instrument));
 }
 function clearExpectedJudgement(result,touchedGroups){
-  const meta=noteForJudgement(result),group=meta?.note.getSVGElement?.();if(!group)return;
-  const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
+  const meta=noteForJudgement(result),group=meta?.group??meta?.note.getSVGElement?.();if(!group)return;
+  const noteheads=meta?.noteheads??group.querySelectorAll('.vf-notehead'),notehead=meta?.notehead??noteheads[meta?.headIndex??0]??noteheads[0];
   if(noteheads.length<=1)delete group.dataset.judgement;
   if(notehead){delete notehead.dataset.judgement;notehead.removeAttribute('role');notehead.removeAttribute('aria-label');notehead.querySelector('.judgement-halo')?.remove();}
   touchedGroups.add(group);
 }
 function paintExpectedJudgement(result,touchedGroups){
-  const meta=noteForJudgement(result),group=meta?.note.getSVGElement?.();if(!group)return;
+  const meta=noteForJudgement(result),group=meta?.group??meta?.note.getSVGElement?.();if(!group)return;
   const judgement=result.judgement==='on_time'?(result.excellent?'perfect':'good'):(result.excellent?'perfect':result.judgement);
-  const noteheads=group.querySelectorAll('.vf-notehead'),notehead=noteheads[meta?.headIndex??0]??noteheads[0];
+  const noteheads=meta?.noteheads??group.querySelectorAll('.vf-notehead'),notehead=meta?.notehead??noteheads[meta?.headIndex??0]??noteheads[0];
   if(noteheads.length<=1)group.dataset.judgement=judgement;
   if(notehead){const hasOffset=judgement!=='missed'&&Number.isFinite(result.error_ms);notehead.dataset.judgement=judgement;notehead.setAttribute('role','img');notehead.setAttribute('aria-label',`${judgement.replace('_',' ')}${hasOffset?` ${Number(result.error_ms)>=0?'+':''}${Number(result.error_ms).toFixed(0)} milliseconds`:''}`);}
   if(['perfect','good','early','late'].includes(judgement)){
     const bounds=meta?.headBounds;
-    const head=notehead?.querySelector(':scope > text');
+    const head=meta?.headText??notehead?.querySelector(':scope > text');
     if(notehead&&(bounds||head)){
       const cx=bounds?bounds.cx:(()=>{const b=head.getBBox();return b.x+b.width/2;})();
       const cy=bounds?bounds.cy:(()=>{const b=head.getBBox();return b.y+b.height/2;})();
@@ -1109,6 +1135,7 @@ function paintExpectedJudgement(result,touchedGroups){
       notehead.insertBefore(halo,head);
     }
   }
+  scoreData.paintedGroups?.add(group);
   touchedGroups.add(group);
 }
 function nearestNoteInRow(row,beat){
@@ -1120,7 +1147,7 @@ function nearestNoteInRow(row,beat){
 }
 function noteHeadY(meta,fallback){
   if(Number.isFinite(meta?.headCenterY))return meta.headCenterY;
-  const head=meta?.note.getSVGElement?.()?.querySelectorAll('.vf-notehead > text')[meta?.headIndex??0];
+  const head=meta?.headText??meta?.note.getSVGElement?.()?.querySelectorAll('.vf-notehead > text')[meta?.headIndex??0];
   if(!head)return fallback;
   const cached=scoreData.headYCache?.get(head);if(Number.isFinite(cached))return cached;
   const bounds=head.getBBox(),matrix=head.getCTM(),value=matrix?matrix.b*(bounds.x+bounds.width/2)+matrix.d*(bounds.y+bounds.height/2)+matrix.f:fallback;
@@ -1128,19 +1155,24 @@ function noteHeadY(meta,fallback){
 }
 function applyJudgements(judgements) {
   if(!visualHitsEnabled)return;
+  if(judgements===scoreData.lastJudgements)return;
   const profileStart=performanceProfile.enabled?performance.now():0;
-  const signature=JSON.stringify(judgements);if(signature===scoreData.judgementSignature)return;scoreData.judgementSignature=signature;
   scoreData.lastJudgements=judgements;
   const previous=scoreData.appliedExpectedJudgements??new Map(),next=new Map(),touchedGroups=new Set();
   for(const result of judgements)if(Number.isFinite(result.expected_beat))next.set(expectedJudgementKey(result),result);
-  for(const [key,result] of previous)if(!next.has(key)||JSON.stringify(next.get(key))!==JSON.stringify(result))clearExpectedJudgement(result,touchedGroups);
-  for(const [key,result] of next)if(!previous.has(key)||JSON.stringify(previous.get(key))!==JSON.stringify(result))paintExpectedJudgement(result,touchedGroups);
+  for(const [key,result] of previous)if(!next.has(key)||!sameJudgement(next.get(key),result))clearExpectedJudgement(result,touchedGroups);
+  for(const [key,result] of next)if(!previous.has(key)||!sameJudgement(previous.get(key),result))paintExpectedJudgement(result,touchedGroups);
   scoreData.appliedExpectedJudgements=next;
-  const markers=scoreData.svg.querySelector('#unmatched-markers');markers?.replaceChildren();
-  for(const result of judgements.filter(item=>!Number.isFinite(item.expected_beat)&&Number.isFinite(item.actual_beat)&&(item.judgement==='extra'||item.judgement==='wrong_instrument'))){
-    const position=positionAtBeat(result.actual_beat),nearest=nearestNoteInRow(position.row,result.actual_beat);
-    const y=noteHeadY(nearest,(position.y1+position.y2)/2);
-    const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',String(position.x));circle.setAttribute('cy',String(y));circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
+  const markers=scoreData.markerLayer??scoreData.svg.querySelector('#unmatched-markers');
+  const markerResults=[];
+  for(const result of judgements)if(!Number.isFinite(result.expected_beat)&&Number.isFinite(result.actual_beat)&&(result.judgement==='extra'||result.judgement==='wrong_instrument'))markerResults.push(result);
+  if(markerResults.length||markers?.firstChild){
+    markers?.replaceChildren();
+    for(const result of markerResults){
+      const position=positionAtBeat(result.actual_beat),nearest=nearestNoteInRow(position.row,result.actual_beat);
+      const y=noteHeadY(nearest,(position.y1+position.y2)/2);
+      const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('class','unmatched-hit-marker');circle.setAttribute('cx',String(position.x));circle.setAttribute('cy',String(y));circle.setAttribute('r','4');circle.dataset.beat=String(result.actual_beat);circle.dataset.systemRow=String(position.row);circle.dataset.judgement=result.judgement;circle.setAttribute('aria-label',`Unmatched strike at beat ${Number(result.actual_beat).toFixed(2)}`);markers?.appendChild(circle);
+    }
   }
   performanceProfile.record('feedback_paint_work_ms',performance.now()-profileStart);
 }
@@ -1209,15 +1241,17 @@ function queueScoreFeedback(judgements){
 function clearScoreFeedback(preserveViewport=false) {
   cancelQueuedScoreFeedback();
   const empty=[];
-  if(visualHitsEnabled)for(const meta of scoreData.notes){
-    const group=meta.note.getSVGElement?.();if(!group)continue;
-    delete group.dataset.judgement;group.classList.remove('excellent-flash');
-    for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');head.querySelector('.judgement-halo')?.remove();}
-    group.getAnimations?.().forEach(animation=>animation.cancel());
+  if(visualHitsEnabled){
+    const painted=scoreData.paintedGroups??new Set();
+    for(const group of painted){
+      delete group.dataset.judgement;group.classList.remove('excellent-flash');
+      for(const head of group.querySelectorAll('.vf-notehead')){delete head.dataset.judgement;head.removeAttribute('role');head.removeAttribute('aria-label');head.querySelector('.judgement-halo')?.remove();}
+    }
+    painted.clear();
   }
-  scoreData.judgementSignature=JSON.stringify(empty);scoreData.lastJudgements=empty;
+  scoreData.lastJudgements=empty;
   scoreData.appliedExpectedJudgements=new Map();
-  scoreData.svg?.querySelector('#unmatched-markers')?.replaceChildren();
+  (scoreData.markerLayer??scoreData.svg?.querySelector('#unmatched-markers'))?.replaceChildren();
   if(preserveViewport){scoreData.cameraY=scoreData.container.scrollTop;scoreData.preserveViewportOnRewind=true;return;}
   scoreData.lastBeat=-Infinity;
   scoreData.preserveCameraBar=null;

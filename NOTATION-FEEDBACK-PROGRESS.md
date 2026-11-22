@@ -3,6 +3,9 @@
 ## Status
 Implemented and validated. Follow-up round removed the remaining paint bottleneck
 (SVG drop-shadow filters on feedback) after user reported continued stutter.
+Third pass implemented the low-risk scaling optimisations (items 2–5 from the
+review): cheap feedback diffing, painted-only clearing, cached DOM refs and
+O(1) scroll row lookup.
 
 ## Completed work
 - Decoupled notation feedback painting from the transport/playhead frame.
@@ -74,3 +77,157 @@ Temporary measurement spec was deleted. Rebuilt `dist` and reran
 Next action if stutter remains on real hardware: record a Chrome performance
 trace while feedback is visible and inspect Paint/Raster/Composite durations for
 the filtered SVG layer; consider moving halos to a separate lightweight overlay.
+
+## Third pass: scaling optimisations (items 2–5)
+Completed in `web/js/bridge.js`:
+
+2. **Cheap feedback diffing**
+   - Removed the full-projection `JSON.stringify(judgements)` signature.
+   - `applyJudgements` now returns early on reference equality
+     (`judgements === scoreData.lastJudgements`); Rust sends a new array only
+     when feedback changes.
+   - Added `sameJudgement(left,right)` comparing only feedback-relevant fields
+     instead of serialising each judgement twice.
+   - Removed the obsolete `judgementSignature` field.
+
+3. **Clear only painted feedback**
+   - Added `scoreData.paintedGroups` (`Set`), populated by
+     `paintExpectedJudgement`.
+   - `clearScoreFeedback` now clears only those groups instead of walking every
+     note in the score. This matters on large scores at loop boundaries and restart.
+
+4. **Cache feedback DOM lookups**
+   - Cached `meta.group`, `meta.noteheads`, `meta.notehead` and `meta.headText`
+     during `renderScore`, alongside the existing geometry cache.
+   - Cached the `#unmatched-markers` layer as `scoreData.markerLayer`.
+   - `clearExpectedJudgement`, `paintExpectedJudgement` and `noteHeadY` use the
+     cached refs; no per-hit `querySelector` tree walks.
+   - Unmatched markers are only rebuilt when the marker list or existing DOM
+     changes, and the `judgements.filter(...)` allocation was removed.
+
+5. **O(1) scroll row lookup**
+   - `cameraAtBeat` now reads `scoreData.bars[position.row]` instead of scanning
+     `bars.find(...)` every frame (`barsPerLine` is always 1).
+
+### Test updates
+- `tests/e2e/rudiment.spec.ts`
+  - Removed the obsolete `excellent-flash` and `drop-shadow` expectations.
+  - Feedback-update tests now await the queued animation frame before reading
+    DOM, matching the intentionally asynchronous feedback path.
+  - Unmatched-marker precision test now waits for the marker count before
+    measuring positions.
+
+### Validation for third pass
+- `npm run bundle` + Trunk build: success.
+- `npx playwright test tests/e2e/performance-correctness.spec.ts`: 4 passed.
+- `npx playwright test tests/e2e/rudiment.spec.ts`: **88 passed** (2.7 min),
+  including feedback, playhead, unmatched-marker, restart and notehead tests.
+- `npm run qa:browser -- --skip-build`: passed (159.9 s).
+- `npm run qa:a11y -- --skip-build`: passed (12.2 s).
+- `npm run qa:performance -- --skip-build`: passed (15.6 s).
+- `npm run lint`: passed (ESLint + TypeScript).
+
+## Current repository state / handover
+- Earlier filter/feedback work was committed by the user as `b6bb274`
+  ("applying fixes to reduce stutter") during this pass.
+- The third-pass work (items 2–5, test updates and this document) is currently
+  **uncommitted** in the working tree. No commits, pushes, stashes or reverts
+  were performed by the agent.
+- Modified/uncommitted: `web/js/bridge.js`, `tests/e2e/rudiment.spec.ts`,
+  `NOTATION-FEEDBACK-PROGRESS.md`.
+
+## Current next steps
+- See **Remaining playhead smoothness work (detailed handover)** below.
+- Highest priority: move the production playhead out of the full score SVG into
+  a composited overlay.
+- Then re-measure before doing lower-priority scroll/UI throttling.
+- Real-browser subjective validation at 80 BPM remains the final check.
+
+## Remaining playhead smoothness work (detailed handover)
+
+The feedback path is now cheap enough that the remaining risk is mostly
+**paint/raster work caused by the playhead itself**, plus a few per-frame UI
+updates. These are not implemented yet. Keep scoring, MIDI processing, the Tone
+transport and Highway mode unchanged.
+
+### 1. Move the production playhead out of the full score SVG — highest impact
+**Current:** `web/js/bridge.js:1199–1204` mutates `x1`/`x2` on the `<line>` inside
+the complete notation SVG every frame. That invalidates and repaints the whole
+score SVG, even on large exercises.
+
+**Evidence:** the opt-in diagnostic playhead (`playheadDebug.attachContainer` /
+`paint`, around `web/js/bridge.js:960–1020`) already uses an absolutely
+positioned HTML overlay and `transform: translate3d(...)`. It is updated with
+`top`/`height` only when the system row changes, which is the compositor-friendly
+shape we want for production.
+
+**Suggested implementation:**
+- Add a dedicated overlay element inside `.notation` (HTML div or separate SVG
+  layer) and make it the visible playhead.
+- Per frame: update only `transform: translateX(x)`.
+- On row change: update `top` and `height` once, not every frame.
+- Use `will-change: transform` and `pointer-events: none`.
+- Keep the existing SVG `<line id="playhead">` hidden if tests/accessibility
+  need `#playhead`, `data-x`, `data-row`, `data-bar`; otherwise move those
+  attributes to the overlay and update tests.
+- Respect the existing WebKit warning at `web/js/bridge.js:1196–1198`: changing
+  transform and row geometry every frame could freeze the composited layer.
+  Updating row geometry only at row boundaries should avoid that; verify at
+  system transitions.
+
+**Risk:** medium–high because several tests observe `#playhead` attributes and
+`x1` mutations. **Expected gain:** largest remaining improvement, especially on
+large/extreme scores.
+
+**Validation:** 80 BPM with feedback on/off; medium, large and extreme fixtures;
+row-boundary transitions; pause/resume/restart; dark notation theme; compare
+`#playhead`/diagnostic positions and rAF intervals.
+
+### 2. Separate feedback from the score SVG as well (if needed after item 1)
+Even with an overlay playhead, halos and unmatched markers still mutate the score
+SVG. If dense feedback still causes raster work, move feedback into the same
+lightweight overlay layer using the cached geometry (`meta.headBounds`,
+`meta.headCenterY`, `positionAtBeat`). This avoids mutating the engraved score
+tree during playback.
+
+**Risk:** medium — halos must stay aligned with noteheads and must survive
+resize/theme changes. **Expected gain:** medium for dense simultaneous hits.
+
+### 3. Reduce row-transition scroll cost
+**Current:** `updateScore` sets `container.scrollTop` during system transitions
+(`web/js/bridge.js:1216`). This is necessary only at row boundaries, but it can
+force layout/paint and fires the passive scroll listener. If profiling shows
+stutter at bar/row boundaries, consider:
+- precomputing row scroll targets (already mostly done via `cameraAtBeat`),
+- using a transform-based inner scroller instead of `scrollTop`, or
+- keeping `scrollTop` but ensuring only one write per frame and no reads after it.
+
+**Risk:** medium–high because manual scrolling, focus, accessibility and selected
+bar navigation depend on the existing scroll container.
+
+### 4. Throttle/memoise non-playhead UI work
+- `web/src/main.rs:1988` sets `progress` every ~32 ms. That re-runs the bar label
+  and timeline width views even when the displayed bar has not changed.
+  Memoise the bar label and update the thin timeline at ~10 Hz while leaving
+  scoring in the existing frame callback.
+- `web/js/bridge.js:185` sets the metronome CSS custom property every frame, and
+  pulses animate `box-shadow`. This is secondary, but can be updated at 30 Hz or
+  moved to a direct transform.
+- `performanceProfile.record` (`web/js/bridge.js:82`) grows unbounded arrays in
+  perf mode. Use a ring buffer/cap for endurance runs so measurement does not
+  add GC noise.
+
+**Risk:** low. **Expected gain:** low–medium, mostly long-session/UI headroom.
+
+### 5. Measurement checklist
+Do not treat headless rAF timings as proof of real-device smoothness. Use the
+existing diagnostic playhead and a real Chrome performance trace:
+- frame intervals and skipped frames at 80 BPM,
+- Paint/Raster/Composite duration for the notation SVG,
+- `score_update_ms`, `feedback_paint_work_ms`,
+- feedback on vs off, medium/large/extreme fixtures,
+- row transitions, dense simultaneous hits, pause/resume/restart.
+
+The existing `playhead-debug` diagnostic (`?playhead-debug=1`) exports CSV via
+`rudiment.exportPlayheadDebugCsv()` and compares the green production playhead
+with the blue reference overlay.

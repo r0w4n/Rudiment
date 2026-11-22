@@ -2369,7 +2369,7 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
     {expected_beat:null,actual_beat:1.25,judgement:'extra',error_ms:0,excellent:false,event_id:'extra'}
   ]));
   await expect(hit).toHaveAttribute('data-judgement','perfect');
-  await expect(hit).toHaveClass(/excellent-flash/);
+  await expect(hit).not.toHaveClass(/excellent-flash/);
   expect(await hit.locator(':scope > .vf-notehead > text').first().evaluate(element=>getComputedStyle(element).fill)).toBe('rgb(13, 118, 83)');
   await expect(hit.locator(':scope > .vf-notehead').first()).toHaveAttribute('aria-label','perfect +4 milliseconds');
   const halo=hit.locator(':scope > .vf-notehead > .judgement-halo');
@@ -2381,7 +2381,7 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
     return {radius:Number(element.getAttribute('r')),headWidth:bounds.width};
   });
   expect(haloSize.radius).toBeCloseTo(haloSize.headWidth*.84,5);
-  expect(await halo.evaluate(element=>getComputedStyle(element).filter)).toContain('drop-shadow');
+  expect(await halo.evaluate(element=>getComputedStyle(element).filter)).not.toContain('drop-shadow');
   expect(await halo.evaluate(element=>element.compareDocumentPosition(element.parentElement!.querySelector(':scope > text')!)&Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
   const marker=page.locator('.unmatched-hit-marker');await expect(marker).toHaveCount(1);await expect(marker).toHaveAttribute('data-beat','1.25');
   const markerX=Number(await marker.getAttribute('cx')),expectedX=await hit.evaluate(element=>{const box=(element as SVGGElement).getBBox();return box.x+box.width/2;});expect(markerX).not.toBeCloseTo(expectedX,1);
@@ -2409,13 +2409,16 @@ test('notehead feedback and unmatched strike markers stay at their own timestamp
 
 test('adding live feedback preserves existing notehead feedback nodes',async({page})=>{
   await page.goto('/');
-  const preserved=await page.evaluate(()=>{
+  const preserved=await page.evaluate(async()=>{
     const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
+    const frame=()=>new Promise(resolve=>requestAnimationFrame(()=>resolve(null)));
     const first={expected_beat:0,actual_beat:0,judgement:'good',error_ms:20,excellent:false,event_id:'first'};
     const second={expected_beat:.5,actual_beat:.5,judgement:'perfect',error_ms:2,excellent:true,event_id:'second'};
     app.updateScore(.25,[first]);
+    await frame();
     const original=document.querySelector('.score-note[data-beat="0"] .judgement-halo');
     app.updateScore(.75,[first,second]);
+    await frame();
     return Boolean(original)&&original===document.querySelector('.score-note[data-beat="0"] .judgement-halo');
   });
   expect(preserved).toBe(true);
@@ -2431,6 +2434,7 @@ test('unmatched marker positions preserve millisecond offsets without rhythmic s
       expected_beat:null,actual_beat:baseBeat+offset/1000,judgement:'extra',error_ms:0,excellent:false,event_id:`precision-${index}`
     })));
   },offsets);
+  await expect(page.locator('.unmatched-hit-marker')).toHaveCount(offsets.length);
   const markers=await page.locator('.unmatched-hit-marker').evaluateAll(elements=>elements.map(element=>({
     beat:Number((element as SVGCircleElement).dataset.beat),x:Number(element.getAttribute('cx'))
   })));
