@@ -7,7 +7,7 @@
 
 ## Overall status
 
-**In progress.** Stage 1 is implemented and verified. Stages 2–6 are not yet implemented.
+**Complete.** All six stages implemented and verified.
 
 The repository, committed code, tests and this document are the authoritative record of progress. Do not rely on prior conversation context when resuming.
 
@@ -20,7 +20,7 @@ The repository, committed code, tests and this document are the authoritative re
 | 3 — Difficult-bar detection and focused practice | **Complete** | Bar-level judgements select a focus passage; playback uses existing bar selection/looping; two successes restore the full selection. |
 | 4 — Settings and UI | Not started | Adaptive mode control, dedicated Settings section, persistence, restore defaults and status display are implemented and accessible. |
 | 5 — Full-speed probes and completion | **Complete** | Optional probes, completion gate, restart/stop/interruption and Performance isolation are verified. |
-| 6 — Integration and regression | **In progress** | Relevant QA suites pass; documentation and acceptance criteria verified. |
+| 6 — Integration and regression | **Complete** | Relevant QA suites pass; documentation and acceptance criteria verified. |
 
 ## Files created or modified
 
