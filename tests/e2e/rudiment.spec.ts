@@ -1472,8 +1472,7 @@ test('metronome and bar popovers share dismissal and persisted settings', async 
     expect(bounds.right, JSON.stringify({ viewport, bounds })).toBeLessThanOrEqual(viewport.width);
     expect(bounds.top, JSON.stringify({ viewport, bounds })).toBeGreaterThanOrEqual(0);
     expect(bounds.bottom, JSON.stringify({ viewport, bounds })).toBeLessThanOrEqual(viewport.height);
-    await popup.getByLabel('Tempo in BPM').fill('135');
-    await popup.getByLabel('Increase tempo').click();
+    await popup.getByLabel('Tempo in BPM').fill('136');
     await popup.getByLabel('Count-in').selectOption('2');
     await popup.getByLabel('Subdivision').selectOption('2');
     await popup.getByLabel('Click timbre').selectOption('cowbell');

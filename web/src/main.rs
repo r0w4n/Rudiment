@@ -1,8 +1,8 @@
 use js_sys::{Array, Date, Function, Promise, Uint8Array};
 use leptos::prelude::*;
 use lucide_leptos::{
-    ArrowLeft, ArrowRight, ChartNoAxesCombined, FolderOpen, Info, Minus, Moon, Pause, Play, Plus,
-    RotateCcw, Settings as SettingsIcon, Star, Sun, X,
+    ArrowLeft, ArrowRight, ChartNoAxesCombined, FolderOpen, Info, Moon, Pause, Play, RotateCcw,
+    Settings as SettingsIcon, Star, Sun, X,
 };
 use rudiment_core::{
     Articulation, DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit,
@@ -1515,16 +1515,17 @@ fn MetronomeSettings(
     change_tempo: Rc<dyn Fn(f64)>,
     save: Rc<dyn Fn()>,
 ) -> impl IntoView {
-    let tempo_down = change_tempo.clone();
     let tempo_input = change_tempo.clone();
+    let tempo_input2 = change_tempo.clone();
+    let tempo_input3 = change_tempo.clone();
     let tempo_commit = change_tempo.clone();
-    let tempo_enter = change_tempo.clone();
-    let tempo_up = change_tempo;
-    let save_down = save.clone();
+    let tempo_commit2 = change_tempo.clone();
+    let tempo_enter = change_tempo;
     let save_input = save.clone();
+    let save_input2 = save.clone();
     let save_commit = save.clone();
+    let save_commit2 = save.clone();
     let save_enter = save.clone();
-    let save_up = save.clone();
     let save_enabled = save.clone();
     let save_count = save.clone();
     let save_subdivision = save.clone();
@@ -1532,15 +1533,26 @@ fn MetronomeSettings(
     view! {
       <label class="toggle-row metronome-enabled"><span>"Click during exercise"</span><input type="checkbox" prop:checked=move || metronome.get() on:change=move |event|{metronome.set(event_target_checked(&event));save_enabled();}/></label>
       <div class="tempo-field"><span>"Tempo (BPM)"</span>
-        <div class="tempo-control">
-          <button type="button" aria-label="Decrease tempo" on:click=move |_|{tempo_down(bpm.get_untracked()-1.0);save_down();}><Minus size=17/></button>
+        <div class="tempo-control tempo-drag-control">
+          <input type="range" class="tempo-slider" aria-label="Tempo slider" title="Drag to change tempo from 30 to 240 BPM" min="30" max="240" step="1"
+            prop:value=move || bpm.get().round().to_string()
+            on:input=move |event|{
+              if let Ok(value)=event_target_value(&event).parse::<f64>() {
+                tempo_input(value.round());save_input();
+              }
+            }
+            on:change=move |event|{
+              let input=event_target::<web_sys::HtmlInputElement>(&event);
+              let value=input.value().parse::<f64>().ok().filter(|value|value.is_finite()).unwrap_or_else(||bpm.get_untracked()).round().clamp(30.0,240.0);
+              tempo_commit(value);input.set_value(&value.to_string());save_commit();
+            }/>
           <div class="tempo-value">
             <input aria-label="Tempo in BPM" title="Type a tempo from 30 to 240 BPM" type="number" inputmode="numeric" min="30" max="240" step="1"
               prop:value=move || bpm.get().round().to_string()
               on:focus=move |event|{event_target::<web_sys::HtmlInputElement>(&event).select();}
               on:input=move |event|{
                 if let Ok(value)=event_target_value(&event).parse::<f64>() && (30.0..=240.0).contains(&value){
-                  tempo_input(value.round());save_input();
+                  tempo_input2(value.round());save_input2();
                 }
               }
               on:keydown=move |event: web_sys::KeyboardEvent|{
@@ -1555,11 +1567,10 @@ fn MetronomeSettings(
               on:change=move |event|{
                 let input=event_target::<web_sys::HtmlInputElement>(&event);
                 let value=input.value().parse::<f64>().ok().filter(|value|value.is_finite()).unwrap_or_else(||bpm.get_untracked()).round().clamp(30.0,240.0);
-                tempo_commit(value);input.set_value(&value.to_string());save_commit();
+                tempo_commit2(value);input.set_value(&value.to_string());save_commit2();
               }/>
             <span>"BPM"</span>
           </div>
-          <button type="button" aria-label="Increase tempo" on:click=move |_|{tempo_up(bpm.get_untracked()+1.0);save_up();}><Plus size=17/></button>
         </div>
       </div>
       <label class="metronome-count-in">"Count-in"<select prop:value=move || count_in.get().to_string() on:change=move |event|{count_in.set(event_target_value(&event).parse().unwrap_or(1));save_count();}><option value="0">"Off"</option><option value="1">"1 bar"</option><option value="2">"2 bars"</option></select></label>
@@ -1637,6 +1648,7 @@ fn App() -> impl IntoView {
     let stats_open = RwSignal::new(false);
     let library_open = RwSignal::new(false);
     let pending_import_delete = RwSignal::new(None::<(String, String)>);
+    let pending_clear_history = RwSignal::new(false);
     let library_personal = RwSignal::new(false);
     let library_page = RwSignal::new(0usize);
     let library_difficulty = RwSignal::new(None::<Difficulty>);
@@ -3264,8 +3276,6 @@ fn App() -> impl IntoView {
             " " => {
                 event.prevent_default();
                 match phase.get_untracked().as_str() {
-                    "running" | "count_in" | "starting" => key_pause_run(),
-                    "paused" => key_resume_run(),
                     "idle" | "complete" => {
                         observed.set(vec![]);
                         live.set(vec![]);
@@ -3606,6 +3616,23 @@ fn App() -> impl IntoView {
                             }
                           });
                         }>"Delete file"</button>
+                 {move || pending_clear_history.get().then(|| view!{
+                   <div class="delete-confirm-backdrop" on:click=move |_|{pending_clear_history.set(false);}>
+                     <section id="clear-history-dialog" class="delete-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="clear-history-title" aria-describedby="clear-history-description" on:click=|event|event.stop_propagation()>
+                       <span class="eyebrow">"CLEAR HISTORY"</span>
+                       <h2 id="clear-history-title">"Clear all performance history?"</h2>
+                       <p id="clear-history-description">"All completed performance records and practice time on this browser will be permanently removed."</p>
+                       <div class="delete-confirm-actions">
+                         <button id="clear-history-cancel" on:click=move |_|{pending_clear_history.set(false);}>"Cancel"</button>
+                         <button class="delete-confirm-danger" on:click=move |_|{
+                           pending_clear_history.set(false);
+                           let promise=clear_history();
+                           spawn_local(async move{match JsFuture::from(promise).await{Ok(_)=>{history.set(vec![]);incomplete_history.set(0);practice_time_ms.set(Some(0.0));},Err(error)=>import_error.set(Some(format!("History could not be cleared: {error:?}")))}});
+                         }>"Clear history"</button>
+                       </div>
+                     </section>
+                   </div>
+                 })}
                       </div>
                     </section>
                   </div>
@@ -3700,7 +3727,7 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{if web_sys::window().and_then(|window|window.confirm_with_message("Clear all Rudiment performance history and practice time from this browser?").ok()).unwrap_or(false){let promise=clear_history();spawn_local(async move{match JsFuture::from(promise).await{Ok(_)=>{history.set(vec![]);incomplete_history.set(0);practice_time_ms.set(Some(0.0));},Err(error)=>import_error.set(Some(format!("History could not be cleared: {error:?}")))}});}}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);midi_bindings.set(default_midi_bindings());midi_learn.set(None);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{pending_clear_history.set(true);}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);midi_bindings.set(default_midi_bindings());midi_learn.set(None);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" tabindex="-1" on:click=move |_|{settings_open.set(false);restore_settings_focus();}></button>
       </main>
