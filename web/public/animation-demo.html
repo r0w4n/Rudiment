@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rudiment — full-width playhead smoothness test</title>
+<style>
+  :root { color-scheme: light; --ink:#172334; --muted:#64748b; --line:#d9e1eb; --accent:#ea4f5a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#f5f7fa; }
+  main { max-width:1150px; margin:30px auto; padding:0 22px; }
+  body.wide main { max-width:none; margin:14px auto; padding:0 14px; }
+  body.wide .track-scroll { margin-left:-34px; margin-right:-34px; }
+  .track-scroll:fullscreen { display:flex; justify-content:center; align-items:center; background:#f5f7fa; padding:0; border:0; }
+  .track-scroll:fullscreen #track { flex-shrink:0; }
+  .toggle-label { display:flex; flex-direction:column; gap:7px; }
+  .toggle-label .toggle { display:flex; align-items:center; gap:9px; font-size:14px; font-weight:500; }
+  .toggle-label input[type=checkbox] { width:17px; height:17px; accent-color:#2d527e; }
+  input:disabled { opacity:.45; cursor:not-allowed; }
+  @media (max-width:600px) { main,body.wide main { margin:12px auto; padding:0 10px; } .panel { padding:12px; } body.wide .track-scroll { margin-left:-22px; margin-right:-22px; } }
+  h1 { margin:0 0 7px; font-size:25px; letter-spacing:-.4px; }
+  p { margin:0 0 20px; color:var(--muted); }
+  .panel { background:white; border:1px solid var(--line); border-radius:13px; padding:20px; box-shadow:0 3px 14px rgba(23,35,52,.035); }
+  .controls { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:15px 22px; margin-bottom:20px; }
+  label { display:grid; gap:6px; font-size:13px; font-weight:650; }
+  select,input { font:inherit; width:100%; color:var(--ink); }
+  select,input[type=number] { height:38px; padding:6px 9px; border-radius:7px; border:1px solid #c9d3df; background:white; }
+  input[type=range] { accent-color:#365e8d; }
+  .small { color:var(--muted); font-size:12px; font-weight:400; }
+  .buttons { display:flex; align-items:center; gap:9px; margin:10px 0 18px; flex-wrap:wrap; }
+  button { border:1px solid #2d527e; color:white; background:#2d527e; padding:8px 18px; border-radius:7px; font:inherit; font-weight:650; cursor:pointer; }
+  button.secondary { color:#2d527e; background:#fff; }
+  #state { color:var(--muted); margin-left:8px; font-size:13px; }
+  .track-scroll { overflow-x:auto; padding:10px 0 15px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+  #track { height:126px; position:relative; border:1px solid #dde5ef; background:#fcfdff; border-radius:5px; overflow:hidden; width:800px; }
+  #track:before { content:""; position:absolute; left:0; right:0; top:63px; height:1px; background:#cad5e1; }
+  .division { position:absolute; top:37px; bottom:27px; width:1px; background:#d5dfec; }
+  .beat-label { position:absolute; top:8px; color:#789; font-size:12px; transform:translateX(-50%); }
+  #html-head { position:absolute; height:100px; top:13px; left:0; width:2px; background:var(--accent); will-change:transform; transform:translate3d(0,0,0); }
+  #svg-layer { position:absolute; left:0; top:0; overflow:visible; pointer-events:none; }
+  #svg-head { stroke:var(--accent); stroke-width:2; }
+  .metrics { margin-top:17px; display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:15px; }
+  .metric { padding:11px 13px; background:#f6f8fb; border-radius:8px; }
+  .metric .val { display:block; font-size:20px; font-variant-numeric:tabular-nums; font-weight:750; }
+  .metric .key { font-size:12px; color:var(--muted); }
+  .note { background:#f0f4fa; padding:12px 15px; margin-top:20px; border-radius:9px; color:#4b5e77; font-size:13px; }
+  code { background:#e6ecf3; padding:1px 4px; border-radius:3px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Playhead smoothness test — full width</h1>
+  <p>Just a moving playhead. No MIDI, Rust, WebAssembly, VexFlow, hit feedback, audio or application code. Independent diagnostic page for comparing animation smoothness with the Rudiment app on the same device.</p>
+  <section class="panel">
+    <div class="controls">
+      <label>Tempo (BPM)
+        <input id="bpm" type="number" min="20" max="240" step="1" value="60">
+        <span class="small">Four beats per bar</span>
+      </label>
+      <label>Bar width: <span id="width-text">800 CSS px</span>
+        <input id="width" type="range" min="200" max="1100" step="50" value="800">
+        <span class="small">Try narrow vs wide</span>
+      </label>
+      <label class="toggle-label">Width mode
+        <span class="toggle"><input id="fit" type="checkbox" checked> Fit to full browser width</span>
+        <span class="small">Uncheck to use the width slider; fullscreen is also available</span>
+      </label>
+      <label>Playhead thickness
+        <select id="thickness">
+          <option value="1">1 CSS pixel</option>
+          <option value="2" selected>2 CSS pixels</option>
+          <option value="3">3 CSS pixels</option>
+          <option value="4">4 CSS pixels</option>
+          <option value="6">6 CSS pixels</option>
+          <option value="8">8 CSS pixels</option>
+        </select>
+      </label>
+      <label>Movement method
+        <select id="method">
+          <option value="svg">SVG line coordinates via requestAnimationFrame</option>
+          <option value="transform">HTML line via transform + requestAnimationFrame</option>
+          <option value="native">Browser-native transform animation</option>
+        </select>
+        <span class="small">Same width and speed for each</span>
+      </label>
+    </div>
+    <div class="buttons">
+      <button id="start">Start / restart</button>
+      <button id="stop" class="secondary">Stop</button>
+      <button id="fullscreen" class="secondary">Full screen</button>
+      <button id="export" class="secondary" type="button">Export trace CSV</button>
+      <span id="state" role="status">Stopped</span>
+    </div>
+    <div class="track-scroll" id="track-scroll">
+      <div id="track">
+        <div id="divisions"></div>
+        <div id="html-head"></div>
+        <svg id="svg-layer" width="800" height="126" viewBox="0 0 800 126" aria-hidden="true">
+          <line id="svg-head" x1="0" x2="0" y1="13" y2="113"></line>
+        </svg>
+      </div>
+    </div>
+    <div class="metrics" aria-live="off">
+      <div class="metric"><span class="val" id="duration">4.00 s</span><span class="key">Time to cross one bar</span></div>
+      <div class="metric"><span class="val" id="step">3.33 px</span><span class="key">Approx. movement at 60 frames/s</span></div>
+      <div class="metric"><span class="val" id="fps">—</span><span class="key">Observed rAF frames/s</span></div>
+      <div class="metric"><span class="val" id="p95">—</span><span class="key">rAF interval p95</span></div>
+      <div class="metric"><span class="val" id="long">—</span><span class="key">Intervals over 25 ms</span></div>
+    </div>
+    <div class="note">Use <b>Fit to full browser width</b> or <b>Full screen</b> to test a playhead moving across the widest possible bar. Press Esc to exit fullscreen. Compare movement methods at the same width, BPM and thickness. A thicker line can disguise edge flicker; it cannot repair missed frames. Metrics measure main-thread animation callbacks, not compositor output. The trace records every frame (timestamp, interval, position) while running: <code>window.demoTrace()</code>, <code>window.demoTraceCsv()</code> and the <b>Export trace CSV</b> button; on iPadOS copy it from the console with <code>copy(demoTraceCsv())</code>. URL parameters preconfigure this page, e.g. <code>?bpm=30&amp;method=transform&amp;fit=1&amp;thickness=3</code>.</div>
+  </section>
+</main>
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const bpm = $('bpm');
+  const width = $('width');
+  const fit = $('fit');
+  const trackScroll = $('track-scroll');
+  const thickness = $('thickness');
+  const method = $('method');
+  const track = $('track');
+  const divisions = $('divisions');
+  const htmlHead = $('html-head');
+  const svgLayer = $('svg-layer');
+  const svgHead = $('svg-head');
+  let raf = 0, animation = null, running = false, startTime = 0, lastFrame = 0, intervals = [], frames = 0, lastReport = 0;
+  // Diagnostic trace: bounded so long sessions cannot accumulate unbounded
+  // memory whose GC pauses would perturb the very pacing being measured.
+  const TRACE_CAP = 4096;
+  let trace = [], runId = 0, lastTraceX = Number.NaN, lastTraceTs = 0;
+  const fullscreenElement = () => document.fullscreenElement ?? document.webkitFullscreenElement ?? null;
+  const settings = () => ({
+    b: Math.max(20, Math.min(240, Number(bpm.value) || 60)),
+    w: (fit.checked || fullscreenElement() === trackScroll)
+      ? Math.max(200, Math.round(trackScroll.clientWidth))
+      : Number(width.value),
+    t: Number(thickness.value), m: method.value
+  });
+  // URL preconfiguration keeps comparison runs identical across pages and
+  // devices; unknown parameters are ignored so the redirect from the app can
+  // pass its own query string through.
+  if(params.has('bpm')) bpm.value = String(Math.max(20, Math.min(240, Number(params.get('bpm')) || 60)));
+  if(params.has('method') && ['svg','transform','native'].includes(params.get('method'))) method.value = params.get('method');
+  if(params.has('thickness') && Number(params.get('thickness')) >= 1) thickness.value = String(Math.min(8, Number(params.get('thickness'))));
+  if(params.has('fit')) fit.checked = params.get('fit') !== '0';
+  if(params.has('width')) { fit.checked = false; width.value = String(Math.max(200, Math.min(1100, Number(params.get('width')) || 800))); }
+  function layout() {
+    document.body.classList.toggle('wide', fit.checked);
+    width.disabled = fit.checked || fullscreenElement() === trackScroll;
+    const s = settings();
+    track.style.width = `${s.w}px`;
+    svgLayer.setAttribute('width', String(s.w));
+    svgLayer.setAttribute('viewBox', `0 0 ${s.w} 126`);
+    htmlHead.style.width = `${s.t}px`;
+    svgHead.setAttribute('stroke-width', String(s.t));
+    $('width-text').textContent = `${s.w} CSS px${fit.checked || fullscreenElement() === trackScroll ? ' (full width)' : ''}`;
+    $('duration').textContent = `${(240 / s.b).toFixed(2)} s`;
+    $('step').textContent = `${(s.w * s.b / 14400).toFixed(2)} px`;
+    divisions.replaceChildren();
+    for(let i=0;i<=4;i++) {
+      const tick = document.createElement('div');
+      tick.className = 'division'; tick.style.left = `${i*25}%`;
+      const label = document.createElement('span');
+      label.className = 'beat-label'; label.style.left = `${i*25}%`;
+      label.textContent = i === 4 ? 'End' : String(i+1);
+      divisions.append(tick,label);
+    }
+    svgLayer.style.display = s.m === 'svg' ? 'block' : 'none';
+    htmlHead.style.display = s.m === 'svg' ? 'none' : 'block';
+    if (!running) draw(0,s);
+  }
+  function draw(x,s) {
+    if(s.m === 'svg') { svgHead.setAttribute('x1', x); svgHead.setAttribute('x2', x); }
+    else { htmlHead.style.transform = `translate3d(${x}px,0,0)`; }
+  }
+  function report(now) {
+    const sorted = intervals.slice().sort((a,b) => a-b);
+    if(sorted.length) {
+      $('p95').textContent = `${sorted[Math.floor((sorted.length-1)*0.95)].toFixed(1)} ms`;
+      $('long').textContent = String(sorted.filter(x=>x>25).length);
+      const elapsed = Math.min(2000,now - startTime);
+      // More useful instantaneous count from recent rAF deltas than elapsed since restart.
+      const totalMs = intervals.reduce((a,b)=>a+b,0);
+      $('fps').textContent = totalMs > 0 ? (1000*intervals.length/totalMs).toFixed(1) : '—';
+    }
+    lastReport = now;
+  }
+  function tick(now) {
+    if(!running) return;
+    const s = settings();
+    const duration = 240000/s.b;
+    if(lastFrame) {
+      const delta = now-lastFrame;
+      intervals.push(delta);
+      if(intervals.length>120) intervals.shift();
+    }
+    lastFrame = now;
+    if(s.m !== 'native') {
+      const progress = ((now-startTime)%duration)/duration;
+      const x = s.w*progress;
+      draw(x,s);
+      // Trace only JS-driven methods; reading the native animation's resolved
+      // position per frame would itself add layout work and skew the trace.
+      if(Number.isFinite(lastTraceX)) trace.push({run:runId,timestamp_ms:now,frame_interval_ms:Number.isFinite(lastTraceTs)?now-lastTraceTs:Number.NaN,x:Number(x.toFixed(3)),increment:Number.isFinite(lastTraceX)?Number((x-lastTraceX).toFixed(3)):Number.NaN});
+      else trace.push({run:runId,timestamp_ms:now,frame_interval_ms:Number.NaN,x:Number(x.toFixed(3)),increment:Number.NaN});
+      lastTraceX = x; lastTraceTs = now;
+      if(trace.length>TRACE_CAP) trace.splice(0, trace.length-TRACE_CAP);
+    }
+    if(now-lastReport>500) report(now);
+    raf = requestAnimationFrame(tick);
+  }
+  function stop() {
+    running = false;
+    cancelAnimationFrame(raf); raf=0;
+    if(animation) {animation.cancel(); animation=null;}
+    $('state').textContent = 'Stopped';
+  }
+  function start() {
+    stop(); layout();
+    const s = settings();
+    running=true; startTime=performance.now();lastFrame=0;lastReport=0;intervals=[];frames=0;
+    runId++; lastTraceX=Number.NaN; lastTraceTs=0;
+    $('fps').textContent='—';$('p95').textContent='—';$('long').textContent='—';
+    if(s.m==='native') {
+      animation=htmlHead.animate([
+        {transform:'translate3d(0px,0,0)'},
+        {transform:`translate3d(${s.w}px,0,0)`}
+      ],{duration:240000/s.b,iterations:Infinity,easing:'linear'});
+    }
+    $('state').textContent=`Running — ${s.b} BPM, ${s.w} px, ${s.t} px line`;
+    raf=requestAnimationFrame(tick);
+  }
+  function traceCsv() {
+    const columns=['run','timestamp_ms','frame_interval_ms','x','increment'];
+    const value=item=>Number.isFinite(item)?String(item):'';
+    return `${columns.join(',')}\n${trace.map(frame=>columns.map(column=>value(frame[column])).join(',')).join('\n')}\n`;
+  }
+  window.demoTrace=()=>trace.map(frame=>({...frame}));
+  window.demoTraceCsv=traceCsv;
+  $('start').addEventListener('click',start);
+  $('stop').addEventListener('click',stop);
+  $('fullscreen').addEventListener('click', async () => {
+    try {
+      if(fullscreenElement() === trackScroll) {
+        if(document.exitFullscreen) await document.exitFullscreen();
+        else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
+      } else {
+        if(trackScroll.requestFullscreen) await trackScroll.requestFullscreen();
+        else if(trackScroll.webkitRequestFullscreen) trackScroll.webkitRequestFullscreen();
+      }
+    } catch(e) { $('state').textContent = `Fullscreen unavailable: ${e.message}`; }
+  });
+  const onFullscreenChange = () => {
+    $('fullscreen').textContent = fullscreenElement() ? 'Exit full screen' : 'Full screen';
+    if(running) start(); else layout();
+  };
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+  for(const control of [bpm,width,fit,thickness,method]) {
+    control.addEventListener('input',()=>{ if(running)start(); else layout(); });
+  }
+  window.addEventListener('resize', () => {
+    if(running && method.value === 'native') start();
+    else layout();
+  });
+  const anchor=document.createElement('a');
+  $('export').addEventListener('click',()=>{
+    const value=traceCsv();
+    if(!value.trim().split('\n')[1]){$('state').textContent='No traced frames yet — start first.';return;}
+    anchor.href=URL.createObjectURL(new Blob([value],{type:'text/csv'}));
+    anchor.download='rudiment-animation-demo.csv';
+    anchor.click();
+    setTimeout(()=>URL.revokeObjectURL(anchor.href),500);
+  });
+  layout();
+  // Auto-start once when preconfigured via URL parameters, so an iPad
+  // comparison run needs no interaction beyond opening the page.
+  if(params.has('bpm')||params.has('method')||params.has('width')) start();
+})();
+</script>
+</body>
+</html>

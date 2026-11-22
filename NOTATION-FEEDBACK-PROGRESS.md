@@ -325,3 +325,167 @@ frame wait) would remove the flake.
   tests cannot cover it.
 
 
+
+## Fifth task: residual micro-jitter reference demo comparison
+
+User report: after the feedback redesign the playhead is much smoother, but a
+subtle residual remains - small synchronised micro-stutters of the green
+production playhead and the blue `?playhead-debug=1` reference, occasionally
+hesitating then advancing slightly further than expected; visible without
+MIDI hits and at 30 BPM; unaffected by muting the metronome. A previously
+created standalone demo (`~/Downloads/playhead-smoothness-full-width.html`)
+appeared smoother but was never compared on the same iPad.
+
+Plan (constraints: no commits/pushes/merges/stashes/reverts, no speculative
+production changes, deliver evidence only):
+
+1. Integrate the standalone demo as a self-contained, dependency-free page at
+   `web/public/animation-demo.html`, preserving its behaviour (three movement
+   methods, fit-to-width + fullscreen, thickness, metrics), adding only
+   URL-parameter preconfiguration, a frame/position trace with CSV export
+   comparable to the app's playhead-debug CSV, and a Safari fullscreen
+   prefix fallback.
+2. Route `?animation-demo=1` to it via a tiny inline redirect in
+   `web/index.html`, before the WASM bundle or bridge loads. Production
+   behaviour is untouched when the parameter is absent.
+3. Build and run regression checks; confirm no production behaviour changed.
+4. Measure both the demo and Rudiment (`?playhead-debug=1`) locally in
+   Chromium and WebKit at identical viewport/BPM, comparing objective
+   regularity metrics; lay out candidate causes and confidence without
+   prescribing a fix.
+5. Leave everything uncommitted in the working tree and record findings here
+   for on-iPad comparison.
+
+### Implementation (complete, uncommitted)
+
+- `web/public/animation-demo.html` (new): the original
+  `~/Downloads/playhead-smoothness-full-width.html` preserved verbatim in
+  behaviour (three movement methods, fit-to-width, fullscreen, thickness,
+  metrics, 4-beat bar crossing at 240000/bpm ms), with additive changes only:
+  - URL-parameter preconfiguration (`bpm`, `method`, `fit`, `width`,
+    `thickness`) and auto-start when preconfigured, so comparison runs are
+    reproducible with no interaction.
+  - Per-frame trace (timestamp, interval, position, increment), bounded at
+    4096 frames, exposed as `window.demoTrace()` / `window.demoTraceCsv()`
+    plus an "Export trace CSV" button; on iPadOS use
+    `copy(demoTraceCsv())` from a tethered console.
+  - `webkitRequestFullscreen`/`webkitFullscreenElement` fallbacks for
+    Safari. The `native` method is not traced (reading its resolved position
+    per frame would add layout work and skew the trace); noted in the page.
+- `web/index.html`: three-line inline redirect to
+  `./public/animation-demo.html` (query string preserved) only when
+  `?animation-demo=1` is present, before the bridge/WASM loads. No effect
+  otherwise; production playhead, scoring, feedback, scrolling and Highway
+  paths untouched.
+- Probe `artifacts/jitter-compare.mjs` (git-ignored) drives both pages in
+  Chromium and WebKit at identical viewport (1180x820 = iPad Air landscape)
+  and BPM, with results in `artifacts/jitter-compare.json`.
+
+### Measurements (local, macOS ARM, headless)
+
+Chromium 158: demo and Rudiment both perfect (p50/p95 16.7 ms, max 16.8 ms,
+zero stalls) at 30 and 80 BPM, transform and svg demo methods.
+
+WebKit (same machine, same session, paired runs):
+- Demo, transform method, 3px line, fit width: 30 BPM p50/p95 17 ms,
+  max 22 ms, **0 intervals > 25 ms**; 80 BPM max 18 ms, 0 stalls.
+- Demo, **svg method** (x1/x2 attribute writes every frame - the movement
+  shape closest to the app's hidden mirror): **0 stalls** at both BPMs.
+- Rudiment (`?playhead-debug=1`, count-in 0, no hits): 30 BPM 22 stalls
+  > 25 ms (p95 21, max 32); 80 BPM 21 stalls (p95 23, max 33). Stalls are
+  single-frame delays (26-33 ms) - at 30 BPM that is a ~4.9 px jump instead
+  of ~2.45 px, i.e. exactly the reported "hesitate, then advance slightly
+  further" micro-stutter. Reproduced across two paired runs; the standalone
+  demo measured clean in the same sessions.
+
+Stall localisation (from the diagnostic trace only, no production changes):
+- Camera/row-transition windows cover 24.9% of frames; stalls inside them:
+  4-5 of 21-22 - i.e. uniform. Row-transition scroll/raster is **not** the
+  driver.
+- Even/odd frame-index parity (proxy for the ~32 ms state tick):
+  14/8 at 30 BPM, 10/11 at 80 BPM - no consistent signal; the in-frame WASM
+  tick is **neither confirmed nor excluded** by this crude test.
+
+Interpretation: the residual jitter is **not** purely environmental. On the
+same WebKit engine and machine, the app misses ~0.6 frames/s under ordinary
+load while a minimal rAF loop (with or without SVG attribute writes) does
+not. The app's transport frame callback carries more per-frame main-thread
+work than the demo, and on a weaker iPad Air core with a busier compositor
+the same cost exceeds the frame budget more often.
+
+### Candidate causes and confidence
+
+1. Aggregate per-frame main-thread cost of the transport frame callback
+   (Tone ticks computation, updateScore incl. hidden mirror + overlay,
+   visual metronome, every-other-frame WASM/UI tick) - **medium-high** as a
+   class (measured app-vs-demo contrast on WebKit); the specific component
+   is unidentified.
+2. In-frame 32 ms scoring/UI tick (WASM advance + Leptos signals) -
+   **low-medium**; parity test inconclusive, cost measured small on desktop
+   but unmeasured on-device.
+3. Per-frame SVG mirror writes - **low**; the demo's svg-method control is
+   clean on WebKit, so this pattern alone does not stall frames.
+4. Row-transition scroll/raster - **low**; stalls distribute uniformly vs
+   the 24.9% camera-window share, and the user observes them while
+   stationary.
+5. Position/clock math - **ruled out**; the wall-clock blue reference
+   stutters identically to green.
+6. iPadOS-only compositor/display-link irregularities - **untested
+   locally**; the same-device demo-vs-app comparison exists precisely to
+   separate this from (1).
+
+### On-iPad comparison protocol
+
+1. Deploy or serve the current build; open
+   `/?animation-demo=1&bpm=30&method=transform&fit=1&thickness=3`
+   (auto-starts) and Rudiment `/?playhead-debug=1` at 30 BPM, count-in 0,
+   same orientation/fullscreen, no hits.
+2. Watch both: if the demo also micro-stutters on the iPad, the residual is
+   environmental (candidate 6) and no app change will remove it; if the
+   demo is smooth while Rudiment stutters, candidate 1 stands and per-frame
+   cost reduction is justified with a trace-first approach.
+3. Capture CSVs from a tethered Safari console:
+   `copy(demoTraceCsv())` and `copy(rudiment.playheadDebugCsv())`.
+   Compare interval p95/max and increments for the hesitate-then-advance
+   pattern. Optional: Safari Web Inspector Rendering Frames to attribute
+   long frames.
+4. Repeat at 80 BPM; also try the demo's `native` method - if the native
+   compositor-driven animation is smooth while rAF-driven ones stutter on
+   the iPad, that points at rAF/compositor pacing rather than main-thread
+   cost.
+
+### Differences from the original standalone demo
+
+Behaviour preserved: methods, fit/fullscreen, thickness, metrics, bar
+timing. Added: URL preconfiguration + auto-start, frame trace + CSV export,
+Safari fullscreen prefixes, a title/note mentioning the in-app diagnostic
+context. No Rudiment code is loaded by the demo page.
+
+### Validation
+
+- `npm run build`: success; `dist/public/animation-demo.html` and the
+  redirect present in `dist/index.html`.
+- Smoke via probe: redirect works, demo auto-starts, app unaffected without
+  the parameter.
+- Focused e2e (playhead, practice-time, performance-correctness,
+  first-use, notation toggles): 14 passed.
+- `npm run qa:quick`: passed (after removing an unused variable from the
+  git-ignored probe).
+- `npm run qa:browser -- --skip-build`: passed (161 s).
+- Limitations: headless macOS measurements cannot establish real-device
+  frame rates; the WebKit-vs-demo contrast is engine-level evidence only.
+  No on-device measurement has been taken yet.
+
+### Current repository state / handover
+
+- Uncommitted (working tree, no commits/pushes/merges/stashes/reverts
+  performed): `web/index.html`, `web/public/animation-demo.html` (new),
+  `NOTATION-FEEDBACK-PROGRESS.md`.
+- `artifacts/jitter-compare.mjs` and `artifacts/jitter-compare.json` are
+  git-ignored tooling/results kept for resumption.
+- Pre-existing stash `stash@{0}` (`preserve-local-work`) was left
+  untouched.
+- Next step: run the on-iPad comparison protocol above; only after that
+  evidence should any per-frame cost reduction be attempted (the
+  performance-correctness suite constrains how - see the reverted
+  mirror-throttle attempt recorded in PERFORMANCE.md).

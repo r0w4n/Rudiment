@@ -9,6 +9,12 @@
     <link rel="icon" href="public/favicon.svg" type="image/svg+xml" />
     <link data-trunk rel="css" href="styles.css" />
     <link data-trunk rel="copy-dir" href="public" />
+    <script>
+      // Diagnostic-only redirect: hand the page over to the standalone
+      // animation demo before the app bundle loads. No effect otherwise.
+      if (new URLSearchParams(location.search).get('animation-demo') === '1')
+        location.replace('./public/animation-demo.html' + location.search);
+    </script>
     <script src="public/bridge.js?v=20261112-1"></script>
   </head>
   <body></body>
