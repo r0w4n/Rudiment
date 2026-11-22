@@ -493,3 +493,14 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
   .score-card{grid-template-rows:50px minmax(0,1fr) auto 28px}
   .score-meta{height:50px}
 }
+
+.adaptive-practice{margin-top:10px;padding:10px 12px;border:1px solid #31423a;border-radius:12px;background:#17221e;display:grid;gap:8px}
+.adaptive-toggle small{color:#8d9c94}
+.adaptive-status{display:grid;gap:6px}
+.adaptive-status-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.adaptive-status-head strong{font-size:12px;color:#d9e5df}
+.adaptive-tempo{margin-left:auto;font:700 12px Manrope;color:var(--teal)}
+.adaptive-bars{font-size:11px;color:#aab8b0}
+.adaptive-status p{margin:0;color:#94a19a;font-size:11px;line-height:1.4}
+.adaptive-status button{min-height:32px;padding:0 12px;border:1px solid #3a4741;border-radius:9px;background:#1b231f;color:#cbd6d0;font-size:11px;font-weight:800}
+.adaptive-status button.primary{background:linear-gradient(180deg,#82dbc7,#62c4ae);color:#09241d;border-color:#62c4ae}

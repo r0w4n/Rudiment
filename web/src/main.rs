@@ -4,6 +4,10 @@ use lucide_leptos::{
     ArrowLeft, ArrowRight, ChartNoAxesCombined, FolderOpen, Info, Moon, Pause, Play, RotateCcw,
     Settings as SettingsIcon, Star, Sun, X,
 };
+use rudiment_core::adaptive::{
+    AdaptiveAction, AdaptiveAttempt, AdaptiveController, AdaptiveDecision, AdaptivePhase,
+    AdaptiveSettings,
+};
 use rudiment_core::{
     Articulation, DEFAULT_GOOD_MS, DEFAULT_MATCH_MS, DEFAULT_PERFECT_MS, Exercise, ExpectedHit,
     IncrementalScorer, InputSource, Instrument, Judgement, MAX_MIDI_FILE_BYTES, MidiBinding,
@@ -30,6 +34,16 @@ type LaunchRun = Rc<dyn Fn(f64, f64, bool)>;
 type LaunchSlot = Rc<RefCell<Option<LaunchRun>>>;
 type StartRun = Rc<dyn Fn(u8)>;
 type StartSlot = CallbackSlot<StartRun>;
+
+thread_local! {
+    static ADAPTIVE_SAVE: RefCell<Option<Rc<dyn Fn()>>> = RefCell::new(None);
+}
+
+fn save_adaptive_settings() {
+    if let Some(save) = ADAPTIVE_SAVE.with(|cell| cell.borrow().clone()) {
+        save();
+    }
+}
 type HitInput = Rc<dyn Fn(f64, Instrument, Articulation, u8, InputSource, Option<u8>, Option<u8>)>;
 type MidiFileCallback = Closure<dyn FnMut(Uint8Array, String, String, JsValue)>;
 
@@ -309,6 +323,35 @@ struct Settings {
     welcome_dismissed: Option<bool>,
     last_import_hash: Option<String>,
     auto_show_statistics: Option<bool>,
+    adaptive_enabled: Option<bool>,
+    adaptive: Option<AdaptiveSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AdaptiveStatus {
+    phase: AdaptivePhase,
+    action: AdaptiveAction,
+    bpm: f64,
+    target_bpm: f64,
+    bars: Vec<usize>,
+    stars: u8,
+    explanation: String,
+    completed: bool,
+}
+
+impl AdaptiveStatus {
+    fn from_decision(decision: &AdaptiveDecision) -> Self {
+        Self {
+            phase: decision.phase,
+            action: decision.action,
+            bpm: decision.bpm,
+            target_bpm: decision.target_bpm,
+            bars: decision.bars.clone(),
+            stars: decision.stars,
+            explanation: decision.explanation.clone(),
+            completed: decision.completed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -740,6 +783,18 @@ impl BarSequence {
         let index = ((within / self.bar_beats).floor() as usize).min(self.bars.len() - 1);
         self.bars[index] as f64 * self.bar_beats + within - index as f64 * self.bar_beats
     }
+}
+
+fn expected_notes_per_bar(exercise: &Exercise) -> Vec<usize> {
+    let bar_beats = beats_per_bar(exercise);
+    let total_bars = (exercise_beats(exercise) / bar_beats).ceil().max(1.0) as usize;
+    let mut counts = vec![0usize; total_bars];
+    for hit in &exercise.hits {
+        if let Some(count) = counts.get_mut(source_bar(hit, bar_beats)) {
+            *count += 1;
+        }
+    }
+    counts
 }
 
 fn legacy_selected_bars(exercise: &Exercise, start: usize, end: usize) -> Vec<usize> {
@@ -1617,8 +1672,22 @@ fn App() -> impl IntoView {
     let repeat_tolerance = RwSignal::new(RepeatTolerance::Standard);
     let selected_bars = RwSignal::new(Vec::<usize>::new());
     let pending_legacy_selection = RwSignal::new(None::<(String, usize, usize)>);
-    let bar_sequence =
-        Memo::new(move |_| Arc::new(BarSequence::new(&exercise.get(), &selected_bars.get())));
+    let adaptive_enabled = RwSignal::new(false);
+    let adaptive_settings = RwSignal::new(AdaptiveSettings::default());
+    let adaptive_session_active = RwSignal::new(false);
+    let adaptive_bars = RwSignal::new(None::<Vec<usize>>);
+    let adaptive_status = RwSignal::new(None::<AdaptiveStatus>);
+    let adaptive_original_bars = RwSignal::new(Vec::<usize>::new());
+    let adaptive_original_bpm = RwSignal::new(60.0);
+    let adaptive_original_loops = RwSignal::new(1u8);
+    let adaptive_controller = Rc::new(RefCell::new(None::<AdaptiveController>));
+    #[allow(clippy::type_complexity)]
+    let adaptive_advance_holder: Rc<RefCell<Option<Rc<dyn Fn(SessionSummary)>>>> =
+        Rc::new(RefCell::new(None));
+    let bar_sequence = Memo::new(move |_| {
+        let bars = adaptive_bars.get().unwrap_or_else(|| selected_bars.get());
+        Arc::new(BarSequence::new(&exercise.get(), &bars))
+    });
     let selection_changed = RwSignal::new(false);
     let context_popup = RwSignal::new(None::<ContextPopup>);
     let progress = RwSignal::new(-1.0);
@@ -1793,7 +1862,12 @@ fn App() -> impl IntoView {
             welcome_dismissed: Some(!welcome.get_untracked()),
             last_import_hash: selected_import.get_untracked(),
             auto_show_statistics: Some(auto_show_statistics.get_untracked()),
+            adaptive_enabled: Some(adaptive_enabled.get_untracked()),
+            adaptive: Some(adaptive_settings.get_untracked()),
         })
+    });
+    ADAPTIVE_SAVE.with(|cell| {
+        *cell.borrow_mut() = Some(save_current_settings.clone());
     });
 
     let scoring_for_finish = scoring_engine.clone();
@@ -1879,6 +1953,7 @@ fn App() -> impl IntoView {
     let frame_holder: CallbackSlot<FrameCallback> = Rc::new(RefCell::new(None));
     let done_holder: CallbackSlot<DoneCallback> = Rc::new(RefCell::new(None));
     let launch_holder: LaunchSlot = Rc::new(RefCell::new(None));
+    let adaptive_advance_holder_for_launch = adaptive_advance_holder.clone();
     let launch_run: LaunchRun = {
         let finish_run = finish_run.clone();
         let frame_holder = frame_holder.clone();
@@ -2099,8 +2174,43 @@ fn App() -> impl IntoView {
             let done_finish = finish_run.clone();
             let repeat_launch = launch_holder.clone();
             let scoring_for_done = scoring_for_launch.clone();
+            let value = adaptive_advance_holder_for_launch.clone();
             let done = Closure::wrap(Box::new(move || {
                 set_practice_active(false);
+                if adaptive_session_active.get_untracked() {
+                    let attempt_summary = {
+                        let mut scoring = scoring_for_done.borrow_mut();
+                        match scoring.as_mut().map(IncrementalScorer::finish) {
+                            Some(Ok(summary)) => summary,
+                            Some(Err(error)) => {
+                                phase.set("error".into());
+                                import_error.set(Some(format!(
+                                    "Scoring could not finish the adaptive attempt safely: {error}"
+                                )));
+                                return;
+                            }
+                            None => {
+                                phase.set("error".into());
+                                import_error.set(Some(
+                                    "Scoring state was unavailable for the adaptive attempt."
+                                        .into(),
+                                ));
+                                return;
+                            }
+                        }
+                    };
+                    observed.set(vec![]);
+                    live.set(vec![]);
+                    live_matched_expected.set(HashSet::new());
+                    feedback_dirty.set(true);
+                    clear_score_feedback_preserve_viewport();
+                    scoring_for_done.borrow_mut().take();
+                    let advance = value.borrow().as_ref().cloned();
+                    if let Some(advance) = advance {
+                        advance(attempt_summary);
+                    }
+                    return;
+                }
                 if !repeat_enabled {
                     if app_mode.get_untracked() == AppMode::Practice && loops.get_untracked() == 0 {
                         observed.set(vec![]);
@@ -2266,6 +2376,14 @@ fn App() -> impl IntoView {
         progress.set(-1.0);
         clear_score_feedback();
         phase.set("idle".into());
+        if adaptive_session_active.get_untracked() {
+            adaptive_session_active.set(false);
+            adaptive_bars.set(None);
+            adaptive_status.set(None);
+
+            bpm.set(adaptive_original_bpm.get_untracked());
+            loops.set(adaptive_original_loops.get_untracked());
+        }
     });
 
     let scoring_for_navigation = scoring_engine.clone();
@@ -2294,8 +2412,15 @@ fn App() -> impl IntoView {
             clear_score_feedback();
             phase.set("idle".into());
         }
-    });
+        if adaptive_session_active.get_untracked() {
+            adaptive_session_active.set(false);
+            adaptive_bars.set(None);
+            adaptive_status.set(None);
 
+            bpm.set(adaptive_original_bpm.get_untracked());
+            loops.set(adaptive_original_loops.get_untracked());
+        }
+    });
     let toggle_bar: Rc<dyn Fn(usize)> = {
         let pause = pause_run.clone();
         let save = save_current_settings.clone();
@@ -2330,6 +2455,9 @@ fn App() -> impl IntoView {
 
     let scoring_for_tempo = scoring_engine.clone();
     let change_tempo: Rc<dyn Fn(f64)> = Rc::new(move |value| {
+        if adaptive_session_active.get_untracked() {
+            return;
+        }
         let value = value.clamp(30.0, 240.0);
         bpm.set(value);
         if matches!(
@@ -2360,12 +2488,51 @@ fn App() -> impl IntoView {
         }
     });
 
+    let adaptive_controller_for_start = adaptive_controller.clone();
     let start_new_run: Rc<dyn Fn(u8)> = {
         let launch = launch_run.clone();
         let scoring_for_start = scoring_engine.clone();
         Rc::new(move |count_bars| {
             result_modal_open.set(false);
             selection_changed.set(false);
+            if adaptive_enabled.get_untracked() {
+                let current_phase = adaptive_controller_for_start
+                    .borrow()
+                    .as_ref()
+                    .map(|controller| controller.phase());
+                if !adaptive_session_active.get_untracked()
+                    || current_phase == Some(AdaptivePhase::Completed)
+                    || current_phase == Some(AdaptivePhase::Inactive)
+                {
+                    let current_exercise = exercise.get_untracked();
+                    let sequence = bar_sequence.get_untracked();
+                    let target_bpm = bpm.get_untracked();
+                    let bars = sequence.bars.clone();
+                    let total_bars = sequence.total_bars;
+                    let counts = expected_notes_per_bar(&current_exercise);
+                    let mut controller = AdaptiveController::new(
+                        adaptive_settings.get_untracked(),
+                        target_bpm,
+                        bars.clone(),
+                        total_bars,
+                        counts,
+                        sequence.bar_beats,
+                    );
+                    let decision = controller.start();
+                    adaptive_original_bars.set(bars);
+                    adaptive_original_bpm.set(target_bpm);
+                    adaptive_original_loops.set(loops.get_untracked());
+                    adaptive_controller_for_start
+                        .borrow_mut()
+                        .replace(controller);
+                    adaptive_session_active.set(true);
+                    adaptive_bars.set(Some(decision.bars.clone()));
+                    bpm.set(decision.bpm);
+                    loops.set(1);
+                    repeat_bar_until_good.set(false);
+                    adaptive_status.set(Some(AdaptiveStatus::from_decision(&decision)));
+                }
+            }
             let current_exercise = exercise.get_untracked();
             let sequence = bar_sequence.get_untracked();
             let start_beat = sequence.origin;
@@ -2373,6 +2540,7 @@ fn App() -> impl IntoView {
                 if sequence.bars.len() == sequence.total_bars
                     && loops.get_untracked() == 1
                     && !repeat_bar_until_good.get_untracked()
+                    && !adaptive_enabled.get_untracked()
                 {
                     AppMode::Performance
                 } else {
@@ -2413,6 +2581,65 @@ fn App() -> impl IntoView {
         })
     };
     *start_holder.borrow_mut() = Some(start_new_run.clone());
+
+    let adaptive_advance = {
+        let start = start_new_run.clone();
+        let controller = adaptive_controller.clone();
+        let bpm_signal = bpm;
+        let adaptive_bars_signal = adaptive_bars;
+        let adaptive_status_signal = adaptive_status;
+        let adaptive_session_signal = adaptive_session_active;
+        let count_in_signal = count_in;
+        Rc::new(move |summary: SessionSummary| {
+            let mut controller_ref = controller.borrow_mut();
+            let Some(controller) = controller_ref.as_mut() else {
+                return;
+            };
+            let performed = bar_sequence.get_untracked().bars.clone();
+            let current_bpm = bpm_signal.get_untracked();
+            let decision = controller.observe(&AdaptiveAttempt {
+                summary: summary.clone(),
+                performed_bars: performed,
+                current_bpm,
+            });
+            adaptive_status_signal.set(Some(AdaptiveStatus::from_decision(&decision)));
+            if decision.completed {
+                adaptive_session_signal.set(false);
+                adaptive_bars_signal.set(None);
+                bpm_signal.set(decision.bpm);
+                let record = SessionRecord {
+                    id: format!("adaptive-{}", Date::now()),
+                    ended_at: Date::new_0().to_iso_string().into(),
+                    exercise_id: exercise.get_untracked().id.clone(),
+                    exercise_title: exercise.get_untracked().title.clone(),
+                    exercise_hash: exercise.get_untracked().content_hash.clone(),
+                    bpm: decision.bpm,
+                    input_mode: input_mode.get_untracked(),
+                    scoring_version: SCORING_VERSION.into(),
+                    tolerance_ms: on_time_ms.get_untracked(),
+                    latency_ms: latency_ms.get_untracked(),
+                    summary,
+                    observed: vec![],
+                    schema_version: 1,
+                    mode: AppMode::Practice,
+                };
+                result.set(Some(record));
+                phase.set("complete".into());
+                result_modal_open.set(true);
+                result_dismiss_after_ms.set(f64::INFINITY);
+                return;
+            }
+            bpm_signal.set(decision.bpm);
+            adaptive_bars_signal.set(Some(decision.bars.clone()));
+            drop(controller_ref);
+            let start = start.clone();
+            let count = count_in_signal.get_untracked();
+            spawn_local(async move {
+                start(count);
+            });
+        })
+    };
+    *adaptive_advance_holder.borrow_mut() = Some(adaptive_advance);
 
     let save_for_hit = save_current_settings.clone();
     let start_for_hit = start_new_run.clone();
@@ -2605,6 +2832,11 @@ fn App() -> impl IntoView {
                 progress.set(-1.0);
                 clear_score_feedback();
                 phase.set("idle".into());
+                if adaptive_session_active.get_untracked() {
+                    adaptive_session_active.set(false);
+                    adaptive_bars.set(None);
+                    adaptive_status.set(None);
+                }
             }
             if !error.is_empty() {
                 import_error.set(Some(error));
@@ -2974,6 +3206,12 @@ fn App() -> impl IntoView {
                     }
                     if let Some(v) = saved.repeat_tolerance {
                         repeat_tolerance.set(v);
+                    }
+                    if let Some(v) = saved.adaptive_enabled {
+                        adaptive_enabled.set(v);
+                    }
+                    if let Some(v) = saved.adaptive {
+                        adaptive_settings.set(v);
                     }
                     if let Some(mut bars) = saved.selected_bars {
                         bars.sort_unstable();
@@ -3424,13 +3662,13 @@ fn App() -> impl IntoView {
                   <button id="bar-selection-trigger" class="bar-selection-trigger" type="button" aria-labelledby="bar-selection-label bar-selection-current" aria-haspopup="dialog" aria-controls="bar-selection-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Bars)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Bars){None}else{Some(ContextPopup::Bars)})><span id="bar-selection-label" class="sr-only">"Select bars"</span><span id="bar-selection-current">{move || {let sequence=bar_sequence.get();let total=sequence.total_bars;let current=(sequence.display_beat(progress.get().max(sequence.origin))/sequence.bar_beats).floor() as usize+1;if repeat_bar_until_good.get(){format!("BAR {current} / {total} · TRY {}",bar_attempt.get())}else{format!("BAR {current} / {total}")}}}</span></button>
                   <div id="bar-selection-popover" class=move || if context_popup.get()==Some(ContextPopup::Bars){"bar-selection-popover"}else{"bar-selection-popover hidden"} role="dialog" aria-label="Bar selection">
                     <div class="bar-selection-popover-head"><strong>"Practise bars"</strong><button class="bar-selection-close" type="button" aria-label="Close bar selection" on:click=move |_|{context_popup.set(None);focus_popup_trigger(ContextPopup::Bars);}><X size=15/></button></div>
-                    <div class="bar-checkboxes" role="group" aria-label="Individual practice bars">{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;let toggle=toggle_bar.get_value();(0..count).map(|bar|{let toggle=toggle.clone();view!{<label><input type="checkbox" aria-label=format!("Bar {}",bar+1) prop:checked=move || selected_bars.get().binary_search(&bar).is_ok() on:change=move |_|toggle(bar)/><span>{format!("Bar {}",bar+1)}</span></label>}}).collect_view()}}</div>
+                    <div class="bar-checkboxes" role="group" aria-label="Individual practice bars">{move || {let count=(exercise_beats(&exercise.get())/beats_per_bar(&exercise.get())).ceil().max(1.0) as usize;let toggle=toggle_bar.get_value();(0..count).map(|bar|{let toggle=toggle.clone();view!{<label><input type="checkbox" disabled=move || adaptive_session_active.get() aria-label=format!("Bar {}",bar+1) prop:checked=move || selected_bars.get().binary_search(&bar).is_ok() on:change=move |_|toggle(bar)/><span>{format!("Bar {}",bar+1)}</span></label>}}).collect_view()}}</div>
                     <button class="select-all-bars" type="button" on:click=move |_|{if phase.get_untracked()=="paused" && !selected_bars.get_untracked().is_empty(){selection_changed.set(true);}selected_bars.set(vec![]);save_selection_all();}>"All bars"</button>
                     <small>{move || {let bars=selected_bars.get();if bars.is_empty(){"All bars · Performance when played once".into()}else{format!("{} selected · Practice",bars.iter().map(|bar|format!("{}",bar+1)).collect::<Vec<_>>().join(", "))}}}</small>
                   </div>
                 </div>
                 <div class="timeline"><i style=move || {let sequence=bar_sequence.get();format!("width:{:.2}%",((progress.get().max(sequence.origin)-sequence.origin)/sequence.length()*100.0).rem_euclid(100.0).clamp(0.0,100.0))}></i></div>
-                <select class="loop-control" aria-label=move || format!("Loops: {}", match loops.get(){2=>"2 LOOPS",4=>"4 LOOPS",0=>"∞ LOOP",_=>"1 / 1 LOOP"}) title="Choose how many times to play the selected bars" prop:value=move || loops.get().to_string() on:change={let save=save_loops.clone();move |event|{let value=event_target_value(&event).parse().unwrap_or(1);if phase.get_untracked()=="paused" && value!=loops.get_untracked(){selection_changed.set(true);}loops.set(value);save();}}><option value="1">"1 / 1 LOOP"</option><option value="2">"2 LOOPS"</option><option value="4">"4 LOOPS"</option><option value="0">"∞ LOOP"</option></select>
+                <select class="loop-control" disabled=move || adaptive_session_active.get() aria-label=move || format!("Loops: {}", match loops.get(){2=>"2 LOOPS",4=>"4 LOOPS",0=>"∞ LOOP",_=>"1 / 1 LOOP"}) title="Choose how many times to play the selected bars" prop:value=move || loops.get().to_string() on:change={let save=save_loops.clone();move |event|{let value=event_target_value(&event).parse().unwrap_or(1);if phase.get_untracked()=="paused" && value!=loops.get_untracked(){selection_changed.set(true);}loops.set(value);save();}}><option value="1">"1 / 1 LOOP"</option><option value="2">"2 LOOPS"</option><option value="4">"4 LOOPS"</option><option value="0">"∞ LOOP"</option></select>
               </div>
               <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>
               <section id="result-dialog" class="stats-modal results-modal" role="dialog" aria-modal="true" aria-labelledby="result-title" on:click=|event|event.stop_propagation() on:keydown=move |event:web_sys::KeyboardEvent|{
@@ -3701,8 +3939,38 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"Session statistics"</h3><label class="toggle-row"><span>"Automatically show session statistics"<small>"Results are always saved after a performance."</small></span><input type="checkbox" prop:checked=move || auto_show_statistics.get() on:change=move |event|{auto_show_statistics.set(event_target_checked(&event));save_auto_statistics();}/></label></section>
             <section><h3>"Reference drums"</h3><label class="toggle-row"><span>"Play app drums"<small>"Mute this if your drum module is audible."</small></span><input type="checkbox" prop:checked=move || !snare_muted.get() on:change=move |event|{snare_muted.set(!event_target_checked(&event));set_volumes(if snare_muted.get_untracked(){0.0}else{snare_volume.get_untracked()},click_volume.get_untracked());save_snare_mute();}/></label><label>"Play drums"<select aria-label="Reference drum timing" prop:value=move || snare_reference_mode.get() on:change=move |event|{let value=event_target_value(&event);snare_reference_mode.set(if value=="notes"{"notes".into()}else{"hits".into()});save_snare_reference_mode();}><option value="hits">"With your hits"</option><option value="notes">"On written notes"</option></select><small class="help">{move || if snare_reference_mode.get()=="notes"{"Plays each written drum note as a reference; your strikes are still scored silently."}else{"Plays immediately when Rudiment receives your keyboard or MIDI strike."}}</small></label><label>"Drum volume"<input type="range" min="0" max="1" step="0.01" prop:value=move || snare_volume.get() on:input=move |event|{let value=event_target_value(&event).parse().unwrap_or(0.72);snare_volume.set(value);set_volumes(if snare_muted.get_untracked(){0.0}else{value},click_volume.get_untracked());save_snare_volume();}/></label></section>
+            <section><h3>"Adaptive learning"</h3>
+              <label class="toggle-row"><span>"Enable adaptive learning"<small>"When enabled, practice starts at the original tempo and adapts automatically. Disables repeat-bar mode."</small></span><input type="checkbox" aria-label="Enable adaptive learning" prop:checked=move || adaptive_enabled.get() on:change=move |event|{
+                let enabled = event_target_checked(&event);
+                if enabled {
+                  repeat_bar_until_good.set(false);
+                  adaptive_enabled.set(true);
+                  adaptive_original_bpm.set(bpm.get_untracked());
+                  adaptive_original_bars.set(selected_bars.get_untracked());
+                  adaptive_original_loops.set(loops.get_untracked());
+                } else {
+                  if adaptive_session_active.get_untracked() {
+                    set_practice_active(false); stop_audio(); phase.set("idle".into());
+                    adaptive_session_active.set(false); adaptive_bars.set(None); adaptive_status.set(None);
+                    bpm.set(adaptive_original_bpm.get_untracked()); loops.set(adaptive_original_loops.get_untracked());
+                  }
+                  adaptive_enabled.set(false);
+                }
+                save_current_settings();
+              }/></label>
+              <label>{move || format!("Initial recovery tempo · {:.0}%", adaptive_settings.get().initial_recovery_percent)}<input type="range" min="30" max="90" step="1" prop:value=move || adaptive_settings.get().initial_recovery_percent on:input=move |event|{let v=event_target_value(&event).parse().unwrap_or(50.0); adaptive_settings.update(|s| s.initial_recovery_percent=v); save_adaptive_settings();}/></label>
+              <label>{move || format!("Minimum BPM · {:.0}", adaptive_settings.get().min_bpm)}<input type="range" min="30" max="100" step="1" prop:value=move || adaptive_settings.get().min_bpm on:input=move |event|{let v=event_target_value(&event).parse().unwrap_or(50.0); adaptive_settings.update(|s| s.min_bpm=v); save_adaptive_settings();}/></label>
+              <label>{move || format!("Tempo increase · {:.0} BPM", adaptive_settings.get().tempo_increase_bpm)}<input type="range" min="1" max="20" step="1" prop:value=move || adaptive_settings.get().tempo_increase_bpm on:input=move |event|{let v=event_target_value(&event).parse().unwrap_or(5.0); adaptive_settings.update(|s| s.tempo_increase_bpm=v); save_adaptive_settings();}/></label>
+              <label>{move || format!("Secondary reduction · {:.0}%", adaptive_settings.get().secondary_reduction_percent)}<input type="range" min="5" max="30" step="1" prop:value=move || adaptive_settings.get().secondary_reduction_percent on:input=move |event|{let v=event_target_value(&event).parse().unwrap_or(10.0); adaptive_settings.update(|s| s.secondary_reduction_percent=v); save_adaptive_settings();}/></label>
+              <label>{move || format!("Failed attempts before slowing · {}", adaptive_settings.get().failed_attempts_before_slow)}<input type="range" min="1" max="5" step="1" prop:value=move || adaptive_settings.get().failed_attempts_before_slow on:input=move |event|{let v=event_target_value(&event).parse().unwrap_or(2); adaptive_settings.update(|s| s.failed_attempts_before_slow=v); save_adaptive_settings();}/></label>
+              <label>{move || format!("Successful repetitions required · {}", adaptive_settings.get().successful_repetitions_required)}<input type="range" min="1" max="5" step="1" prop:value=move || adaptive_settings.get().successful_repetitions_required on:input=move |event|{let v=event_target_value(&event).parse().unwrap_or(2); adaptive_settings.update(|s| s.successful_repetitions_required=v); save_adaptive_settings();}/></label>
+              <label>{move || format!("Neighbouring bars each side · {}", adaptive_settings.get().neighbour_bars)}<input type="range" min="0" max="2" step="1" prop:value=move || adaptive_settings.get().neighbour_bars on:input=move |event|{let v=event_target_value(&event).parse().unwrap_or(1); adaptive_settings.update(|s| s.neighbour_bars=v); save_adaptive_settings();}/></label>
+              <label class="toggle-row"><span>"Periodic full-speed checks"<small>"Perform one target-speed attempt after the configured number of tempo increases."</small></span><input type="checkbox" prop:checked=move || adaptive_settings.get().full_speed_checks on:change=move |event|{let v=event_target_checked(&event); adaptive_settings.update(|s| s.full_speed_checks=v); save_adaptive_settings();}/></label>
+              <label>{move || format!("Full-speed check interval · {} increases", adaptive_settings.get().full_speed_check_interval)}<input type="range" min="1" max="10" step="1" prop:value=move || adaptive_settings.get().full_speed_check_interval on:input=move |event|{let v=event_target_value(&event).parse().unwrap_or(4); adaptive_settings.update(|s| s.full_speed_check_interval=v); save_adaptive_settings();}/></label>
+              <button on:click=move |_|{adaptive_settings.set(AdaptiveSettings::default()); save_adaptive_settings();}>"Restore defaults"</button>
+            </section>
             <section><h3>"Practice repeats"</h3>
-              <label class="toggle-row"><span>"Repeat until successful"<small>"A failed bar is tried again; every failed attempt still reduces the final performance score."</small></span><input aria-label="Repeat bar until Good" type="checkbox" prop:checked=move || repeat_bar_until_good.get() on:change={let save=save_repeat_bar.clone();move |event|{repeat_bar_until_good.set(event_target_checked(&event));save();}}/></label>
+              <label class="toggle-row"><span>"Repeat until successful"<small>"A failed bar is tried again; every failed attempt still reduces the final performance score."</small></span><input aria-label="Repeat bar until Good" type="checkbox" disabled=move || adaptive_enabled.get() prop:checked=move || repeat_bar_until_good.get() on:change={let save=save_repeat_bar.clone();move |event|{repeat_bar_until_good.set(event_target_checked(&event));save();}}/></label>
               <label>"Required accuracy"<select aria-label="Repeat tolerance" prop:value=move || match repeat_tolerance.get(){RepeatTolerance::Relaxed=>"relaxed",RepeatTolerance::Standard=>"standard",RepeatTolerance::Strict=>"strict"} on:change=move |event|{repeat_tolerance.set(match event_target_value(&event).as_str(){"relaxed"=>RepeatTolerance::Relaxed,"strict"=>RepeatTolerance::Strict,_=>RepeatTolerance::Standard});save_repeat_tolerance();}><option value="relaxed">"Relaxed · no misses"</option><option value="standard">"Standard · Good or Perfect"</option><option value="strict">"Strict · Perfect only"</option></select><small class="help">"Extra hits and wrong drums always fail the current attempt. This setting does not change the timing windows."</small></label>
             </section>
             <section><h3>"MIDI drums"</h3><p class="help">"Rudiment connects automatically. Use the MIDI status control to retry or rescan. Rudiment never uploads your events."</p><p class="midi-state">{move || midi_status.get()}</p>
@@ -3727,7 +3995,7 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
-            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{pending_clear_history.set(true);}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);midi_bindings.set(default_midi_bindings());midi_learn.set(None);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
+            <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{pending_clear_history.set(true);}>"Clear history"</button></div><button class="wide-button" on:click={move |_|{let promise=reset_local_setup();app_mode.set(AppMode::Practice);bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);adaptive_enabled.set(false);adaptive_settings.set(AdaptiveSettings::default());adaptive_session_active.set(false);adaptive_bars.set(None);adaptive_status.set(None);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);midi_bindings.set(default_midi_bindings());midi_learn.set(None);selected_midi.set(None);midi_status.set("Not connected".into());spawn_local(async move{let _=JsFuture::from(promise).await;});}}>"Reset settings & mappings"</button></section>
           </div>
         </aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" tabindex="-1" on:click=move |_|{settings_open.set(false);restore_settings_focus();}></button>
       </main>

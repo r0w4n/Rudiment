@@ -16,11 +16,11 @@ The repository, committed code, tests and this document are the authoritative re
 | Stage | Status | Acceptance condition |
 |---|---|---|
 | 1 — Architecture and controller | **Complete** | Deterministic controller exists in `rudiment-core`, exposes phases/actions/decisions, has unit tests for tempo, recovery, thresholds, bar detection, focus, probes, completion and settings normalisation. |
-| 2 — Tempo adaptation | Not started | Controller is connected to playback; aggressive initial recovery, increases, repeats, secondary slowdown and tempo-map scaling are verified. |
-| 3 — Difficult-bar detection and focused practice | Not started | Bar-level judgements select a focus passage; playback uses existing bar selection/looping; two successes restore the full selection. |
+| 2 — Tempo adaptation | **Complete** | Controller is connected to playback; aggressive initial recovery, increases, repeats, secondary slowdown and tempo-map scaling are verified. |
+| 3 — Difficult-bar detection and focused practice | **Complete** | Bar-level judgements select a focus passage; playback uses existing bar selection/looping; two successes restore the full selection. |
 | 4 — Settings and UI | Not started | Adaptive mode control, dedicated Settings section, persistence, restore defaults and status display are implemented and accessible. |
-| 5 — Full-speed probes and completion | Not started | Optional probes, completion gate, restart/stop/interruption and Performance isolation are verified. |
-| 6 — Integration and regression | Not started | Relevant QA suites pass; documentation and acceptance criteria verified. |
+| 5 — Full-speed probes and completion | **Complete** | Optional probes, completion gate, restart/stop/interruption and Performance isolation are verified. |
+| 6 — Integration and regression | **In progress** | Relevant QA suites pass; documentation and acceptance criteria verified. |
 
 ## Files created or modified
 
