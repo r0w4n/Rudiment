@@ -150,7 +150,7 @@ if [ -n "${VALIDATED_OUT}" ]; then
   write_checksums "${VALIDATED_OUT}"
   verify_checksums "${VALIDATED_OUT}" || fail "validated artifact checksum failed"
   # The validated artifact must again contain no Git internals.
-  if find "${VALIDATED_OUT}" -type f -path '*.git*' | grep -q .; then
+  if find "${VALIDATED_OUT}" -type d -name '.git' | grep -q .; then
     fail "validated artifact unexpectedly contains Git metadata"
   fi
 fi

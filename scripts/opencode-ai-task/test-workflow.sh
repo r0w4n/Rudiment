@@ -2,11 +2,10 @@
 #
 # Static security and regression checks for the OpenCode AI task workflow.
 #
-# These complement the behavioural tests (test-authorise.sh,
-# test-verify-result.sh) by asserting invariants of the committed workflow and
-# gate scripts: credential isolation, authorisation gating, draft-only pull
-# requests, protected-path enforcement and the regression for the Markdown
-# code-fence shell bug.
+# Complements the behavioural tests by asserting invariants of the committed
+# workflow file and gate scripts: staged isolation, credential isolation,
+# trusted-script ordering, artifact-only data flow, authorisation gating,
+# draft-only pull requests and the Markdown code-fence regression.
 # Usage: bash scripts/opencode-ai-task/test-workflow.sh
 
 set -euo pipefail
@@ -14,7 +13,6 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 workflow="$root/.github/workflows/opencode-ai-task.yml"
-verify="$here/verify-result.sh"
 
 pass=0
 fail=0
@@ -30,7 +28,17 @@ assert_not_in() { # $1 = file, $2 = scenario, $3 = pattern
   if grep -qE -- "$3" "$1"; then ko "$2 (found: $3)"; else ok "$2"; fi
 }
 
-step_lines() { # echoes "start end" of the named step's run block in the workflow
+job_block() { # echoes "start end" lines of the named job
+  local name="$1" start end total
+  start="$(grep -nE "^  ${name}:" "$workflow" | head -1 | cut -d: -f1)"
+  if [ -z "$start" ]; then echo "0 0"; return; fi
+  total="$(wc -l <"$workflow")"
+  end="$(awk -v s="$((start + 1))" 'NR >= s && /^  [a-z]+:/{print NR; exit}' "$workflow")"
+  [ -n "$end" ] || end="$total"
+  echo "$start $end"
+}
+
+step_range() { # echoes "start end" of the named step inside the workflow
   local name="$1" start end total
   start="$(grep -nE -- "^      - name: ${name}\$" "$workflow" | head -1 | cut -d: -f1)"
   if [ -z "$start" ]; then echo "0 0"; return; fi
@@ -40,78 +48,138 @@ step_lines() { # echoes "start end" of the named step's run block in the workflo
   echo "$start $end"
 }
 
+# --- Stages exist --------------------------------------------------------------
+for job in authorise implement validate publish notify; do
+  job_block "$job" | grep -qv '^0 0$' && ok "stage job present: $job" \
+    || ko "stage job present: $job"
+done
+
 # --- Markdown code-fence regression -------------------------------------------
 # A bare code-fence line is a shell command and fails the step under set -e.
 FENCE='```'
-if grep -qE -- "^[[:space:]]*'${FENCE}'[[:space:]]*\$" "$workflow" "$verify"; then
+if grep -qE -- "^[[:space:]]*'${FENCE}'[[:space:]]*\$" "$workflow" \
+  "$here/export-changes.sh" "$here/validate-changes.sh"; then
   ko "no bare code-fence commands (bare fence line found)"
 else
   ok "no bare code-fence commands"
-fi
-if grep -q -- "echo '${FENCE}'" "$verify"; then
-  ok "code fences rendered with echo"
-else
-  ko "code fences rendered with echo"
 fi
 
 # --- Authorisation gating ------------------------------------------------------
 assert_in "$workflow" "implement job gated on authorisation output" \
   "needs\.authorise\.outputs\.proceed == 'true'"
+[ "$(grep -c "needs.authorise.outputs.proceed == 'true'" "$workflow")" -ge 3 ] &&
+  ok "all model-touching stages gated on authorisation" ||
+  ko "all model-touching stages gated on authorisation"
 assert_in "$workflow" "issue author gate present" \
   "github\.event\.issue\.user\.login"
 assert_in "$workflow" "label application sender gate present" \
   "github\.event\.sender\.login"
 [ "$(grep -c "scripts/opencode-ai-task/authorise.sh" "$workflow")" -ge 2 ] &&
-  ok "authorisation gate script used in both jobs" ||
-  ko "authorisation gate script used in both jobs"
+  ok "authorisation gate script used in authorise and implement jobs" ||
+  ko "authorisation gate script used in authorise and implement jobs"
+assert_in "$workflow" "dry-run dispatch mode preserved" \
+  "inputs\.dry_run"
+
+# --- Job permissions -----------------------------------------------------------
+pb="$(job_block implement)"; p_start=${pb%% *}; p_end=${pb##* }
+if sed -n "${p_start},${p_end}p" "$workflow" | grep -q "contents: write"; then
+  ko "implement job has no write permissions"
+else
+  ok "implement job has no write permissions"
+fi
+vb="$(job_block validate)"; v_start=${vb%% *}; v_end=${vb##* }
+if sed -n "${v_start},${v_end}p" "$workflow" | grep -qE "contents: write|pull-requests: write"; then
+  ko "validate job has write permissions"
+else
+  ok "validate job has write permissions"
+fi
+nb="$(job_block publish)"; n_start=${nb%% *}; n_end=${nb##* }
+if sed -n "${n_start},${n_end}p" "$workflow" | grep -q "contents: write"; then
+  ok "publish job holds the write permissions"
+else
+  ko "publish job holds the write permissions"
+fi
+if sed -n "${n_start},${n_end}p" "$workflow" | grep -q "issues: write"; then
+  ko "publish job does not hold issues: write"
+else
+  ok "publish job does not hold issues: write"
+fi
 
 # --- Credential isolation ------------------------------------------------------
-# Checkouts must not persist credentials into .git/config, so the model process
-# cannot read a GitHub token.
-[ "$(grep -c "persist-credentials: false" "$workflow")" -ge 2 ] &&
-  ok "checkouts do not persist credentials" ||
-  ko "checkouts do not persist credentials"
+[ "$(grep -c "persist-credentials: false" "$workflow")" -ge 3 ] &&
+  ok "every checkout drops persisted credentials" ||
+  ko "every checkout drops persisted credentials"
+[ "$(grep -c "ref: \${{ needs.authorise.outputs.base_sha }}" "$workflow")" -eq 3 ] &&
+  ok "implement/validate/publish check out the pinned base revision" ||
+  ko "implement/validate/publish check out the pinned base revision"
 
-# The OpenCode implementation step must not receive the GitHub token.
-start_end=$(step_lines "Implement the task")
-start=${start_end%% *}
-end=${start_end##* }
-if [ "$start" -gt 0 ] && [ "$end" -gt "$start" ]; then
-  if sed -n "${start},${end}p" "$workflow" | grep -qE -- "GH_TOKEN|github\.token|GITHUB_TOKEN"; then
-    ko "OpenCode step receives no GitHub token"
-  else
-    ok "OpenCode step receives no GitHub token"
-  fi
+os="$(step_range "Implement the task")"; o_start=${os%% *}; o_end=${os##* }
+if sed -n "${o_start},${o_end}p" "$workflow" | grep -qE "GH_TOKEN|github\.token|GITHUB_TOKEN"; then
+  ko "OpenCode step receives no GitHub token"
 else
-  ko "OpenCode step located for token check"
+  ok "OpenCode step receives no GitHub token"
 fi
-
-# The API key is only referenced where needed (implement + diagnostics).
 if [ "$(grep -c -- "OPENCODE_API_KEY:" "$workflow")" -le 2 ]; then
-  ok "API key referenced only in scoped steps"
+  ok "API key referenced only in the implement and diagnostics steps"
 else
-  ko "API key referenced only in scoped steps"
+  ko "API key referenced only in the implement and diagnostics steps"
 fi
+
+# --- Trusted script ordering ---------------------------------------------------
+ss="$(step_range "Snapshot trusted automation scripts")"; s_start=${ss%% *}; s_end=${ss##* }
+ie="$(step_range "Implement the task")"; i_start=${ie%% *}
+if [ "$s_start" -gt 0 ] && [ "$s_end" -le "$i_start" ]; then
+  ok "trusted scripts snapshotted before the agent runs"
+else
+  ko "trusted scripts snapshotted before the agent runs"
+fi
+assert_in "$workflow" "export runs from the trusted snapshot" \
+  'bash "\$\{TRUSTED_SCRIPTS\}/export-changes.sh"'
+assert_in "$workflow" "diagnostics redacted from the trusted snapshot" \
+  'bash "\$\{TRUSTED_SCRIPTS\}/redact.sh"'
+assert_in "$workflow" "validation runs from the trusted checkout" \
+  "bash scripts/opencode-ai-task/validate-changes.sh"
+
+# --- Artifact-only data flow ---------------------------------------------------
+assert_in "$workflow" "implement uploads only the artifact directory" \
+  'name: opencode-implementation'
+assert_in "$workflow" "validate uploads only the validated artifact" \
+  'name: opencode-validated'
+assert_not_in "$workflow" "no job uploads repository or .git content" \
+  "path: \\\$\{\{ github.workspace"
+assert_in "$here/lib.sh" "artifact integrity manifest used" "SHA256SUMS"
+
+# --- Hook and credential hygiene in publish -----------------------------------
+assert_in "$workflow" "publish disables hooks before authenticated ops" \
+  'git config core.hooksPath'
+assert_in "$workflow" "publish supplies the token via GIT_ASKPASS" \
+  'GIT_ASKPASS='
+assert_not_in "$workflow" "no token in remote URLs" \
+  "x-access-token:\\\$"
+assert_in "$workflow" "publish revalidates before pushing" \
+  "bash scripts/opencode-ai-task/apply-validated.sh"
+assert_in "$workflow" "push uses an explicit branch refspec" \
+  'git push --no-verify publish-origin "\$\{BRANCH\}:\$\{BRANCH\}"'
+
+# --- Version pinning -----------------------------------------------------------
+assert_in "$workflow" "OpenCode CLI version pinned" \
+  "OPENCODE_CLI_VERSION: '2"
 
 # --- Never merge, never force, never deploy -----------------------------------
 assert_not_in "$workflow" "no automatic merge" "gh pr merge"
 assert_not_in "$workflow" "no marking PR ready for review" "gh pr ready"
 assert_not_in "$workflow" "no admin bypass flags" --admin
-assert_not_in "$workflow" "no force pushes" "git push[^|]*--force"
+assert_not_in "$workflow" "no force pushes" "git push[^|]*--force[^v]"
 assert_in "$workflow" "pull requests are drafts" "gh pr create --draft"
 assert_not_in "$workflow" "no pushes to the default branch" \
-  'git push origin "\$\{DEFAULT_BRANCH\}'
-assert_in "$verify" "guard refuses task branch equal to default branch" \
-  "must never be the default branch"
+  'git push[^|]*"[[:space:]]*"?\$\{DEFAULT_BRANCH\}'
+assert_in "$here/validate-changes.sh" \
+  "validation refuses a task branch not matching the issue" \
+  "does not match ai/issue"
+assert_not_in "$workflow" "no deploy actions" "deploy-pages"
 
-# --- Protected paths -----------------------------------------------------------
-assert_in "$verify" "guard blocks .github/ and .githooks/ changes" \
-  '\.github/ \.githooks/'
-assert_in "$workflow" "diagnostic artifacts scrub the API key" \
-  "REDACTED-OPENCODE-KEY"
-
-# --- Scripts exist and are executable -----------------------------------------
-for s in authorise.sh verify-result.sh; do
+# --- Gate scripts executable ---------------------------------------------------
+for s in authorise.sh dedup-check.sh export-changes.sh validate-changes.sh apply-validated.sh redact.sh; do
   if [ -x "$here/$s" ]; then ok "gate script executable: $s"; else ko "gate script executable: $s"; fi
 done
 

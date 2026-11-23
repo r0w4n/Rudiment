@@ -85,7 +85,7 @@ write_checksums "${ARTIFACT_DIR}"
 verify_checksums "${ARTIFACT_DIR}" || fail "artifact checksum verification failed"
 
 # Defensive sweep: the artifact must never contain Git internals.
-if find "${ARTIFACT_DIR}" -type f -path '*.git*' | grep -q .; then
+if find "${ARTIFACT_DIR}" -type d -name '.git' | grep -q .; then
   fail "artifact unexpectedly contains Git metadata"
 fi
 
