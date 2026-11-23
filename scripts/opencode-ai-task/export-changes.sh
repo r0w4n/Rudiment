@@ -78,7 +78,7 @@ fi
 
 HEAD_SHA="$(git rev-parse HEAD)"
 cat >"${ARTIFACT_DIR}/meta.json" <<EOF
-{"issue_number": "${BRANCH#ai/issue-}", "branch": "${BRANCH}", "base_sha": "${BASE_SHA}", "head_sha": "${HEAD_SHA}", "commit_count": ${COMMIT_COUNT}, "validated": "false"}
+{"issue_number": "${BRANCH#ai/issue-}", "branch": "${BRANCH}", "base_sha": "${BASE_SHA}", "head_sha": "${HEAD_SHA}", "commit_count": ${COMMIT_COUNT}, "model": "${MODEL:-}", "validated": "false"}
 EOF
 
 write_checksums "${ARTIFACT_DIR}"

@@ -1,36 +1,46 @@
 name: OpenCode AI task
 
-# Implements development tasks from GitHub issues with OpenCode Go.
+# Implements development tasks from GitHub issues with OpenCode Go, in four
+# isolated stages:
 #
-# Authorisation model (enforced in the workflow-level condition below and again
-# inside the jobs via scripts/opencode-ai-task/authorise.sh):
-#   - The issue must have been created by AUTHORISED_USER.
-#   - The `ai-task` label must have been applied, and only by AUTHORISED_USER.
-#   - The issue must be open, must have a description, and must not be a
-#     pull request.
-# Any other event exits before any job runs: no model invocation, no API
-# credits, and no access to the OpenCode API key (it is only ever referenced in
-# the implement job, which is skipped for unauthorised events).
+#   A. authorise  (read-only)   issue author, ai-task label + labeler, open,
+#                               non-empty description, non-PR; duplicate
+#                               prevention. No model invocation, no secrets.
+#   B. implement  (read-only)   version-pinned OpenCode, no GitHub write
+#                               credential, exports committed changes as a
+#                               restricted patch artifact (no .git metadata,
+#                               hooks, configuration or credentials).
+#   C. validate   (read-only)   fresh runner + trusted base checkout; trusted
+#                               script verifies artifact integrity and applies
+#                               the patches with hooks disabled, rejecting
+#                               protected paths, symlinks, submodules, .git
+#                               paths, traversal and malformed patches. All
+#                               failures are fail-closed.
+#   D. publish    (write)       fresh runner; re-applies the validated
+#                               artifact to a fresh clone, revalidates, then
+#                               pushes ai/issue-<n> and opens a draft PR.
+#                               Never merges, never force-pushes, never
+#                               touches the default branch.
 #
-# The implement job never merges, never pushes to the default branch and never
-# deploys. It creates the branch `ai/issue-<n>` and a draft pull request that
-# waits for manual review. Changes touching .github/ or .githooks/ are rejected
-# before anything is pushed.
+# Trust boundaries:
+#   - Scripts that run after the agent has executed come from a snapshot taken
+#     before the agent started, or from the trusted base checkout — an
+#     AI-modified script on the task branch cannot replace them.
+#   - Unauthorised events skip every job before any secret is referenced.
+#   - The agent process never receives a GitHub credential, and the agent's
+#     working tree (including .git) never leaves the implement job.
 #
-# CI on AI-generated pull requests (per GitHub's "Events that trigger
-# workflows" documentation): pull_request runs (opened/synchronize/reopened)
-# created with GITHUB_TOKEN are held and require approval from a user with
-# write access, approved from the pull request page. Pending runs report no
-# status, so required status checks cannot pass until they are approved and
-# succeed. This requires Settings > Actions > Workflow permissions > "Allow
-# GitHub Actions to create and approve pull requests" to be enabled for the
-# implement job to create the PR at all.
+# CI on AI-generated pull requests (GitHub documentation, "Events that trigger
+# workflows"): pull_request runs created with GITHUB_TOKEN are held and
+# require approval from a user with write access, approved from the pull
+# request page. Pending runs report no status, so required status checks
+# cannot pass until approved and successful. Requires Settings > Actions >
+# Workflow permissions > "Allow GitHub Actions to create and approve pull
+# requests" to be enabled for the publish job to create the PR at all.
 #
-# workflow_dispatch exists for testing: it re-checks authorisation for a given
-# issue number against live repository data. dry_run=true (the default) stops
-# before any model call. Dispatch mode cannot verify who applied the label
-# (GitHub does not record that in issue data); it verifies issue author, label
-# presence, state and duplicates only.
+# workflow_dispatch provides a dry-run test mode (default true) that only runs
+# the authorisation checks; it cannot verify who applied the label, so it
+# checks issue author, label presence, state and duplicates only.
 
 on:
   issues:
@@ -60,10 +70,15 @@ env:
   AUTHORISED_USER: r0w4n
   REQUIRED_LABEL: ai-task
   DEFAULT_MODEL: opencode-go/glm-5.3-flash
+  # Pinned to a tested release; bump deliberately after CI verification.
+  OPENCODE_CLI_VERSION: '2.3.2'
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # A. Authorisation (read-only)
+  # ---------------------------------------------------------------------------
   authorise:
-    name: Check authorisation and duplicates
+    name: A. Check authorisation and duplicates
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: >-
@@ -76,13 +91,13 @@ jobs:
         github.event.issue.body != '' &&
         !github.event.issue.pull_request
       )
-    # Note: the env context is unavailable in job-level conditions, so the
-    # literals above duplicate AUTHORISED_USER and REQUIRED_LABEL below. Keep
-    # them in sync.
+    # The env context is unavailable in job-level conditions, so the literals
+    # above duplicate AUTHORISED_USER and REQUIRED_LABEL below. Keep in sync.
     outputs:
       proceed: ${{ steps.decision.outputs.proceed }}
       reason: ${{ steps.decision.outputs.reason }}
       branch: ${{ steps.decision.outputs.branch }}
+      base_sha: ${{ github.sha }}
     steps:
       - name: Check out workflow scripts
         uses: actions/checkout@v7
@@ -110,7 +125,6 @@ jobs:
             echo "::error::issue_number must be a numeric issue id (got '${ISSUE_NUMBER}')."
             exit 1
           fi
-          BRANCH="ai/issue-${ISSUE_NUMBER}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ISSUE_DATA="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}")"
@@ -136,15 +150,18 @@ jobs:
           REASON="$(sed -n 's/^proceed=[a-z]* reason=\(.*\)$/\1/p' <<<"${GATE_OUT}")"
 
           if [ "${PROCEED}" = "true" ]; then
-            # Duplicate prevention: one branch and one open pull request per issue.
-            if gh api "repos/${GITHUB_REPOSITORY}/branches/${BRANCH}" >/dev/null 2>&1; then
-              OPEN_PRS="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "${BRANCH}" --state open --json number --jq 'length')"
-              if [ "${OPEN_PRS}" -gt 0 ]; then
-                echo "::notice::Issue #${ISSUE_NUMBER} already has an active task: branch ${BRANCH} and an open pull request exist. Nothing to do."
+            if bash scripts/opencode-ai-task/dedup-check.sh "${ISSUE_NUMBER}"; then
+              :
+            else
+              DEDUP_RC=$?
+              # 3 = active task exists (skip); 2 = stale branch (error); 1 = query error.
+              if [ "${DEDUP_RC}" -eq 3 ]; then
                 PROCEED="false"
-                REASON="duplicate: branch ${BRANCH} and an open pull request already exist"
+                REASON="duplicate: branch ai/issue-${ISSUE_NUMBER} and an open pull request already exist"
+              elif [ "${DEDUP_RC}" -eq 2 ]; then
+                exit 1
               else
-                echo "::error::Branch ${BRANCH} exists without an open pull request: a previous run did not complete. Delete the branch to retrigger: git push origin --delete ${BRANCH}"
+                echo "::error::Duplicate check query failed."
                 exit 1
               fi
             fi
@@ -153,11 +170,14 @@ jobs:
           {
             echo "proceed=${PROCEED}"
             echo "reason=${REASON}"
-            echo "branch=${BRANCH}"
+            echo "branch=ai/issue-${ISSUE_NUMBER}"
           } >>"${GITHUB_OUTPUT}"
 
+  # ---------------------------------------------------------------------------
+  # B. Implementation (no GitHub write credentials)
+  # ---------------------------------------------------------------------------
   implement:
-    name: Implement with OpenCode
+    name: B. Implement with OpenCode
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: authorise
@@ -168,19 +188,19 @@ jobs:
         inputs.dry_run == false
       )
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
+      issues: read
     env:
       ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
       BRANCH: ${{ needs.authorise.outputs.branch }}
+      BASE_SHA: ${{ needs.authorise.outputs.base_sha }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - name: Prepare task workspace
         run: |
           set -euo pipefail
-          # The env and runner contexts are unavailable in job-level env, so the
-          # model selection and file paths are published here for later steps.
+          # The env and runner contexts are unavailable in job-level env, so
+          # the model selection and file paths are published here.
           MODEL="${{ vars.OPENCODE_AI_TASK_MODEL }}"
           if [ -z "${MODEL}" ]; then
             MODEL="${DEFAULT_MODEL}"
@@ -190,16 +210,28 @@ jobs:
             echo "SPEC_FILE=${RUNNER_TEMP}/opencode-issue-spec.md"
             echo "INSTRUCTIONS_FILE=${RUNNER_TEMP}/opencode-instructions.txt"
             echo "PR_SUMMARY_FILE=${RUNNER_TEMP}/opencode-pr-summary.md"
-            echo "PR_BODY_FILE=${RUNNER_TEMP}/opencode-pr-body.md"
             echo "ISSUE_TITLE_FILE=${RUNNER_TEMP}/opencode-issue-title.txt"
+            echo "ARTIFACT_DIR=${RUNNER_TEMP}/opencode-implementation"
+            echo "TRUSTED_SCRIPTS=${RUNNER_TEMP}/trusted-opencode-ai-task"
           } >>"${GITHUB_ENV}"
           echo "Task workspace prepared (model: ${MODEL})"
 
-      - name: Check out default branch
+      - name: Check out base revision
         uses: actions/checkout@v7
         with:
+          ref: ${{ needs.authorise.outputs.base_sha }}
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Snapshot trusted automation scripts
+        run: |
+          set -euo pipefail
+          # Everything this job executes after the agent has run comes from
+          # this snapshot, taken before the agent process starts, so an
+          # AI-modified script in the working tree cannot change behaviour.
+          rm -rf "${TRUSTED_SCRIPTS}"
+          cp -R scripts/opencode-ai-task "${TRUSTED_SCRIPTS}"
+          echo "Trusted scripts snapshotted to ${TRUSTED_SCRIPTS}"
 
       - name: Configure git identity
         run: |
@@ -256,40 +288,41 @@ jobs:
           echo "Specification written to ${SPEC_FILE}"
           rm -f "${PR_SUMMARY_FILE}"
 
-      - name: Install OpenCode
+      - name: Install pinned OpenCode
         run: |
-          npm install -g --allow-scripts=@opencode/cli @opencode/cli
+          npm install -g --allow-scripts=@opencode/cli "@opencode/cli@${OPENCODE_CLI_VERSION}"
           opencode --version
 
       - name: Implement the task
         timeout-minutes: 45
         env:
           # The opencode-go provider resolves its credential from
-          # OPENCODE_API_KEY (environment auth method), as proven by the
-          # OpenCode Go connectivity smoke test.
+          # OPENCODE_API_KEY (environment auth method). No GitHub token is
+          # present in this step's environment.
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
           set -euo pipefail
           echo "Model: ${MODEL}"
           echo "Branch: ${BRANCH}"
+          echo "Base: ${BASE_SHA}"
 
           cat >"${INSTRUCTIONS_FILE}" <<EOF
           You are implementing a development task in the Rudiment repository for GitHub issue ${ISSUE_NUMBER}.
 
-          The issue title and description are attached to this message as a file. Treat the attachment as the requirement specification. Work from the current repository checkout, which is on the default branch with a clean tree.
+          The issue title and description are attached to this message as a file. Treat the attachment as the requirement specification. Work from the current repository checkout, which is pinned to a fixed base commit with a clean tree.
 
           Required workflow:
           1. Create and switch to a new branch named exactly: ${BRANCH}
           2. Read AGENTS.md and follow the repository's architecture, presentation-boundary, style and QA conventions.
           3. Implement the requested changes. Keep the change minimal and focused on the specification.
           4. Run the relevant validation for the files you changed, following the QA section of AGENTS.md. Do not run the full qa:full suite unless the specification requires it.
-          5. Commit all of your changes to the branch with a conventional commit message that references issue ${ISSUE_NUMBER}.
+          5. Commit all of your changes to the branch with a conventional commit message that references issue ${ISSUE_NUMBER}. Keep history linear: no merge commits.
           6. When done, write a pull request summary to the file ${PR_SUMMARY_FILE} covering: what changed and why, the tests and validation you ran with their results, and any limitations or follow-up work.
 
           Hard constraints:
           - Do NOT push, do NOT create pull requests or issues, and do NOT merge anything. The automation around you handles all git integration.
           - Do NOT create git worktrees and do NOT use worktree-related tooling.
-          - Do NOT modify anything under .github/ or .githooks/, and do not attempt to change CI workflows, secrets, hooks or security configuration. If the specification appears to require that, stop and record it in the summary instead.
+          - Do NOT modify anything under .github/, .githooks/ or scripts/opencode-ai-task/, and do not attempt to change CI workflows, secrets, hooks, security tooling or repository configuration. If the specification appears to require that, stop and record it in the summary instead; such changes are rejected automatically.
           - Do not modify files unrelated to the specification.
           - Leave the working tree clean and committed on ${BRANCH} when you finish.
           EOF
@@ -298,66 +331,21 @@ jobs:
             --file "${SPEC_FILE}" \
             "$(cat "${INSTRUCTIONS_FILE}")"
 
-      - name: Verify and guard the result
+      - name: Export changes as restricted artifact
         run: |
           set -euo pipefail
-          bash scripts/opencode-ai-task/verify-result.sh
+          # Runs from the trusted snapshot, not from the agent-modified tree.
+          bash "${TRUSTED_SCRIPTS}/export-changes.sh"
 
-      - name: Push branch and open draft pull request
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          ISSUE_TITLE="$(cat "${ISSUE_TITLE_FILE}")"
-
-          if [ -f "${PR_SUMMARY_FILE}" ]; then
-            SUMMARY="$(cat "${PR_SUMMARY_FILE}")"
-          else
-            SUMMARY="_(OpenCode did not produce a summary file; see the workflow run log for details.)_"
-          fi
-
-          {
-            echo "## Summary"
-            echo
-            echo "${SUMMARY}"
-            echo
-            echo "## Automation notes"
-            echo
-            echo "- Created automatically by OpenCode from issue #${ISSUE_NUMBER} (model: \`${MODEL}\`)."
-            echo "- Draft pull request: nothing is merged, deployed or pushed to \`${DEFAULT_BRANCH}\` until you review and approve it."
-            echo "- CI checks for this PR were created by \`GITHUB_TOKEN\` and are held for approval; approve the workflow runs from the pull request page to start the repository checks."
-            echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo
-            echo "Closes #${ISSUE_NUMBER}"
-          } >"${PR_BODY_FILE}"
-
-          # Git authentication is established only here, after the model has
-          # finished, so the OpenCode process never sees GitHub credentials.
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push origin "${BRANCH}"
-          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
-
-          gh pr create --draft \
-            --repo "${GITHUB_REPOSITORY}" \
-            --base "${DEFAULT_BRANCH}" \
-            --head "${BRANCH}" \
-            --title "ai: issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
-            --body-file "${PR_BODY_FILE}"
-
-          # GITHUB_TOKEN-created pull_request events require approval before
-          # their workflow runs execute (GitHub documentation, "Events that
-          # trigger workflows"). Point the reviewer at the PR so the repo's
-          # quality, performance and CodeQL checks can be approved and run.
-          PR_URL="$(gh pr view "${BRANCH}" --repo "${GITHUB_REPOSITORY}" --json url --jq '.url')"
-          echo "::notice::Draft pull request created: ${PR_URL}"
-          echo "::notice::Its CI workflow runs are held for approval; approve them from the pull request page to start the repository checks."
+      - name: Upload implementation artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: opencode-implementation
+          path: ${{ env.ARTIFACT_DIR }}
+          retention-days: 7
 
       - name: Collect failure diagnostics
         if: failure()
-        env:
-          # Used only to redact the key value from diagnostic files before they
-          # are uploaded; the value is never printed.
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
           set -euo pipefail
           DIAG="${RUNNER_TEMP}/opencode-diagnostics"
@@ -366,7 +354,7 @@ jobs:
             cp -R "$HOME/.local/share/opencode/log" "${DIAG}/opencode-log" || true
           fi
           if git rev-parse HEAD >/dev/null 2>&1; then
-            git diff "origin/${DEFAULT_BRANCH}...HEAD" >"${DIAG}/diff.patch" 2>/dev/null || true
+            git diff "${BASE_SHA}...HEAD" >"${DIAG}/diff.patch" 2>/dev/null || true
             git status --porcelain >"${DIAG}/status.txt" 2>/dev/null || true
           fi
           if [ -n "${SPEC_FILE:-}" ] && [ -f "${SPEC_FILE}" ]; then
@@ -375,14 +363,8 @@ jobs:
           if [ -n "${PR_SUMMARY_FILE:-}" ] && [ -f "${PR_SUMMARY_FILE}" ]; then
             cp -f "${PR_SUMMARY_FILE}" "${DIAG}/"
           fi
-          # Redact the API key value from every diagnostic file before upload;
-          # the key is never printed.
-          if [ -n "${OPENCODE_API_KEY}" ]; then
-            find "${DIAG}" -type f \
-              -exec sed -i.bak "s|${OPENCODE_API_KEY}|[REDACTED-OPENCODE-KEY]|g" {} + \
-              2>/dev/null || true
-            find "${DIAG}" -name '*.bak' -delete 2>/dev/null || true
-          fi
+          # Redact secrets with the trusted snapshot before anything uploads.
+          bash "${TRUSTED_SCRIPTS}/redact.sh" "${DIAG}" 2>/dev/null || true
           echo "Diagnostics collected in ${DIAG}"
 
       - name: Upload failure diagnostics
@@ -394,8 +376,197 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Report failure on the issue
-        if: failure()
+  # ---------------------------------------------------------------------------
+  # C. Validation (fresh runner, trusted scripts, read-only)
+  # ---------------------------------------------------------------------------
+  validate:
+    name: C. Validate implementation artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [authorise, implement]
+    if: >-
+      needs.authorise.outputs.proceed == 'true' &&
+      (
+        github.event_name == 'issues' ||
+        inputs.dry_run == false
+      )
+    permissions:
+      contents: read
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+      BRANCH: ${{ needs.authorise.outputs.branch }}
+      BASE_SHA: ${{ needs.authorise.outputs.base_sha }}
+    steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.authorise.outputs.base_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download implementation artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: opencode-implementation
+          path: ${{ runner.temp }}/opencode-implementation
+
+      - name: Validate and re-export
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/opencode-implementation
+          TRUSTED_REPO: ${{ github.workspace }}
+          WORK_DIR: ${{ runner.temp }}/validate-work
+          VALIDATED_OUT: ${{ runner.temp }}/opencode-validated
+        run: |
+          set -euo pipefail
+          # The script comes from the trusted checkout at the base revision,
+          # never from the artifact. Any failure stops the workflow here.
+          bash scripts/opencode-ai-task/validate-changes.sh
+
+      - name: Upload validated artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: opencode-validated
+          path: ${{ runner.temp }}/opencode-validated
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # D. Publication (fresh runner, scoped write permissions)
+  # ---------------------------------------------------------------------------
+  publish:
+    name: D. Push branch and open draft pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [authorise, implement, validate]
+    if: >-
+      needs.authorise.outputs.proceed == 'true' &&
+      (
+        github.event_name == 'issues' ||
+        inputs.dry_run == false
+      )
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+      BRANCH: ${{ needs.authorise.outputs.branch }}
+      BASE_SHA: ${{ needs.authorise.outputs.base_sha }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.authorise.outputs.base_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download validated artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: opencode-validated
+          path: ${{ runner.temp }}/opencode-validated
+
+      - name: Apply and revalidate
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/opencode-validated
+          TRUSTED_REPO: ${{ github.workspace }}
+          WORK_DIR: ${{ runner.temp }}/publish-work
+        run: |
+          set -euo pipefail
+          # Applies the validated patches with hooks and credential helpers
+          # disabled and re-runs the full validation. The push below only
+          # happens if this succeeds.
+          WORK="$(bash scripts/opencode-ai-task/apply-validated.sh | sed -n 's/^WORK=//p')"
+          echo "PUBLISH_WORK=${WORK}" >>"${GITHUB_ENV}"
+
+      - name: Push branch and open draft pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_ASKPASS_SCRIPT: ${{ runner.temp }}/git-askpass.sh
+        run: |
+          set -euo pipefail
+          # Scoped credentials are only established here, in the publish job,
+          # after validation has passed. The token is supplied on demand via
+          # The token is supplied on demand via
+          # GIT_ASKPASS so it never appears in a remote URL or Git config.
+          cd "${PUBLISH_WORK}"
+          git config credential.helper ""
+          mkdir -p "${RUNNER_TEMP}/empty-hooks"
+          git config core.hooksPath "${RUNNER_TEMP}/empty-hooks"
+          cat >"${GIT_ASKPASS_SCRIPT}" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            Username*) printf '%s\n' "x-access-token" ;;
+            *)         printf '%s\n' "${GH_TOKEN}" ;;
+          esac
+          ASKPASS
+          chmod 700 "${GIT_ASKPASS_SCRIPT}"
+          export GIT_ASKPASS="${GIT_ASKPASS_SCRIPT}"
+          export GIT_TERMINAL_PROMPT=0
+
+          cd "${PUBLISH_WORK}"
+          git remote add publish-origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          cleanup() { git remote remove publish-origin 2>/dev/null || true; }
+          trap cleanup EXIT
+          git push --no-verify publish-origin "${BRANCH}:${BRANCH}"
+          cleanup
+
+          PUBLISH_MODEL="$(. scripts/opencode-ai-task/lib.sh; json_string_value meta.json model)"
+          ISSUE_TITLE="$(cat issue-title.txt)"
+          if [ -f pr-summary.md ]; then
+            SUMMARY="$(cat pr-summary.md)"
+          else
+            SUMMARY="_(no summary produced)_"
+          fi
+          {
+            echo "## Summary"
+            echo
+            echo "${SUMMARY}"
+            echo
+            echo "## Automation notes"
+            echo
+            echo "- Created automatically by OpenCode from issue #${ISSUE_NUMBER} (model: \`${PUBLISH_MODEL}\`)."
+            echo "- Draft pull request: nothing is merged, deployed or pushed to \`${DEFAULT_BRANCH}\` until you review and approve it."
+            echo "- CI checks for this PR were created by \`GITHUB_TOKEN\` and are held for approval; approve the workflow runs from the pull request page to start the repository checks."
+            echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Closes #${ISSUE_NUMBER}"
+          } >"${RUNNER_TEMP}/opencode-pr-body.md"
+
+          gh pr create --draft \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base "${DEFAULT_BRANCH}" \
+            --head "${BRANCH}" \
+            --title "ai: issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
+            --body-file "${RUNNER_TEMP}/opencode-pr-body.md"
+
+          # GITHUB_TOKEN-created pull_request events require approval before
+          # their workflow runs execute (GitHub documentation, "Events that
+          # trigger workflows").
+          PR_URL="$(gh pr view "${BRANCH}" --repo "${GITHUB_REPOSITORY}" --json url --jq '.url')"
+          echo "::notice::Draft pull request created: ${PR_URL}"
+          echo "::notice::Its CI workflow runs are held for approval; approve them from the pull request page to start the repository checks."
+
+  # ---------------------------------------------------------------------------
+  # Failure notification (comment on the issue; nothing else)
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Report failure on the issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [authorise, implement, validate, publish]
+    if: >-
+      always() &&
+      failure() &&
+      needs.authorise.outputs.proceed == 'true' &&
+      github.event_name == 'issues'
+    permissions:
+      issues: write
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      BRANCH: ${{ needs.authorise.outputs.branch }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Comment on the issue
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -403,8 +574,21 @@ jobs:
           cat >"${RUNNER_TEMP}/failure-comment.md" <<EOF
           The OpenCode AI task for this issue failed before a draft pull request could be opened.
 
+          Failed stages:
+          EOF
+          if [ "${needs.implement.result}" = "failure" ]; then
+            echo "- implementation (diagnostics artifact: opencode-task-issue-${ISSUE_NUMBER}-diagnostics)" >>"${RUNNER_TEMP}/failure-comment.md"
+          fi
+          if [ "${needs.validate.result}" = "failure" ]; then
+            echo "- validation (the implementation artifact was rejected)" >>"${RUNNER_TEMP}/failure-comment.md"
+          fi
+          if [ "${needs.publish.result}" = "failure" ]; then
+            echo "- publication (branch push or pull request creation)" >>"${RUNNER_TEMP}/failure-comment.md"
+          fi
+          cat >>"${RUNNER_TEMP}/failure-comment.md" <<EOF
+
           Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
-          Diagnostics (OpenCode logs, specification, partial summary, diff) are attached to the run as artifacts. Nothing was merged, pushed to \`${DEFAULT_BRANCH}\` or deployed. If the branch \`${BRANCH}\` was pushed, delete it to retrigger the task.
+          Nothing was merged, pushed to \`${DEFAULT_BRANCH}\` or deployed. If the branch \`${BRANCH}\` was pushed, delete it to retrigger the task.
           EOF
           gh issue comment "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body-file "${RUNNER_TEMP}/failure-comment.md"
