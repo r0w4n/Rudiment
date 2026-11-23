@@ -832,3 +832,74 @@ passed (midi_callback p95 0.50 ms, score_update p95 0.10 ms).
    comparison when wanted, with its overhead now reduced.
 
 Status: validated and shipped via the standard worktree flow (20261123-3).
+
+## Eleventh task: production confirmed smooth; instrumentation cost fixed (20261123-4)
+
+User clarification: with every diagnostic off (normal production
+configuration), there is NO jitter. Production meets the success criterion.
+All remaining jitter reports came from instrumented sessions, so the task is
+to make the instrumentation trustworthy rather than change production.
+
+### Analysis
+
+The user's own numbers held the clue: rAF p95 of exactly 17 ms with only 2
+frames >25 ms, yet visible continuous jitter with diagnostics on. Both facts
+are only compatible if a share of frames run 18-24 ms - late for a 60 Hz
+vsync but invisible to the blunt p95/>25 ms gauges. On the iPad the frame
+budget sits near its edge; every added millisecond tips some frames. The
+counters' bounded arrays were audited and exonerated (splice is amortised,
+once per 1024 samples). The concrete instrument overheads were:
+- the HUD's twice-a-second refresh copied and sorted 128-element arrays
+  twice ([...].sort()), filtered twice, spread 128 arguments into Math.max,
+  built strings and wrote the DOM - a periodic allocation spike with GC
+  churn, on a device with no headroom;
+- the reference overlay (already slimmed in 20261123-3) remains a second
+  moving element with its own rAF loop and is inherently the most intrusive
+  measurement mode.
+
+### Changes (diagnostic layer only; no production path changes)
+
+- HUD statistics now come from preallocated Float64Array ring buffers scanned
+  in a single allocation-free pass, percentiles from a reused Uint32Array
+  histogram (0.5 ms buckets), and the DOM text is written only when it
+  changes. The readout no longer allocates on the measurement path.
+- Sharpened, 60 Hz-aware metrics: rAF p99 and max, missed-vsync count
+  (>18.5 ms) alongside >25 ms stalls, tick p95/max. These are the numbers
+  that can actually corroborate what the eye sees when cadence p95 reads
+  clean.
+- playheadHudSnapshot() extended with frame_p99, frame_max, frame_over18_5.
+- Bridge build 20261123-4 with matching cache-buster.
+
+### Verification
+
+Under 4x Chromium CPU throttling (simulating a budget-edge device) both
+counters-only and overlay-on measurement modes paced cleanly (counters-only:
+p95 18.5/p99 19/max 19, 5 of 128 frames >18.5 ms; overlay-on: p95 17.5/p99
+18, zero) - the measurement path no longer distorts cadence even at a
+quarter of desktop speed. Focused e2e (16 incl. metronome, diagnostics,
+playhead suites) passed; qa:quick, qa:browser, qa:a11y, perf:fast enforced
+budgets passed.
+
+### Answers to the standing questions
+
+- Does the instrumentation affect smoothness? It did; the HUD refresh spike
+  is removed and the overlay is documented as the most intrusive mode. The
+  reference overlay remains available but should not be left on during
+  smoothness judgements.
+- Do the measurements represent normal playback? Yes: cadence and tick are
+  sampled inside the production transport frame, not a diagnostic loop. The
+  previous gap was threshold bluntness (p95/>25 ms), now addressed with
+  p99/>18.5 ms.
+
+### User protocol
+
+1. Production confirmation: normal practice, all diagnostics off - expected
+   smooth per the user's own clarification.
+2. If numbers are wanted: Performance counters only (no overlay), read the
+   HUD - now with p99 and >18.5 ms counts that can corroborate perception.
+3. If any jitter is perceived in production, read p99/missed-vsyncs at that
+   moment: values >0 mean real frame lateness on-device; values at zero with
+   visible jitter would point to compositor-side effects (Web Inspector
+   Rendering Frames capture next).
+
+Status: validated and shipped via the standard worktree flow (20261123-4).

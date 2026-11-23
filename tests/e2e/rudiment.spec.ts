@@ -2093,11 +2093,12 @@ test('settings diagnostics toggle the reference overlay at runtime and reset res
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
   await expect(page.locator('.playhead-reference-overlay')).toHaveClass(/visible/);
-  await expect(page.locator('.playhead-debug-hud')).toContainText(/rAF p95 .* ms.*tick p95 .* ms/);
+  await expect(page.locator('.playhead-debug-hud')).toContainText(/rAF p95 .*p99 .* ms.*>18\.5 ms: \d+.*tick p95 .* ms/);
   await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.playheadDebugSnapshot().frames.length)).toBeGreaterThan(8);
   const hud=await page.evaluate(()=>(window as any).rudiment.playheadHudSnapshot());
   expect(hud.build).toMatch(/^\d{8}-\d+$/);
   expect(hud.frame_n).toBeGreaterThan(4);
+  expect(Number.isFinite(hud.frame_p99)).toBe(true);
 
   // Opening settings pauses practice; switching the diagnostic off mid-session
   // must remove the reference without disturbing the transport.

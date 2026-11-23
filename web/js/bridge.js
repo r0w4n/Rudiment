@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261123-3';
+const BRIDGE_BUILD='20261123-4';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -288,14 +288,14 @@ function flushPendingTick(){
   const fn=pendingTick;pendingTick=null;
   if(fn)fn();
 }
-// Deferred-tick cost, bounded to a small window so long sessions cannot
-// accumulate measurement memory. Only collected while a diagnostic mode is
-// active, per the project's opt-in profiling policy.
-const tickDurations=[];
+// Deferred-tick cost, recorded into the HUD's preallocated ring so the
+// measurement itself allocates nothing. Only collected while a diagnostic
+// mode is active, per the project's opt-in profiling policy.
 function recordTickDuration(ms){
   if(!(diagnostics.referenceOverlay||performanceProfile.enabled))return;
-  tickDurations.push(ms);
-  if(tickDurations.length>128)tickDurations.shift();
+  playheadHud.ticks[playheadHud.tickIndex]=ms;
+  playheadHud.tickIndex=(playheadHud.tickIndex+1)%PLAYHEAD_HUD_WINDOW;
+  playheadHud.tickCount=Math.min(playheadHud.tickCount+1,PLAYHEAD_HUD_WINDOW);
 }
 // On-device readout for the playhead-smoothness investigation: live frame
 // pacing and deferred-tick cost. Deliberately independent of the reference
@@ -303,8 +303,21 @@ function recordTickDuration(ms){
 // shown whenever any measurement mode is active (reference overlay or
 // performance counters), so production pacing can be measured without the
 // overlay's visual overhead distorting perception or the GPU load.
+//
+// The readout itself must not disturb what it measures: on the iPad the
+// frame budget sits close to its edge, and an earlier version of this HUD
+// visibly jittered playback by re-sorting copied arrays, filtering and
+// spreading twice a second. Statistics are now computed from preallocated
+// ring buffers in a single allocation-free pass, and the DOM text is only
+// written when it changes. The thresholds are 60 Hz-aware: a frame that runs
+// 18.5-24 ms is late for its vsync and visible as micro-jitter even though
+// older p95/>25 ms gauges read clean.
+const PLAYHEAD_HUD_WINDOW=128,PLAYHEAD_HUD_VSYNC_MS=18.5,PLAYHEAD_HUD_BUCKETS=132;
 const playheadHud={
-  element:null,frameIntervals:[],lastPaint:0,
+  element:null,lastPaint:0,lastText:'',
+  frames:new Float64Array(PLAYHEAD_HUD_WINDOW),frameCount:0,frameIndex:0,
+  ticks:new Float64Array(PLAYHEAD_HUD_WINDOW),tickCount:0,tickIndex:0,
+  histogram:new Uint32Array(PLAYHEAD_HUD_BUCKETS),
   active(){return diagnostics.referenceOverlay||performanceProfile.enabled;},
   syncVisibility(){ if(this.active())this.show(); else this.hide(); },
   show(){
@@ -314,15 +327,37 @@ const playheadHud={
     this.element.setAttribute('aria-hidden','true');
     document.body.appendChild(this.element);
   },
-  hide(){this.element?.remove();},
+  hide(){this.element?.remove();this.lastText='';},
+  reset(){this.frameCount=0;this.frameIndex=0;this.tickCount=0;this.tickIndex=0;this.lastPaint=0;},
   sample(frameIntervalMs){
-    this.frameIntervals.push(frameIntervalMs);
-    if(this.frameIntervals.length>128)this.frameIntervals.shift();
+    this.frames[this.frameIndex]=frameIntervalMs;
+    this.frameIndex=(this.frameIndex+1)%PLAYHEAD_HUD_WINDOW;
+    this.frameCount=Math.min(this.frameCount+1,PLAYHEAD_HUD_WINDOW);
   },
-  percentile(values,p){
-    if(!values.length)return Number.NaN;
-    const sorted=[...values].sort((a,b)=>a-b);
-    return sorted[Math.min(sorted.length-1,Math.floor(sorted.length*p))];
+  // Single allocation-free pass over a ring buffer: max, threshold counts and
+  // a 0.5 ms histogram from which percentiles are read. The histogram array
+  // is reused across calls; nothing here allocates on the measurement path.
+  scan(values,count,index){
+    this.histogram.fill(0);
+    let max=0,overVsync=0,over25=0;
+    for(let seen=0;seen<count;seen++){
+      const position=(index+seen)%PLAYHEAD_HUD_WINDOW,value=values[position];
+      if(value>max)max=value;
+      if(value>PLAYHEAD_HUD_VSYNC_MS)overVsync++;
+      if(value>25)over25++;
+      this.histogram[value>=65.5?PLAYHEAD_HUD_BUCKETS-1:Math.min(PLAYHEAD_HUD_BUCKETS-1,Math.round(value*2))]++;
+    }
+    return {max,overVsync,over25,count};
+  },
+  percentileOf(scanResult,p){
+    const total=scanResult.count;
+    if(!total)return Number.NaN;
+    let accumulated=0;
+    for(let bucket=0;bucket<PLAYHEAD_HUD_BUCKETS;bucket++){
+      accumulated+=this.histogram[bucket];
+      if(accumulated>=total*p)return bucket/2;
+    }
+    return Number.NaN;
   },
   render(now){
     if(now-this.lastPaint<500)return;
@@ -333,22 +368,32 @@ const playheadHud={
       if(!this.active())return;
       this.show();
     }
-    const p95=this.percentile(this.frameIntervals,.95);
-    const stalls=this.frameIntervals.filter(value=>value>25).length;
-    const tickP95=this.percentile(tickDurations,.95);
-    const tickMax=tickDurations.length?Math.max(...tickDurations):Number.NaN;
+    const frameStats=this.scan(this.frames,this.frameCount,this.frameIndex);
+    const frameP95=this.percentileOf(frameStats,.95);
+    const frameP99=this.percentileOf(frameStats,.99);
+    // Reuse the same histogram for the tick window.
+    const tickStats=this.scan(this.ticks,this.tickCount,this.tickIndex);
+    const tickP95=this.percentileOf(tickStats,.95);
     const fixed=value=>Number.isFinite(value)?value.toFixed(1):'—';
-    this.element.textContent=`build ${BRIDGE_BUILD} · rAF p95 ${fixed(p95)} ms · >25 ms: ${stalls} · tick p95 ${fixed(tickP95)} / max ${fixed(tickMax)} ms`;
+    const text=`build ${BRIDGE_BUILD} · rAF p95 ${fixed(frameP95)} / p99 ${fixed(frameP99)} / max ${fixed(frameStats.max)} ms · >${PLAYHEAD_HUD_VSYNC_MS} ms: ${frameStats.overVsync} · >25 ms: ${frameStats.over25} · tick p95 ${fixed(tickP95)} / max ${fixed(tickStats.max)} ms`;
+    if(text!==this.lastText){this.lastText=text;this.element.textContent=text;}
   },
   snapshot(){
+    const frameStats=this.scan(this.frames,this.frameCount,this.frameIndex);
+    const frameP95=this.percentileOf(frameStats,.95);
+    const frameP99=this.percentileOf(frameStats,.99);
+    const tickStats=this.scan(this.ticks,this.tickCount,this.tickIndex);
     return {
       build:BRIDGE_BUILD,
-      frame_p95:this.percentile(this.frameIntervals,.95),
-      frame_over25:this.frameIntervals.filter(value=>value>25).length,
-      frame_n:this.frameIntervals.length,
-      tick_p95:this.percentile(tickDurations,.95),
-      tick_max:tickDurations.length?Math.max(...tickDurations):Number.NaN,
-      tick_n:tickDurations.length,
+      frame_p95:frameP95,
+      frame_p99:frameP99,
+      frame_max:frameStats.max,
+      frame_over18_5:frameStats.overVsync,
+      frame_over25:frameStats.over25,
+      frame_n:frameStats.count,
+      tick_p95:this.percentileOf(tickStats,.95),
+      tick_max:tickStats.max,
+      tick_n:tickStats.count,
     };
   },
 };
@@ -1176,7 +1221,7 @@ const playheadDebug={
     this.run={options,visibleOffset:offset,initialBeat:offset-countBeats,baseBeat:offset,basePerformance:runPerformance,tempoMap,sourceBpm,tempoScale};
     this.runId++;this.lastFrame=null;
     // Fresh measurement windows per run so HUD readings describe this run.
-    playheadHud.frameIntervals.length=0;playheadHud.lastPaint=0;tickDurations.length=0;
+    playheadHud.reset();
     this.lastPaintRow=null;this.lastDatasetRow=null;this.lastDatasetWrite=0;
     if(!this.enabled)return;
     this.raf=requestAnimationFrame(now=>this.frame(now));
