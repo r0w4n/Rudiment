@@ -588,3 +588,91 @@ compositor-side effects, which would need a Safari Web Inspector
 Rendering-Frames trace on device.
 
 Status: implemented and validated; committed via the standard worktree flow.
+
+## Seventh task: fix the confirmed stutter (deferred scoring tick, cheaper beat lights)
+
+On-device bisection (iPad) confirmed: with all optional subsystems off the
+playhead is exceptionally smooth; re-enabling "Scoring & UI updates" causes
+the most significant stutter and "Metronome Beat Lights" a noticeable one,
+at repeatable score positions, without MIDI hits. Local WebKit reproduced the
+combined effect: at 30 BPM the app missed 15-25 frames per 32-second run
+with everything on, while the standalone demo missed none (probe in
+artifacts/tick-bisect.mjs, results artifacts/tick-bisect.json).
+
+### Root cause 1 - scoring/UI tick inside the animation frame (highest impact)
+
+The ~30 Hz WASM scoring/state tick ran inside the transport frame's rAF
+callback, so its cost (scoring advance at note windows, Leptos signal
+updates, serialisation of the growing live-judgement vector) delayed every
+frame's paint commit - at note positions and bar turns, matching the
+"repeatable positions" report.
+
+Fix: the transport frame still decides WHEN scoring work is due, but the
+work is dispatched as a post-commit task (setTimeout(0) from the rAF
+callback runs after that frame's paint). Scoring watermarks are monotonic,
+so when ticks queue up only the newest pending tick runs - no scoring state
+can be lost. flushPendingTick() is called before run teardown (completion,
+pause, stop, restart), so ordering is preserved. The tick's Rust side now
+sends feedback via the existing queue_score_feedback (like the MIDI input
+turn) instead of update_score: a post-commit tick must not reposition the
+playhead, which the transport frame owns. The update_score extern lost its
+last Rust caller and was removed; the JS updateScore export for tests is
+unchanged.
+
+Regression caught by the non-contiguous-bars browser test (4/4): the old
+synchronous initial tick's update_score used to pre-position the notation
+mirror at the run's opening bar before the first animation frame. The
+bridge now does that one deliberate pre-position itself
+(scoreBeatForDisplay extracted from the frame loop; identical mapping, and
+the playhead stays hidden for count-in beats exactly as before).
+
+### Root cause 2 - metronome beat lights
+
+Per-frame: render() built a template string 60 times per second purely to
+compare displayed state (GC churn on tight devices); pulse() re-queried and
+spread the beat dots on every beat. Per-beat: the pulse WAAPI animation
+interpolated box-shadow, which repaints on WebKit for the animation's 180 ms.
+Fixes: numeric component comparison instead of the string, cached dot list
+(invalidated if the markup is rebuilt), and a static glow (inline box-shadow
+for the pulse's duration, guarded against overlapping pulses) while the
+animation keeps transform/opacity keyframes. Visual note: the glow now
+appears at full strength for the pulse's duration and fades with the dot's
+opacity, instead of interpolating shadow values over 180 ms - same timing,
+scale and fade, minutely different glow ramp-in.
+
+### Measured result (WebKit, 1180x820, 30 BPM, 32 s runs)
+
+| Configuration        | before fix            | after fix           |
+|---------------------|-----------------------|---------------------|
+| all-on              | 15-25 stalls >25 ms   | 0-3 stalls (noise)  |
+| state-tick only     | p95 20, max 24         | p95 19, max 20-22   |
+| all-off (baseline)  | 2-3 stalls            | 0-1 stalls          |
+
+The full configuration now measures at the same level as the deliberately
+minimal diagnostic baseline. Headless macOS WebKit cannot establish
+real-device smoothness; on-iPad confirmation with the existing Settings
+diagnostics is the final check.
+
+### Validation
+
+- Focused suites (24 tests incl. per-frame data-beat timing, non-rewind,
+  non-contiguous jumps 3/3, missed notes, practice time, diagnostics
+  toggles): passed.
+- The deterministic start-position regression was found by qa:browser and
+  fixed before commit (see above); clean qa:browser afterwards.
+- qa:quick, qa:browser, qa:a11y: passed. perf:fast enforced budgets passed
+  (midi_callback p95 0.50 ms, score_update p95 0.10 ms, frame intervals
+  unchanged).
+- The scoring path itself is untouched: same engine, same watermarks, same
+  feedback projection - only WHEN/WHERE the tick executes changed.
+
+### Remaining work
+
+- On-iPad verification: normal configuration at the previously problematic
+  positions; compare against the all-off baseline with the Settings
+  diagnostics if anything remains.
+- The live-judgement vector is still serialised in full per feedback change
+  (now off the frame's critical path); reduce only if the iPad retest still
+  shows cost.
+- The hidden-SVG mirror still writes every frame (test contract, see
+  PERFORMANCE.md); unchanged by design.

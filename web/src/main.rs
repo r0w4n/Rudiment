@@ -245,8 +245,6 @@ extern "C" {
     fn bind_score_selection(callback: &Function);
     #[wasm_bindgen(js_namespace = rudiment, js_name = scrollScoreToBeat)]
     fn scroll_score_to_beat(beat: f64);
-    #[wasm_bindgen(js_namespace = rudiment, js_name = updateScore)]
-    fn update_score(beat: f64, judgements: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = queueScoreFeedback)]
     fn queue_score_feedback(judgements: JsValue);
     #[wasm_bindgen(js_namespace = rudiment, js_name = flushScoreFeedback)]
@@ -2232,8 +2230,12 @@ fn App() -> impl IntoView {
                     let visible = live.get_untracked();
                     let judgement_values =
                         serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
-                    let display_beat = frame_sequence.display_beat(visible_beat);
-                    update_score(display_beat, judgement_values);
+                    // Feedback only: the deferred scoring tick runs after the
+                    // frame's commit, so it must not reposition the playhead
+                    // (the transport frame owns position and scrolling, and a
+                    // post-commit beat would rewind it visibly). Same pattern
+                    // as the MIDI input turn.
+                    queue_score_feedback(judgement_values);
                 }
             }) as Box<dyn FnMut(f64, f64, f64)>);
             let done_finish = finish_run.clone();

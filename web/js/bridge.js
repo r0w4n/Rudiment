@@ -191,16 +191,29 @@ const visualMetronome = {
   },
   pulse(event){
     const root=document.getElementById('visual-metronome');if(!root)return;
-    const dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+    // Cache the beat dots: re-querying (and spreading) them on every pulse
+    // was measurable churn at each beat on slower devices. The cache is
+    // invalidated if the markup was rebuilt.
+    if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+    const dots=this.dots;
     const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
     const dot=dots[index];if(!dot)return;
     performanceProfile.record('metronome_visual_jitter_ms',performance.now()-event.performanceTime);
     root.dataset.pulse=String(event.step);root.dataset.scheduledAt=String(event.performanceTime);
-    dot.animate([
-      {transform:'scale(1)',opacity:.72,boxShadow:'0 0 0 transparent'},
-      {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1,boxShadow:index===0?'0 0 11px #e7ad66':'0 0 9px #72d1bd'},
-      {transform:'scale(1)',opacity:.72,boxShadow:'0 0 0 transparent'}
+    // The glow is a static box-shadow for the pulse's duration instead of an
+    // animated shadow: WebKit repaints while interpolating box-shadow every
+    // frame of the 180 ms pulse, and iPadOS showed beat-positioned stutter
+    // with the beat lights enabled. The dot's opacity keyframes still fade
+    // the glow in and out, so the visible pulse keeps its timing and shape.
+    dot.style.boxShadow=index===0?'0 0 11px #e7ad66':'0 0 9px #72d1bd';
+    if(dot.pulseAnimation)dot.pulseAnimation.cancel();
+    const animation=dot.animate([
+      {transform:'scale(1)',opacity:.72},
+      {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1},
+      {transform:'scale(1)',opacity:.72}
     ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
+    dot.pulseAnimation=animation;
+    animation.onfinish=()=>{if(dot.pulseAnimation===animation){dot.pulseAnimation=null;dot.style.boxShadow='';}};
   },
   render(beat,meter,subdivision,now){
     if(!diagnostics.metronomeVisual)return;
@@ -208,14 +221,19 @@ const visualMetronome = {
     meter=Math.max(1,Math.round(meter));subdivision=Math.max(1,subdivision);
     const whole=Math.floor(beat),fraction=((beat%1)+1)%1;
     const beatInBar=((whole%meter)+meter)%meter;
+    const step=Math.floor(beat*subdivision);
     const swing=whole%2===0?-1+fraction*2:1-fraction*2;
     root.style.setProperty('--metronome-swing',String(swing));
-    const display=`${beat<0?'count':'play'}:${beatInBar}:${Math.floor(beat*subdivision)}:${meter}`;
-    if(display!==this.lastDisplayBeat){
-      this.lastDisplayBeat=display;
+    // Compare numeric components instead of building a template string every
+    // frame; this ran 60 times per second and its allocations were pure GC
+    // pressure on devices with a tight frame budget.
+    const last=this.lastDisplayBeat;
+    if(!last||last.count!==beat<0||last.beatInBar!==beatInBar||last.step!==step||last.meter!==meter){
+      this.lastDisplayBeat={count:beat<0,beatInBar,step,meter};
       root.classList.add('active');root.classList.toggle('count-in',beat<0);
-      root.dataset.beat=String(beatInBar+1);root.dataset.step=String(Math.floor(beat*subdivision));
-      root.querySelectorAll('.visual-metronome-beats i').forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
+      root.dataset.beat=String(beatInBar+1);root.dataset.step=String(step);
+      if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+      this.dots.forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
       root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
     }
     while(this.pending.length&&this.pending[0].performanceTime<=now+8){
@@ -223,13 +241,43 @@ const visualMetronome = {
     }
   },
   stop(){
-    this.pending.length=0;this.lastStep=null;this.lastDisplayBeat=null;
+    this.pending.length=0;this.lastStep=null;this.lastDisplayBeat=null;this.dots=null;
     const root=document.getElementById('visual-metronome');if(!root)return;
     root.classList.remove('active','count-in');root.style.setProperty('--metronome-swing','0');
     delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
-    root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>dot.classList.remove('current'));
+    root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>{dot.classList.remove('current');dot.pulseAnimation?.cancel();dot.pulseAnimation=null;dot.style.boxShadow='';});
   }
 };
+
+// Deferred scoring/UI tick: the transport frame decides when scoring work is
+// due, but the work itself runs as a post-commit task (setTimeout(0) from an
+// animation-frame callback fires after that frame's paint), so WASM scoring
+// and Leptos state updates never delay the playhead's commit. Scoring
+// watermarks are monotonic, so when ticks queue up faster than they run,
+// keeping only the newest pending tick cannot lose scoring state - the newer
+// tick's advance subsumes everything the older one would have confirmed.
+let pendingTick=null,pendingTickTimer=0;
+function deferTick(fn){
+  pendingTick=fn;
+  if(!pendingTickTimer)pendingTickTimer=setTimeout(flushPendingTick,0);
+}
+function flushPendingTick(){
+  if(pendingTickTimer){clearTimeout(pendingTickTimer);pendingTickTimer=0;}
+  const fn=pendingTick;pendingTick=null;
+  if(fn)fn();
+}
+
+// Maps a transport beat to the notated score beat shown to the user. Count-in
+// beats are transport time, not playable exercise beats: for a later selected
+// range they numerically overlap the preceding bar, so the playhead stays
+// hidden (-1) until the selected playback offset begins.
+function scoreBeatForDisplay(musicalBeat, offset, options){
+  if(musicalBeat<offset)return -1;
+  const rangeStart=Number(options.displayRangeStart)||0,rangeBeats=Math.max(.001,Number(options.displayRangeBeats)||options.exerciseBeats);
+  const position=((musicalBeat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats;
+  const bars=options.displayBars,barIndex=Math.floor(position/options.meter);
+  return Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+position-barIndex*options.meter:rangeStart+position;
+}
 
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
@@ -468,6 +516,9 @@ const audio = {
     }
   },
   stop() {
+    // Settle any dispatched scoring tick before invalidating the run, so
+    // pause, stop and completion never drop scoring state or feedback.
+    flushPendingTick();
     if(this.activeRun){this.lastBeat=Math.min(this.activeRun.totalBeats,transportBeat(this.activeRun));if(presentation.isActive())presentation.position(this.lastBeat,Tone.getTransport().bpm.value);}
     this.generation++; cancelAnimationFrame(this.raf); this.raf = 0;
     playheadDebug.pause();
@@ -547,6 +598,12 @@ const audio = {
     transport.start(transportStart);
     const initialBeat=offset-countBeats;
     this.lastBeat=initialBeat;
+    // Position the notation mirror at the run's opening beat before the first
+    // animation frame. The synchronous initial Rust tick used to do this via
+    // update_score; periodic ticks now deliver feedback only because they run
+    // post-commit and must not reposition the playhead, so the bridge owns
+    // this one deliberate pre-position (same for count-in: hidden).
+    updateScore(scoreBeatForDisplay(Math.min(initialBeat,options.totalBeats-.000001),offset,options));
     onFrame(initialBeat,performance.now(),runPerformance);
     if(presentation.isActive())presentation.position(initialBeat,transport.bpm.value);
     let lastStateFrame=-Infinity;
@@ -561,13 +618,8 @@ const audio = {
       const beat = offset + elapsedBeats-countBeats;
       const musicalBeat=Math.min(beat,options.totalBeats-.000001);
       this.lastBeat=Math.min(beat,options.totalBeats);
-      const rangeStart=Number(options.displayRangeStart)||0,rangeBeats=Math.max(.001,Number(options.displayRangeBeats)||options.exerciseBeats);
-      // Count-in beats are transport time, not playable exercise beats. For a
-      // later selected range they numerically overlap the preceding bar, so
-      // keep the playhead hidden until the selected playback offset begins.
-      const position=((musicalBeat-rangeStart)%rangeBeats+rangeBeats)%rangeBeats;
-      const bars=options.displayBars,barIndex=Math.floor(position/options.meter);
-      const scoreBeat=musicalBeat<offset?-1:Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+position-barIndex*options.meter:rangeStart+position;
+      const scoreBeat=scoreBeatForDisplay(musicalBeat,offset,options);
+      const bars=options.displayBars;
       if(scoreBeat>=0&&Array.isArray(bars)&&bars.length){
         const displayBar=Math.floor(scoreBeat/options.meter),previous=this.activeRun?.lastDisplayBar;
         if(Number.isInteger(previous)&&displayBar!==previous&&displayBar!==previous+1)scrollScoreToBeat(scoreBeat);
@@ -583,12 +635,23 @@ const audio = {
       // (results are not saved for such a run), isolating its contribution to
       // frame pacing. Run completion is checked below, independent of this.
       if(diagnostics.stateTick&&(now-lastStateFrame>=32||beat>=options.totalBeats)){
-        onFrame(beat,now,this.activeRun?.runPerformance??runPerformance);
         lastStateFrame=now;
+        const tickBeat=beat,tickNow=now,tickStart=this.activeRun?.runPerformance??runPerformance;
+        // iPadOS evidence: running the WASM scoring/UI tick inside this
+        // animation-frame callback was the largest remaining cause of
+        // playhead stutter, because its cost delayed every frame's commit.
+        // Dispatch it as a post-commit task instead: the playhead transform
+        // and scroll commit first, scoring work runs in the gap before the
+        // next frame. This is not a second clock - the transport frame alone
+        // decides when scoring work is due, and flushPendingTick keeps
+        // pause/stop/completion ordered with any dispatched tick.
+        deferTick(()=>{ if(generation===this.generation) onFrame(tickBeat,tickNow,tickStart); });
       }
       if (elapsedBeats >= countBeats+remaining+scoringTailBeats) {
+        // The final scoring tick must land before the run is torn down.
+        flushPendingTick();
         this.stop();
-        // With the scoring/UI tick disabled there is no final update_score to
+        // With the scoring/UI tick disabled there is no final feedback tick to
         // hide the playhead at the end of the run; do it here so a diagnostic
         // run ends visually identical to a normal one.
         if(!diagnostics.stateTick)updateScore(-1);
