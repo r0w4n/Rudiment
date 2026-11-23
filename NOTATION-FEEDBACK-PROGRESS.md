@@ -903,3 +903,62 @@ budgets passed.
    Rendering Frames capture next).
 
 Status: validated and shipped via the standard worktree flow (20261123-4).
+
+## Twelfth task: CDP mechanism hunt - timeline layout and needle recalc (20261123-5)
+
+The user clarified that "everything off" meant the subsystem switches
+(scoring/UI, beat lights, counters) - production is NOT smooth. Each toggle
+still jitters on-device despite measuring 1.0 ms. A Chromium CDP
+Performance.getMetrics probe (artifacts/mechanism-probe.mjs) over 20-second
+windows found the structural mechanisms the timing gauges could not see:
+
+- Scoring & UI tick: +40% layout time and ~8.4 extra style-recalc/layout
+  passes per second - the timeline bar's 10 Hz `style="width:%"` writes, a
+  Leptos reactive effect running in its own task outside the frame's batched
+  pass. Every width change forces a layout.
+- Metronome beat lights: +44% style-recalc duration on every frame - the
+  per-frame custom-property write on the sweep needle, which re-resolves
+  calc() styles for the element on WebKit each frame; per-beat pulse work
+  rides on top.
+- Performance counters: no structural delta at all (recalc/layout/script all
+  at minimal's level) - the earlier deferral, pulse reuse and HUD work
+  already removed the real costs; the counters' remaining footprint is
+  microseconds plus the HUD's 2 Hz text raster. On-device perception of
+  counters-jitter was likely cross-contaminated; retest in isolation.
+
+### Fixes (all visually identical)
+
+1. Timeline fill: full-width element scaled with `transform: scaleX(fraction)`
+   instead of `width: %` - the 10 Hz layout passes are gone (probe:
+   LayoutDuration 0.146 -> 0.101, i.e. minimal's level).
+2. Sweep needle: JS now writes a direct transform on the composited needle
+   (travel measured once from the sweep width and cached; resize
+   re-measures), replacing the per-frame custom property. RecalcStyleDuration
+   0.273 -> 0.239; the residual delta over minimal is the pulse animations
+   themselves, which are the visual design.
+3. The per-beat data-pulse/data-scheduled-at attribute writes were briefly
+   removed, then restored: the visual-metronome e2e observes them as its
+   scheduled-vs-observed timing channel, and as data-* attributes with no
+   matching CSS they carry no style cost.
+
+### Validation
+
+Focused suites (30 tests incl. metronome clock, pulses, playhead,
+diagnostics, count-in, practice) and performance-correctness (4) all pass;
+qa:quick (after cleaning a lint slip in the ignored probe), qa:browser,
+qa:a11y, perf:fast enforced budgets all pass. Probe after the fixes: tick
+layout at minimal level; lights recalc materially reduced; counters
+structurally clean.
+
+### Next if on-device jitter persists
+
+- Beat lights residual = the pulse animation set itself. The remaining
+  structural option is a compositor-driven needle (WAAPI per two-beat cycle,
+  re-synced on tempo changes) which would eliminate the last per-frame
+  write; measure first with the same CDP probe under CPU throttle.
+- Scoring tick residual = 10 recalc passes/s (transform-only now, no
+  layout). If still visible on-device, next is coalescing the timeline
+  update into the frame's batched pass or slowing its cadence.
+- Counters: retest in isolation - the CDP probe exonerates them structurally.
+
+Status: validated and shipped via the standard worktree flow (20261123-5).

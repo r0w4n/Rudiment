@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261123-4';
+const BRIDGE_BUILD='20261123-5';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -171,6 +171,9 @@ document.addEventListener('click',event=>{
   });
 });
 window.addEventListener('resize',positionMetronomePopover);
+// A resize can change the sweep width (responsive CSS); drop the cached
+// needle so the next frame re-measures its travel.
+window.addEventListener('resize',()=>{visualMetronome.needle=null;});
 
 // Native selects can match :focus-visible even when opened by a pointer.
 // Keep keyboard focus visible, but do not retain that ring after mouse/touch.
@@ -202,6 +205,9 @@ const visualMetronome = {
     const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
     const dot=dots[index];if(!dot)return;
     performanceProfile.record('metronome_visual_jitter_ms',performance.now()-event.performanceTime);
+    // data-* attributes: no CSS matches them, so these per-beat writes carry
+    // no style cost, and the visual-metronome e2e observes them as its
+    // scheduled-vs-observed timing channel.
     root.dataset.pulse=String(event.step);root.dataset.scheduledAt=String(event.performanceTime);
     // The glow is a static box-shadow for the pulse's duration instead of an
     // animated shadow: WebKit repaints while interpolating box-shadow every
@@ -237,14 +243,19 @@ const visualMetronome = {
     const beatInBar=((whole%meter)+meter)%meter;
     const step=Math.floor(beat*subdivision);
     const swing=whole%2===0?-1+fraction*2:1-fraction*2;
-    // Write the swing on the NEEDLE, not the metronome root. WebKit lacks
-    // fine-grained custom-property dependency tracking, so a var write on the
-    // root button invalidated style for its whole subtree every frame at
-    // 60 fps; the needle is the variable's only consumer and is already a
-    // composited layer. The root's CSS fallback (--metronome-swing:0) keeps
-    // the idle needle centred.
-    if(!this.needle||!this.needle.isConnected)this.needle=root.querySelector('.visual-metronome-sweep i');
-    this.needle?.style.setProperty('--metronome-swing',String(Math.round(swing*1000)/1000));
+    // Drive the needle with a direct transform write on the composited
+    // element. The previous per-frame custom-property write made every
+    // frame's style recalc ~44% more expensive on WebKit (calc() styles are
+    // re-resolved for the subtree; CDP RecalcStyleDuration measurement),
+    // which the iPad bisect isolated as beat-lights jitter. The travel is
+    // measured from the rendered sweep width and cached; a resize clears the
+    // needle so the next frame recomputes it.
+    if(!this.needle||!this.needle.isConnected){
+      this.needle=root.querySelector('.visual-metronome-sweep i');
+      const sweep=root.querySelector('.visual-metronome-sweep');
+      this.needleTravel=Math.max(4,(sweep?.clientWidth??58)/2-6);
+    }
+    if(this.needle)this.needle.style.transform=`translate3d(${(swing*this.needleTravel).toFixed(2)}px,0,0)`;
     // Compare numeric components instead of building a template string every
     // frame; this ran 60 times per second and its allocations were pure GC
     // pressure on devices with a tight frame budget.
@@ -265,7 +276,8 @@ const visualMetronome = {
     this.pending.length=0;this.lastStep=null;this.lastDisplayBeat=null;this.dots=null;this.needle=null;
     const root=document.getElementById('visual-metronome');if(!root)return;
     root.classList.remove('active','count-in');
-    root.querySelector('.visual-metronome-sweep i')?.style.removeProperty('--metronome-swing');
+    // Reset the needle to its centred CSS position.
+    root.querySelector('.visual-metronome-sweep i')?.style.removeProperty('transform');
     delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
     root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>{dot.classList.remove('current');dot.pulseAnimation?.cancel();dot.pulseAnimation=null;dot.style.boxShadow='';});
   }
