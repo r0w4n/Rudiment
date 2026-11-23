@@ -344,14 +344,21 @@ jobs:
           path: ${{ env.ARTIFACT_DIR }}
           retention-days: 7
 
-      - name: Collect failure diagnostics
+      - name: Collect and redact failure diagnostics
+        id: diagnostics
         if: failure()
         run: |
           set -euo pipefail
           DIAG="${RUNNER_TEMP}/opencode-diagnostics"
+          rm -rf "${DIAG}"
           mkdir -p "${DIAG}"
+          # Minimal, deliberately selected diagnostics: the tail of the
+          # newest agent log rather than the raw log directory.
           if [ -d "$HOME/.local/share/opencode/log" ]; then
-            cp -R "$HOME/.local/share/opencode/log" "${DIAG}/opencode-log" || true
+            LATEST_LOG="$(ls -t "$HOME/.local/share/opencode/log/"*.log 2>/dev/null | head -n 1 || true)"
+            if [ -n "${LATEST_LOG}" ]; then
+              tail -n 200 "${LATEST_LOG}" >"${DIAG}/opencode-log-tail.txt"
+            fi
           fi
           if git rev-parse HEAD >/dev/null 2>&1; then
             git diff "${BASE_SHA}...HEAD" >"${DIAG}/diff.patch" 2>/dev/null || true
@@ -363,12 +370,12 @@ jobs:
           if [ -n "${PR_SUMMARY_FILE:-}" ] && [ -f "${PR_SUMMARY_FILE}" ]; then
             cp -f "${PR_SUMMARY_FILE}" "${DIAG}/"
           fi
-          # Redact secrets with the trusted snapshot before anything uploads.
-          bash "${TRUSTED_SCRIPTS}/redact.sh" "${DIAG}" 2>/dev/null || true
-          echo "Diagnostics collected in ${DIAG}"
+          # Fail closed: if redaction does not succeed, the upload step below
+          # is skipped and no diagnostics leave the runner.
+          bash "${TRUSTED_SCRIPTS}/redact.sh" "${DIAG}"
 
       - name: Upload failure diagnostics
-        if: failure()
+        if: failure() && steps.diagnostics.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: opencode-task-issue-${{ github.event.issue.number || inputs.issue_number }}-diagnostics
@@ -481,70 +488,21 @@ jobs:
       - name: Push branch and open draft pull request
         env:
           GH_TOKEN: ${{ github.token }}
-          GIT_ASKPASS_SCRIPT: ${{ runner.temp }}/git-askpass.sh
+          REPOSITORY: ${{ github.repository }}
+          PUBLISH_WORK: ${{ env.PUBLISH_WORK }}
+          ARTIFACT_DIR: ${{ runner.temp }}/opencode-validated
+          BRANCH: ${{ env.BRANCH }}
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+          BASE_SHA: ${{ env.BASE_SHA }}
+          DEFAULT_BRANCH: ${{ env.DEFAULT_BRANCH }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # Scoped credentials are only established here, in the publish job,
-          # after validation has passed. The token is supplied on demand via
-          # The token is supplied on demand via
-          # GIT_ASKPASS so it never appears in a remote URL or Git config.
-          cd "${PUBLISH_WORK}"
-          git config credential.helper ""
-          mkdir -p "${RUNNER_TEMP}/empty-hooks"
-          git config core.hooksPath "${RUNNER_TEMP}/empty-hooks"
-          cat >"${GIT_ASKPASS_SCRIPT}" <<'ASKPASS'
-          #!/bin/sh
-          case "$1" in
-            Username*) printf '%s\n' "x-access-token" ;;
-            *)         printf '%s\n' "${GH_TOKEN}" ;;
-          esac
-          ASKPASS
-          chmod 700 "${GIT_ASKPASS_SCRIPT}"
-          export GIT_ASKPASS="${GIT_ASKPASS_SCRIPT}"
-          export GIT_TERMINAL_PROMPT=0
-
-          cd "${PUBLISH_WORK}"
-          git remote add publish-origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          cleanup() { git remote remove publish-origin 2>/dev/null || true; }
-          trap cleanup EXIT
-          git push --no-verify publish-origin "${BRANCH}:${BRANCH}"
-          cleanup
-
-          PUBLISH_MODEL="$(. scripts/opencode-ai-task/lib.sh; json_string_value meta.json model)"
-          ISSUE_TITLE="$(cat issue-title.txt)"
-          if [ -f pr-summary.md ]; then
-            SUMMARY="$(cat pr-summary.md)"
-          else
-            SUMMARY="_(no summary produced)_"
-          fi
-          {
-            echo "## Summary"
-            echo
-            echo "${SUMMARY}"
-            echo
-            echo "## Automation notes"
-            echo
-            echo "- Created automatically by OpenCode from issue #${ISSUE_NUMBER} (model: \`${PUBLISH_MODEL}\`)."
-            echo "- Draft pull request: nothing is merged, deployed or pushed to \`${DEFAULT_BRANCH}\` until you review and approve it."
-            echo "- CI checks for this PR were created by \`GITHUB_TOKEN\` and are held for approval; approve the workflow runs from the pull request page to start the repository checks."
-            echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo
-            echo "Closes #${ISSUE_NUMBER}"
-          } >"${RUNNER_TEMP}/opencode-pr-body.md"
-
-          gh pr create --draft \
-            --repo "${GITHUB_REPOSITORY}" \
-            --base "${DEFAULT_BRANCH}" \
-            --head "${BRANCH}" \
-            --title "ai: issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
-            --body-file "${RUNNER_TEMP}/opencode-pr-body.md"
-
-          # GITHUB_TOKEN-created pull_request events require approval before
-          # their workflow runs execute (GitHub documentation, "Events that
-          # trigger workflows").
-          PR_URL="$(gh pr view "${BRANCH}" --repo "${GITHUB_REPOSITORY}" --json url --jq '.url')"
-          echo "::notice::Draft pull request created: ${PR_URL}"
-          echo "::notice::Its CI workflow runs are held for approval; approve them from the pull request page to start the repository checks."
+          # The publication sequence (metadata validation, pull request body
+          # built from the validated artifact, askpass push, draft pull
+          # request, orphaned-branch cleanup) lives in the trusted checkout
+          # and fails closed before any push.
+          bash scripts/opencode-ai-task/publish-pr.sh
 
   # ---------------------------------------------------------------------------
   # Failure notification (comment on the issue; nothing else)
@@ -561,34 +519,29 @@ jobs:
       github.event_name == 'issues'
     permissions:
       issues: write
+      contents: read
     env:
       ISSUE_NUMBER: ${{ github.event.issue.number }}
       BRANCH: ${{ needs.authorise.outputs.branch }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
+      - name: Check out notification script
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Comment on the issue
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          # Job results are passed in through the environment; the notification
+          # script uses plain shell variables only.
+          IMPLEMENT_RESULT: ${{ needs.implement.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          cat >"${RUNNER_TEMP}/failure-comment.md" <<EOF
-          The OpenCode AI task for this issue failed before a draft pull request could be opened.
-
-          Failed stages:
-          EOF
-          if [ "${needs.implement.result}" = "failure" ]; then
-            echo "- implementation (diagnostics artifact: opencode-task-issue-${ISSUE_NUMBER}-diagnostics)" >>"${RUNNER_TEMP}/failure-comment.md"
-          fi
-          if [ "${needs.validate.result}" = "failure" ]; then
-            echo "- validation (the implementation artifact was rejected)" >>"${RUNNER_TEMP}/failure-comment.md"
-          fi
-          if [ "${needs.publish.result}" = "failure" ]; then
-            echo "- publication (branch push or pull request creation)" >>"${RUNNER_TEMP}/failure-comment.md"
-          fi
-          cat >>"${RUNNER_TEMP}/failure-comment.md" <<EOF
-
-          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-
-          Nothing was merged, pushed to \`${DEFAULT_BRANCH}\` or deployed. If the branch \`${BRANCH}\` was pushed, delete it to retrigger the task.
-          EOF
-          gh issue comment "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body-file "${RUNNER_TEMP}/failure-comment.md"
+          bash scripts/opencode-ai-task/notify-failure.sh

@@ -140,6 +140,45 @@ assert_in "$workflow" "diagnostics redacted from the trusted snapshot" \
 assert_in "$workflow" "validation runs from the trusted checkout" \
   "bash scripts/opencode-ai-task/validate-changes.sh"
 
+# --- Publication sequence -----------------------------------------------------
+assert_in "$workflow" "publication runs the trusted publish script" \
+  "bash scripts/opencode-ai-task/publish-pr.sh"
+assert_in "$workflow" "publication reads the validated artifact" \
+  'ARTIFACT_DIR: \$\{\{ runner.temp \}\}/opencode-validated'
+assert_not_in "$workflow" "publication step does not read artifact files from the work clone" \
+  'cat issue-title.txt'
+assert_in "$here/publish-pr.sh" "publication validates metadata before pushing" \
+  "is missing from the validated artifact"
+assert_in "$here/publish-pr.sh" "publication cleans up the branch if PR creation fails" \
+  "no orphaned branch remains"
+assert_not_in "$here/publish-pr.sh" "publish script keeps no token in remote URLs" \
+  "x-access-token:.*@github"
+
+# --- Failure notification -----------------------------------------------------
+assert_in "$workflow" "notification passes stage results via environment" \
+  'IMPLEMENT_RESULT: \$\{\{ needs.implement.result \}\}'
+if grep -qE '\$\{needs\.[a-z]+\.result\}' "$workflow"; then
+  ko "no GitHub expressions interpolated into Bash (\${needs.*})"
+else
+  ok "no GitHub expressions interpolated into Bash (\${needs.*})"
+fi
+assert_in "$workflow" "notification marked continue-on-error" \
+  "continue-on-error: true"
+assert_in "$workflow" "notification script exists and is executable" \
+  "notify-failure.sh"
+
+# --- Redaction is fail closed -------------------------------------------------
+assert_not_in "$workflow" "redaction failures are not suppressed" \
+  'redact.sh" "\$\{DIAG\}" 2>/dev/null \|\| true'
+assert_not_in "$workflow" "redaction failures are not suppressed (bare)" \
+  '\|\| true$.*redact|redact.*\|\| true'
+assert_in "$workflow" "diagnostics upload gated on successful redaction" \
+  "steps.diagnostics.outcome == 'success'"
+assert_in "$here/redact.sh" "redaction verifies its own output" \
+  "verify_clean"
+assert_in "$workflow" "diagnostics use a log tail, not raw agent logs" \
+  "opencode-log-tail.txt"
+
 # --- Artifact-only data flow ---------------------------------------------------
 assert_in "$workflow" "implement uploads only the artifact directory" \
   'name: opencode-implementation'
@@ -150,16 +189,18 @@ assert_not_in "$workflow" "no job uploads repository or .git content" \
 assert_in "$here/lib.sh" "artifact integrity manifest used" "SHA256SUMS"
 
 # --- Hook and credential hygiene in publish -----------------------------------
-assert_in "$workflow" "publish disables hooks before authenticated ops" \
-  'git config core.hooksPath'
-assert_in "$workflow" "publish supplies the token via GIT_ASKPASS" \
+assert_in "$here/publish-pr.sh" "publish disables hooks before authenticated ops" \
+  'git -C "\$\{PUBLISH_WORK\}" config core.hooksPath'
+assert_in "$here/publish-pr.sh" "publish supplies the token via GIT_ASKPASS" \
   'GIT_ASKPASS='
-assert_not_in "$workflow" "no token in remote URLs" \
-  "x-access-token:\\\$"
+assert_not_in "$here/publish-pr.sh" "no token in remote URLs" \
+  "x-access-token:.*@"
 assert_in "$workflow" "publish revalidates before pushing" \
   "bash scripts/opencode-ai-task/apply-validated.sh"
-assert_in "$workflow" "push uses an explicit branch refspec" \
-  'git push --no-verify publish-origin "\$\{BRANCH\}:\$\{BRANCH\}"'
+assert_in "$here/publish-pr.sh" "push uses an explicit branch refspec" \
+  'git -C "\$\{PUBLISH_WORK\}" push --no-verify publish-origin "\$\{BRANCH\}:\$\{BRANCH\}"'
+assert_in "$here/publish-pr.sh" "publish clears credential helpers" \
+  'config credential.helper ""'
 
 # --- Version pinning -----------------------------------------------------------
 assert_in "$workflow" "OpenCode CLI version pinned" \
@@ -170,7 +211,7 @@ assert_not_in "$workflow" "no automatic merge" "gh pr merge"
 assert_not_in "$workflow" "no marking PR ready for review" "gh pr ready"
 assert_not_in "$workflow" "no admin bypass flags" --admin
 assert_not_in "$workflow" "no force pushes" "git push[^|]*--force[^v]"
-assert_in "$workflow" "pull requests are drafts" "gh pr create --draft"
+assert_in "$here/publish-pr.sh" "pull requests are drafts" "gh pr create --draft"
 assert_not_in "$workflow" "no pushes to the default branch" \
   'git push[^|]*"[[:space:]]*"?\$\{DEFAULT_BRANCH\}'
 assert_in "$here/validate-changes.sh" \

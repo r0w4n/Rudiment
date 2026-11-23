@@ -179,7 +179,7 @@ VALIDATED_OUT="$tmp/e2e-validated" ARTIFACT_DIR="$tmp/e2e-art" \
 check "validation accepts the legitimate artifact" "[ '$VRC' -eq 0 ]"
 check "validated artifact exists" "[ -f '$tmp/e2e-validated/SHA256SUMS' ]"
 
-# D. publish: apply, push to the bare remote, create the draft PR via stub gh
+# D. publish: apply, then the full publication sequence via publish-pr.sh
 ARTIFACT_DIR="$tmp/e2e-validated" TRUSTED_REPO="$TRUSTED" BASE_SHA="$BASE_SHA" \
   BRANCH=ai/issue-5 ISSUE_NUMBER=5 WORK_DIR="$tmp/e2e-publish-work" \
   bash "$here/apply-validated.sh" >"$tmp/e2e-apply.out"
@@ -188,26 +188,107 @@ PUBLISH_WORK="$(sed -n 's/^WORK=//p' "$tmp/e2e-apply.out")"
   cd "$PUBLISH_WORK"
   git config user.email publish@example.com
   git config user.name publish
-  git config core.hooksPath "${RUNNER_TEMP:-/nonexistent}/empty-hooks"
-  export PATH="$tmp/fake-bin:$PATH"
-  export GH_TOKEN="$DUMMY_TOKEN"
-  git remote add publish-origin "$BARE3"
-  git push --no-verify publish-origin ai/issue-5:ai/issue-5 >/dev/null 2>&1
-  gh pr create --draft --repo r0w4n/Rudiment --base main \
-    --head ai/issue-5 --title "ai: issue 5: t" --body-file /dev/null >/dev/null 2>&1
 )
+printf 'The feature works and is tested.\n' >"$tmp/e2e-validated/pr-summary.md"
+printf 'Add the widget\n' >"$tmp/e2e-validated/issue-title.txt"
+(
+  cd "$tmp/e2e-validated"
+  sed -i.bak 's/"model": ""/"model": "test"/' meta.json && rm -f meta.json.bak
+  shasum -a 256 patches/*.patch meta.json pr-summary.md issue-title.txt >SHA256SUMS
+)
+export PATH="$tmp/fake-bin:$PATH"
+export GH_TOKEN="$DUMMY_TOKEN"
+: >"$tmp/gh-calls.log"
+PUBLISH_WORK="$PUBLISH_WORK" ARTIFACT_DIR="$tmp/e2e-validated" \
+  BRANCH=ai/issue-5 ISSUE_NUMBER=5 BASE_SHA="$BASE_SHA" DEFAULT_BRANCH=main \
+  REPOSITORY=r0w4n/Rudiment REMOTE_URL="$BARE3" RUN_URL="https://stub.invalid/run/1" \
+  PR_BODY_FILE="$tmp/e2e-pr-body.md" \
+  bash "$here/publish-pr.sh" >"$tmp/publish.out" 2>"$tmp/publish.err" && PRC=0 || PRC=$?
+check "publication succeeds for a valid artifact" "[ '$PRC' -eq 0 ]"
 check "branch pushed to the remote" \
   "git -C '$BARE3' show-ref --verify -q refs/heads/ai/issue-5"
 check "default branch was never pushed or modified" \
   "! git -C '$BARE3' show-ref --verify -q refs/heads/main"
 check "pull request created as a draft" \
   "grep -q -- '--draft' '$tmp/gh-calls.log'"
+check "draft PR head is the task branch" \
+  "grep -q -- '--head ai/issue-5' '$tmp/gh-calls.log'"
+check "PR body uses the artifact summary" \
+  "grep -q 'The feature works and is tested.' '$tmp/e2e-pr-body.md'"
+check "PR body records the artifact model" \
+  "grep -q 'model: \`test\`' '$tmp/e2e-pr-body.md'"
+check "PR title uses the artifact issue title" \
+  "grep -q -- '--title ai: issue #5: Add the widget' '$tmp/gh-calls.log'"
+check "PR body references the issue" \
+  "grep -q 'Closes #5' '$tmp/e2e-pr-body.md'"
 check "no merge command was ever issued" \
   "! grep -q 'pr merge' '$tmp/gh-calls.log'"
-check "no push ever targeted the default branch" \
-  "! grep -qE 'push[^\n]*main' '$tmp/gh-calls.log' 2>/dev/null; true"
+check "publication script removed the temporary remote" \
+  "! git -C '$PUBLISH_WORK' remote | grep -q publish-origin"
+
+# --- invalid metadata is rejected before any push -----------------------------
+rm -rf "$tmp/badmeta-work"
+cp -R "$PUBLISH_WORK" "$tmp/badmeta-work"
+mv "$tmp/e2e-validated/meta.json" "$tmp/meta.backup"
+: >"$tmp/gh-calls.log"
+PUBLISH_WORK="$tmp/badmeta-work" ARTIFACT_DIR="$tmp/e2e-validated" \
+  BRANCH=ai/issue-5 ISSUE_NUMBER=5 BASE_SHA="$BASE_SHA" DEFAULT_BRANCH=main \
+  REPOSITORY=r0w4n/Rudiment REMOTE_URL="$BARE3" \
+  bash "$here/publish-pr.sh" >/dev/null 2>"$tmp/badmeta.err" && BMRC=0 || BMRC=$?
+check "missing meta.json fails the publication" "[ '$BMRC' -ne 0 ]"
+check "missing meta.json fails before any push" \
+  "! grep -q 'push' '$tmp/gh-calls.log'"
+check "missing meta.json produces a controlled error" \
+  "grep -q 'meta.json is missing' '$tmp/badmeta.err'"
+mv "$tmp/meta.backup" "$tmp/e2e-validated/meta.json"
+
+# Malformed metadata: branch mismatch inside meta.json.
+printf '{"issue_number": "5", "branch": "ai/issue-9", "base_sha": "%s", "commit_count": 1, "model": "test"}' "$BASE_SHA" \
+  >"$tmp/e2e-validated/meta.json"
+: >"$tmp/gh-calls.log"
+PUBLISH_WORK="$tmp/badmeta-work" ARTIFACT_DIR="$tmp/e2e-validated" \
+  BRANCH=ai/issue-5 ISSUE_NUMBER=5 BASE_SHA="$BASE_SHA" DEFAULT_BRANCH=main \
+  REPOSITORY=r0w4n/Rudiment REMOTE_URL="$BARE3" \
+  bash "$here/publish-pr.sh" >/dev/null 2>"$tmp/badbranch.err" && MMRC=0 || MMRC=$?
+check "malformed metadata fails the publication" "[ '$MMRC' -ne 0 ]"
+check "malformed metadata fails before any push" \
+  "! grep -q 'push' '$tmp/gh-calls.log'"
+
+# --- failed PR creation deletes the pushed branch (no orphan) -----------------
+# Restore valid metadata (the previous case wrote a malformed one).
+printf '{"issue_number": "5", "branch": "ai/issue-5", "base_sha": "%s", "commit_count": 1, "model": "test", "validated": "true"}' "$BASE_SHA" \
+  >"$tmp/e2e-validated/meta.json"
+cat >"$tmp/fake-bin/gh" <<FAKEGH
+#!/bin/sh
+echo "\$@" >>"$tmp/gh-calls2.log"
+case "\$1 \$2" in
+  "pr create"*) echo "gh: could not create PR" >&2; exit 1 ;;
+  *)            echo '{}' ;;
+esac
+FAKEGH
+chmod +x "$tmp/fake-bin/gh"
+: >"$tmp/gh-calls2.log"
+PUBLISH_WORK="$PUBLISH_WORK" ARTIFACT_DIR="$tmp/e2e-validated" \
+  BRANCH=ai/issue-5 ISSUE_NUMBER=5 BASE_SHA="$BASE_SHA" DEFAULT_BRANCH=main \
+  REPOSITORY=r0w4n/Rudiment REMOTE_URL="$BARE3" \
+  bash "$here/publish-pr.sh" >"$tmp/prfail.out" 2>"$tmp/prfail.err" && PFRC=0 || PFRC=$?
+check "PR creation failure fails the publication" "[ '$PFRC' -ne 0 ]"
+check "failed PR creation deletes the pushed branch (no orphan)" \
+  "! git -C '$BARE3' show-ref --verify -q refs/heads/ai/issue-5"
+check "recovery path is reported" \
+  "grep -q 'opencode-validated' '$tmp/prfail.out' '$tmp/prfail.err' 2>/dev/null"
 
 # Duplicates: same issue with existing branch and open PR must be skipped.
+cat >"$tmp/fake-bin/gh" <<FAKEGH
+#!/bin/sh
+case "\$1 \$2" in
+  "api repos/"*) [ "\${FAKE_BRANCH:-}" = "1" ] || exit 1
+    echo '{}' ;;
+  "pr list"*)    echo "\${FAKE_PRS:-0}" ;;
+  *)             echo '{}' ;;
+esac
+FAKEGH
+chmod +x "$tmp/fake-bin/gh"
 FAKE_BRANCH=1 FAKE_PRS=1 PATH="$tmp/fake-bin:$PATH" GITHUB_REPOSITORY=r0w4n/Rudiment \
   bash "$here/dedup-check.sh" 5 >/dev/null 2>&1 && DEDUP2_RC=0 || DEDUP2_RC=$?
 check "duplicate request is skipped (dedup exit 3)" "[ '$DEDUP2_RC' -eq 3 ]"
