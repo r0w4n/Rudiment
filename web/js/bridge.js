@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261123-2';
+const BRIDGE_BUILD='20261123-3';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -298,10 +298,15 @@ function recordTickDuration(ms){
   if(tickDurations.length>128)tickDurations.shift();
 }
 // On-device readout for the playhead-smoothness investigation: live frame
-// pacing and deferred-tick cost, visible beside the reference overlay so an
-// iPad report can include measurements without a tethered console.
+// pacing and deferred-tick cost. Deliberately independent of the reference
+// overlay: it samples the PRODUCTION transport frame's own cadence and is
+// shown whenever any measurement mode is active (reference overlay or
+// performance counters), so production pacing can be measured without the
+// overlay's visual overhead distorting perception or the GPU load.
 const playheadHud={
   element:null,frameIntervals:[],lastPaint:0,
+  active(){return diagnostics.referenceOverlay||performanceProfile.enabled;},
+  syncVisibility(){ if(this.active())this.show(); else this.hide(); },
   show(){
     if(this.element?.isConnected)return;
     this.element=document.createElement('div');
@@ -325,7 +330,7 @@ const playheadHud={
     if(!this.element?.isConnected){
       // Self-healing creation so URL-seeded diagnostic pages get the HUD
       // without an explicit init call at module scope (TDZ ordering).
-      if(!diagnostics.referenceOverlay)return;
+      if(!this.active())return;
       this.show();
     }
     const p95=this.percentile(this.frameIntervals,.95);
@@ -695,7 +700,13 @@ const audio = {
       // scheduling lead-in. Without the clamp, resuming visibly jumps the
       // playhead backwards before the Tone transport starts.
       const now = performance.now(), elapsedBeats=transport.getTicksAtTime(this.outputTime(now))/transport.PPQ;
-      performanceProfile.record('animation_frame_interval_ms',now-lastAnimationFrame);lastAnimationFrame=now;
+      const frameInterval=now-lastAnimationFrame;
+      performanceProfile.record('animation_frame_interval_ms',frameInterval);lastAnimationFrame=now;
+      // The HUD measures the PRODUCTION transport frame's own cadence (not
+      // the reference overlay's loop), gated so it costs nothing unless a
+      // measurement mode is active. This keeps the readout representative of
+      // normal playback and usable with the overlay disabled.
+      if(playheadHud.active()){playheadHud.sample(frameInterval);playheadHud.render(now);}
       const beat = offset + elapsedBeats-countBeats;
       const musicalBeat=Math.min(beat,options.totalBeats-.000001);
       this.lastBeat=Math.min(beat,options.totalBeats);
@@ -1142,7 +1153,7 @@ function positionAtBeat(beat) {
 // Temporary opt-in comparison clock for diagnosing notation playhead motion.
 // It deliberately does not feed playback, scoring, feedback, or scrolling.
 const playheadDebug={
-  get enabled(){return diagnostics.referenceOverlay},container:null,overlay:null,raf:0,run:null,runId:0,startedAt:performance.now(),frames:[],lastFrame:null,lastRendered:null,
+  get enabled(){return diagnostics.referenceOverlay},container:null,overlay:null,raf:0,run:null,runId:0,startedAt:performance.now(),frames:[],lastFrame:null,lastRendered:null,lastPaintRow:null,lastDatasetRow:null,lastDatasetWrite:0,
   attachContainer(container){
     // Attach unconditionally: the overlay is invisible unless a run is
     // active, and the diagnostic can be enabled at any time from Settings.
@@ -1166,6 +1177,7 @@ const playheadDebug={
     this.runId++;this.lastFrame=null;
     // Fresh measurement windows per run so HUD readings describe this run.
     playheadHud.frameIntervals.length=0;playheadHud.lastPaint=0;tickDurations.length=0;
+    this.lastPaintRow=null;this.lastDatasetRow=null;this.lastDatasetWrite=0;
     if(!this.enabled)return;
     this.raf=requestAnimationFrame(now=>this.frame(now));
   },
@@ -1203,17 +1215,29 @@ const playheadDebug={
   },
   paint(rendered){
     const overlay=this.overlay;if(!overlay)return;
-    const {beat,position,visible}=rendered;
-    overlay.style.top=`${position.y1}px`;
-    overlay.style.height=`${Math.max(1,position.y2-position.y1)}px`;
+    const {beat,position,visible,now}=rendered;
+    // Same compositor discipline as the production playhead: geometry only at
+    // row boundaries (WebKit freezes or re-rasters composited layers whose
+    // geometry mutates every frame), transform per frame, and the diagnostic
+    // data attributes at a low cadence - the reference must not disturb the
+    // playback it measures. The in-memory trace keeps full frame resolution;
+    // only the DOM mirror is throttled.
+    if(position.row!==this.lastPaintRow){
+      overlay.style.top=`${position.y1}px`;
+      overlay.style.height=`${Math.max(1,position.y2-position.y1)}px`;
+      this.lastPaintRow=position.row;
+    }
     overlay.style.transform=`translate3d(${position.x}px,0,0)`;
     overlay.classList.toggle('visible',visible);
-    overlay.dataset.x=String(position.x);overlay.dataset.beat=String(beat);overlay.dataset.row=String(position.row);overlay.dataset.bar=String(position.bar);
+    if(position.row!==this.lastDatasetRow||now-this.lastDatasetWrite>500){
+      this.lastDatasetRow=position.row;this.lastDatasetWrite=now;
+      overlay.dataset.x=String(position.x);overlay.dataset.beat=String(beat);overlay.dataset.row=String(position.row);overlay.dataset.bar=String(position.bar);
+    }
   },
   render(now){
     if(!this.run)return;
     const beat=this.displayBeat(this.beatAt(now)),position=positionAtBeat(beat);
-    const rendered={beat,position,visible:beat>=0&&beat<=scoreData.totalBeats};
+    const rendered={beat,position,visible:beat>=0&&beat<=scoreData.totalBeats,now};
     this.lastRendered=rendered;this.paint(rendered);
     const green=scoreData.playhead,greenX=green?.classList.contains('visible')?Number(green.dataset.x):Number.NaN;
     const previous=this.lastFrame,blueX=rendered.visible?position.x:Number.NaN;
@@ -1224,11 +1248,10 @@ const playheadDebug={
       position_error:Number.isFinite(greenX)&&Number.isFinite(blueX)?greenX-blueX:Number.NaN,
       green_row:green?.classList.contains('visible')?Number(green.dataset.row):Number.NaN,blue_row:rendered.visible?position.row:Number.NaN
     };
+    // Bounded trace: an unbounded per-frame array grows for the whole session
+    // and its GC pauses perturb the very pacing being measured.
     this.frames.push(sample);this.lastFrame=sample;
-    if(Number.isFinite(sample.frame_interval_ms)){
-      playheadHud.sample(sample.frame_interval_ms);
-      playheadHud.render(now);
-    }
+    if(this.frames.length>4096)this.frames.splice(0,1024);
   },
   frame(now){
     if(!this.run)return;
@@ -1258,7 +1281,6 @@ function setDiagnostic(name,value){
     if(diagnostics.referenceOverlay)document.documentElement.dataset.playheadDebug='1';
     else delete document.documentElement.dataset.playheadDebug;
     if(diagnostics.referenceOverlay){
-      playheadHud.show();
       // Enabled mid-run: resume the reference sampling loop.
       if(playheadDebug.run&&!playheadDebug.raf){
         playheadDebug.lastFrame=null;
@@ -1267,10 +1289,12 @@ function setDiagnostic(name,value){
     }else{
       cancelAnimationFrame(playheadDebug.raf);playheadDebug.raf=0;
       playheadDebug.hide();
-      playheadHud.hide();
     }
   }
   if(name==='perfCounters')performanceProfile.enabled=diagnostics.perfCounters;
+  // The HUD shows whenever any measurement mode is active, so production
+  // pacing can be measured with the reference overlay's visual overhead off.
+  if(name==='referenceOverlay'||name==='perfCounters')playheadHud.syncVisibility();
   return true;
 }
 function resetDiagnostics(){for(const name of Object.keys(diagnosticsDefault))setDiagnostic(name,diagnosticsDefault[name]);}

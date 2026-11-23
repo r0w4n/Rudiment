@@ -770,3 +770,65 @@ Decision rule for the next report:
 Status: 20261123-2 validated (16 focused e2e incl. metronome suites, qa:quick,
 qa:browser) and shipped via the standard worktree flow; awaiting on-device
 HUD numbers for 20261123-2.
+
+## Tenth task: instrumentation observer effect confirmed and fixed (20261123-3)
+
+The user's on-device test of build 20261123-2 (30 BPM, count-in 0, 3 bars,
+no MIDI hits) found: rAF p95 17 ms in every configuration, 2-3 frames >25 ms
+per 24 s, and the deferred scoring tick measuring only 1.0/1.0 ms p95/max -
+identical across everything-on / scoring-off / minimal. Visually, however,
+the stutter tracked the instrumentation itself: overlay + counters on =
+micro-stutter; counters off = less; reference overlay off = completely
+smooth. The HUD could not be tested with the overlay off because its sampling
+lived in the reference overlay's own rAF loop (coupling bug).
+
+### Interpretation (accepted as the current best explanation)
+
+The production transport frame measures clean on the iPad: 60 fps cadence,
+~1 ms scoring tick, negligible stalls. The previously reported tick/lights
+jitter signatures were observed with the diagnostic overlay active; the
+overlay is a second full-height moving element (with a box-shadow glow, a
+per-frame geometry write and four per-frame DOM attribute writes, plus an
+unbounded per-frame trace array) riding its own rAF callback, and the
+performance counters add two performance.now() calls plus array churn at
+every instrumented site every frame. Those costs plausibly dominated the
+marginal differences the earlier bisections isolated. The tick deferral and
+metronome fixes remain valid reductions, but the residual visible issue in
+instrumented sessions was the instrumentation. The production playhead now
+appears smooth with diagnostics off (user observation, pending their
+confirmation in normal use).
+
+### Changes (diagnostic layer only; no production playhead changes)
+
+- The HUD is decoupled from the reference overlay: it now samples the
+  PRODUCTION transport frame's own cadence (gated, zero cost when idle) and
+  is shown whenever the reference overlay OR performance counters are on.
+  Counters-only measurement is now possible - no blue line, small overhead.
+- The reference overlay applies the production overlay's compositor
+  discipline: geometry only at row boundaries (it previously wrote top/height
+  every frame), DOM data attributes at row changes plus a 500 ms cadence
+  (the in-memory trace keeps full frame resolution), the glow box-shadow is
+  removed from the dashed line, and the per-frame trace is bounded (4096
+  frames, dropping the oldest quarter) so long sessions no longer accrue GC
+  pressure from the diagnostic itself.
+- Drawer guidance now states the reference overlay adds its own moving
+  overlay and points to counters-only for undisturbed measurement.
+- Bridge build 20261123-3 with matching cache-buster.
+
+### Validation
+
+Extended diagnostics e2e (counters-only HUD visible with overlay off; reset
+removes HUD), opt-in URL-seeded diagnostic test, minimal-configuration test:
+3 passed. qa:quick, qa:browser, qa:a11y, perf:fast enforced budgets: all
+passed (midi_callback p95 0.50 ms, score_update p95 0.10 ms).
+
+### Protocol for the user's confirmation
+
+1. Normal practice with all diagnostics off (a reload restores defaults):
+   the playhead should be smooth - this is the success criterion.
+2. For numbers without visual disturbance: Settings -> Performance counters
+   only; read the HUD (now visible without the blue line).
+3. The blue reference overlay remains available for like-for-like visual
+   comparison when wanted, with its overhead now reduced.
+
+Status: validated and shipped via the standard worktree flow (20261123-3).

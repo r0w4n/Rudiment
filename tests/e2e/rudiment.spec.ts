@@ -2105,6 +2105,10 @@ test('settings diagnostics toggle the reference overlay at runtime and reset res
   await overlayToggle.uncheck();
   await expect(page.locator('.playhead-reference-overlay')).not.toHaveClass(/visible/);
   await expect(page.locator('.playhead-debug-hud')).toHaveCount(0);
+  // Counters-only measurement mode: the HUD must be readable without the
+  // reference overlay's own visual overhead.
+  await page.getByLabel('Performance counters').check();
+  await expect(page.locator('.playhead-debug-hud')).toHaveCount(1);
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:'Resume'}).click();
   await page.waitForTimeout(250);
@@ -2115,6 +2119,8 @@ test('settings diagnostics toggle the reference overlay at runtime and reset res
   await page.getByRole('button',{name:'Reset diagnostics'}).click();
   await expect(overlayToggle).not.toBeChecked();
   await expect(page.getByLabel('Scoring and UI updates')).toBeChecked();
+  await expect(page.getByLabel('Performance counters')).not.toBeChecked();
+  await expect(page.locator('.playhead-debug-hud')).toHaveCount(0);
   await page.getByRole('button',{name:'Close settings'}).first().click();
 });
 
