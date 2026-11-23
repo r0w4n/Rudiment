@@ -48,7 +48,10 @@ Do NOT merge; do not centralise; do not add model routing.
       (152 assertions total).
 - [x] `bash -n` all scripts and run blocks; `actionlint` clean;
       `npm run qa:quick` 5/5; pre-commit hook passed.
-- [ ] Push; PR #9 description updated; GitHub PR checks observed.
+- [x] Pushed (`3113819..566ec01`); PR #9 description updated; GitHub PR
+      checks all pass (Code quality 4m56s, Browser correctness/accessibility
+      6m54s, CodeQL js+rust, fast performance 3m16s; `extended` skipped as
+      designed).
 
 ### Test session notes (latest run)
 - 2026-11-23: all fixes implemented; suites listed above executed locally
