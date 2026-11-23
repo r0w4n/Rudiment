@@ -489,3 +489,102 @@ context. No Rudiment code is loaded by the demo page.
   evidence should any per-frame cost reduction be attempted (the
   performance-correctness suite constrains how - see the reverted
   mirror-throttle attempt recorded in PERFORMANCE.md).
+
+## Sixth task: Settings diagnostics + iPad findings
+
+User's iPad findings (2022 iPad Air):
+- The deployed reference animation demo is **completely smooth** in both
+  Safari and Chrome on the iPad, while Rudiment's notation playhead still
+  micro-stutters at 30 BPM without MIDI hits. Environmental/device causes are
+  therefore largely excluded; the residual is app-specific per-frame work.
+- A valuable unreproducible observation: after navigating away from Safari and
+  returning, the app entered an abnormal state - the playhead kept moving,
+  other playback functionality appeared to stop, and the playhead became
+  completely smooth. Something that normally runs alongside the playhead may
+  contribute to the jitter; no subsystem was assumed responsible.
+- `playhead-debug=1` still shows small synchronised green/blue micro-stutters,
+  unchanged by muting the audible metronome.
+
+### Implemented (branch `feat/diagnostics-settings`)
+
+A clearly separated "Playhead diagnostics" section at the bottom of the
+Settings drawer, so iPad experiments no longer need URL editing:
+
+- Reference playhead overlay + trace (was `?playhead-debug=1`) - runtime
+  toggleable, including mid-run; the underlying `playheadDebug` object now
+  always remembers the active run so Settings can enable the overlay during
+  playback, and `pause`/`hide`/`attachContainer` lost their enabled guards.
+- Visual hit feedback (was `visual-hits=0`/`feedback=0`).
+- Metronome beat lights (was `metronome-animation=0`).
+- Auto-scroll camera - new; gates the per-frame `scrollTop` writes in
+  `updateScore` only.
+- Scoring & UI updates - new; gates the ~30 Hz `onFrame` WASM scoring/state
+  tick inside the transport frame. Transport, playhead and completion keep
+  running. This deliberately reproduces the reported abnormal state
+  (playhead-only) as an experiment.
+- Performance counters (was `__RUDIMENT_PERF__`).
+- "Minimal playhead-only" preset (tick/feedback/beat lights off, camera and
+  reference overlay on) and "Reset diagnostics" (restores the URL-seeded
+  defaults; a plain reload is normal operation).
+- Link to the deployed reference animation at the current tempo
+  (`./public/animation-demo.html?bpm=...`).
+
+Safety: the switches are session-only (never persisted with settings, never
+seeded into saved profiles). A run whose scoring/UI tick was disabled - from
+its start or part-way - is marked invalid: `finish_run` returns to idle
+without touching the scorer (which may never have been created), never
+saves, compares or shows statistics, and shows no error. URL parameters still
+seed the switches, and existing URL-based tests are unchanged. With the tick
+disabled, the bridge performs the final playhead hide at completion itself.
+
+Bridge surface: `rudiment.diagnosticsSnapshot()`,
+`rudiment.setDiagnostic(name, value)`, `rudiment.resetDiagnostics()`.
+Rust externs `set_diagnostic`/`diagnostics_snapshot` seed drawer state on
+mount.
+
+### Validation
+
+- New e2e: settings diagnostics toggle the reference overlay at runtime and
+  reset restores defaults; minimal playhead-only keeps the transport moving,
+  completes, hides the playhead, shows no error, saves no session, and
+  resetting restores saving. 3 passed.
+- Regression set (playhead, practice-time, feedback, dense traffic, restart):
+  19 passed plus the documented pre-existing 'Restart clears painted note
+  feedback' flake, reproduced identically (1/3) on unmodified main with its
+  own dist.
+- `npm run build`, `qa:quick`, `qa:browser -- --skip-build` (clean rerun
+  after one four-failure audio-timing flake run; all four passed in
+  isolation), `qa:a11y -- --skip-build`, `perf:fast` enforced budgets: all
+  passed. Perf numbers unchanged from the previous accepted run
+  (midi_callback p95 0.50 ms, score_update p95 0.10 ms).
+
+### Investigation notes - what each switch isolates
+
+The iPad demo result (smooth reference vs stuttering app on the same device,
+same browser) plus the macOS WebKit contrast (app ~0.6 stalls/s, demo zero)
+confine the cause to the app's per-frame main-thread work. Ranked candidates
+and what the switches test on-device:
+
+1. In-frame ~30 Hz scoring/UI tick (WASM advance, Leptos signal updates) -
+   the abnormal smooth state is exactly this configuration, so it is the
+   leading hypothesis. Test: "Minimal playhead-only" at 30 BPM; if smooth,
+   re-enable the tick alone. Confidence: medium (state-tick-off matches the
+   observed abnormal state; parity localisation was inconclusive).
+2. Metronome beat lights, auto-scroll camera, visual feedback - secondary
+   per-frame/event work; toggles allow one-at-a-time re-enablement.
+3. Hidden-SVG mirror writes - cannot be toggled: the performance-correctness
+   suite samples `data-beat` per frame (see PERFORMANCE.md). Known residual.
+4. Tone/audio subsystem - not toggleable without stopping the clock; the
+   audible metronome was already excluded by the user (muting made no
+   difference).
+
+Suggested iPad protocol: Settings -> "Minimal playhead-only" at 30 BPM and
+observe; then re-enable switches one at a time (tick first, then beat
+lights, camera, feedback) until the stutter returns, exporting
+`rudiment.exportPlayheadDebugCsv()` traces at each step if possible. If even
+the minimal configuration stutters, the remaining suspect is the transport
+frame's baseline work (Tone ticks computation + updateScore) or
+compositor-side effects, which would need a Safari Web Inspector
+Rendering-Frames trace on device.
+
+Status: implemented and validated; committed via the standard worktree flow.

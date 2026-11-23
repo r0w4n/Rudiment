@@ -11,10 +11,24 @@ const STICKING_PLACEMENT = AnnotationVerticalJustify.BOTTOM;
 const SYSTEM_MARK_BASELINE_CLEARANCE = 24;
 const bridgeUrl = document.currentScript?.src || document.querySelector('script[src*="bridge.js"]')?.src || document.baseURI;
 const publicAsset = path => new URL(path, bridgeUrl).toString();
-const playheadDebugEnabled = new URLSearchParams(location.search).get('playhead-debug') === '1';
-if(playheadDebugEnabled)document.documentElement.dataset.playheadDebug='1';
-const metronomeVisualEnabled = !['0','off','false'].includes((new URLSearchParams(location.search).get('metronome-animation')||'').toLowerCase());
-const visualHitsEnabled = !['0','off','false'].includes((new URLSearchParams(location.search).get('visual-hits')||(new URLSearchParams(location.search).get('feedback')||'')).toLowerCase());
+// Session-only diagnostic switches for the playhead-smoothness investigation.
+// URL parameters seed them so existing links and browser tests keep working;
+// the Settings drawer toggles them at runtime so iPad experiments do not
+// require URL editing. Nothing here persists: a reload always restores normal
+// operation, and diagnostic mode never alters scoring, saving or playback
+// unless the switch itself says so (the scoring/UI tick, which is also the
+// only switch that suppresses result saving).
+const diagnosticsParams = new URLSearchParams(location.search);
+const diagnosticsDefault = {
+  referenceOverlay: diagnosticsParams.get('playhead-debug') === '1',
+  visualFeedback: !['0','off','false'].includes((diagnosticsParams.get('visual-hits')||(diagnosticsParams.get('feedback')||'')).toLowerCase()),
+  metronomeVisual: !['0','off','false'].includes((diagnosticsParams.get('metronome-animation')||'').toLowerCase()),
+  stateTick: true,
+  autoScroll: true,
+  perfCounters: globalThis.__RUDIMENT_PERF__===true,
+};
+const diagnostics = { ...diagnosticsDefault };
+if(diagnostics.referenceOverlay)document.documentElement.dataset.playheadDebug='1';
 const dbPromise = openDB(DB_NAME, DB_VERSION, {
   upgrade(db) {
     if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' });
@@ -171,7 +185,7 @@ document.addEventListener('keydown',event=>{
 const visualMetronome = {
   pending: [], lastStep: null, lastDisplayBeat: null,
   schedule(performanceTime,beat,meter,subdivision){
-    if(!metronomeVisualEnabled)return;
+    if(!diagnostics.metronomeVisual)return;
     const step=Math.round(beat*Math.max(1,subdivision));
     this.pending.push({performanceTime,beat,meter:Math.max(1,Math.round(meter)),step});
   },
@@ -189,7 +203,7 @@ const visualMetronome = {
     ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
   },
   render(beat,meter,subdivision,now){
-    if(!metronomeVisualEnabled)return;
+    if(!diagnostics.metronomeVisual)return;
     const root=document.getElementById('visual-metronome');if(!root)return;
     meter=Math.max(1,Math.round(meter));subdivision=Math.max(1,subdivision);
     const whole=Math.floor(beat),fraction=((beat%1)+1)%1;
@@ -564,11 +578,22 @@ const audio = {
       visualMetronome.render(musicalBeat,options.meter,subdivision,now);
       // UI counters and scoring state do not need 60 updates per second. Keep
       // the playhead on every display frame, independent of the WASM work.
-      if(now-lastStateFrame>=32||beat>=options.totalBeats){
+      // The scoring/UI tick is also a diagnostic switch: with it off, the
+      // playhead and transport keep moving while the scoring/state work stops
+      // (results are not saved for such a run), isolating its contribution to
+      // frame pacing. Run completion is checked below, independent of this.
+      if(diagnostics.stateTick&&(now-lastStateFrame>=32||beat>=options.totalBeats)){
         onFrame(beat,now,this.activeRun?.runPerformance??runPerformance);
         lastStateFrame=now;
       }
-      if (elapsedBeats >= countBeats+remaining+scoringTailBeats) { this.stop(); onDone(); } else this.raf = requestAnimationFrame(frame);
+      if (elapsedBeats >= countBeats+remaining+scoringTailBeats) {
+        this.stop();
+        // With the scoring/UI tick disabled there is no final update_score to
+        // hide the playhead at the end of the run; do it here so a diagnostic
+        // run ends visually identical to a normal one.
+        if(!diagnostics.stateTick)updateScore(-1);
+        onDone();
+      } else this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
     playheadDebug.start({options,offset,tempoMap,sourceBpm,tempoScale,runPerformance});
@@ -973,9 +998,11 @@ function positionAtBeat(beat) {
 // Temporary opt-in comparison clock for diagnosing notation playhead motion.
 // It deliberately does not feed playback, scoring, feedback, or scrolling.
 const playheadDebug={
-  enabled:playheadDebugEnabled,container:null,overlay:null,raf:0,run:null,runId:0,startedAt:performance.now(),frames:[],lastFrame:null,lastRendered:null,
+  get enabled(){return diagnostics.referenceOverlay},container:null,overlay:null,raf:0,run:null,runId:0,startedAt:performance.now(),frames:[],lastFrame:null,lastRendered:null,
   attachContainer(container){
-    if(!this.enabled||!container)return;
+    // Attach unconditionally: the overlay is invisible unless a run is
+    // active, and the diagnostic can be enabled at any time from Settings.
+    if(!container)return;
     this.container=container;
     if(!container.style.position)container.style.position='relative';
     if(!this.overlay||!this.overlay.isConnected){
@@ -987,24 +1014,24 @@ const playheadDebug={
     if(this.lastRendered)this.paint(this.lastRendered);
   },
   start({options,offset,tempoMap,sourceBpm,tempoScale,runPerformance}){
-    if(!this.enabled)return;
     this.pause();
     const countBeats=Math.max(0,Number(options.countInBeats)||0);
+    // Always remember the run so Settings can enable the reference overlay
+    // mid-practice; only sample frames while the diagnostic is on.
     this.run={options,visibleOffset:offset,initialBeat:offset-countBeats,baseBeat:offset,basePerformance:runPerformance,tempoMap,sourceBpm,tempoScale};
     this.runId++;this.lastFrame=null;
+    if(!this.enabled)return;
     this.raf=requestAnimationFrame(now=>this.frame(now));
   },
   pause(){
-    if(!this.enabled)return;
     cancelAnimationFrame(this.raf);this.raf=0;this.run=null;this.lastFrame=null;
   },
   hide(){
-    if(!this.enabled)return;
     this.lastRendered=null;
     this.overlay?.classList.remove('visible');
   },
   setTempo(bpm){
-    if(!this.enabled||!this.run)return;
+    if(!this.run)return;
     const now=performance.now(),beat=this.beatAt(now);
     this.run.baseBeat=beat;this.run.basePerformance=now;this.run.tempoScale=bpm/this.run.sourceBpm;
   },
@@ -1070,7 +1097,31 @@ const playheadDebug={
     downloadText(this.csv(),'rudiment-playhead-debug.csv','text/csv');return true;
   }
 };
-if(playheadDebugEnabled)console.info('[Rudiment playhead debug] Blue reference enabled. Export with rudiment.exportPlayheadDebugCsv().');
+if(diagnostics.referenceOverlay)console.info('[Rudiment playhead debug] Blue reference enabled. Export with rudiment.exportPlayheadDebugCsv().');
+// Runtime application for the Settings drawer's diagnostic switches. Every
+// switch is reversible and nothing is persisted; `resetDiagnostics` restores
+// the URL-seeded defaults, which for a plain app load means normal operation.
+function setDiagnostic(name,value){
+  if(!Object.hasOwn(diagnosticsDefault,name))return false;
+  diagnostics[name]=Boolean(value);
+  if(name==='referenceOverlay'){
+    if(diagnostics.referenceOverlay)document.documentElement.dataset.playheadDebug='1';
+    else delete document.documentElement.dataset.playheadDebug;
+    if(diagnostics.referenceOverlay){
+      // Enabled mid-run: resume the reference sampling loop.
+      if(playheadDebug.run&&!playheadDebug.raf){
+        playheadDebug.lastFrame=null;
+        playheadDebug.raf=requestAnimationFrame(now=>playheadDebug.frame(now));
+      }
+    }else{
+      cancelAnimationFrame(playheadDebug.raf);playheadDebug.raf=0;
+      playheadDebug.hide();
+    }
+  }
+  if(name==='perfCounters')performanceProfile.enabled=diagnostics.perfCounters;
+  return true;
+}
+function resetDiagnostics(){for(const name of Object.keys(diagnosticsDefault))setDiagnostic(name,diagnosticsDefault[name]);}
 function onScoreScroll(event){
   if(scoreData.container===event.currentTarget)scoreData.cameraY=scoreData.container.scrollTop;
 }
@@ -1169,7 +1220,7 @@ function noteHeadY(meta,fallback){
   scoreData.headYCache?.set(head,value);return value;
 }
 function applyJudgements(judgements) {
-  if(!visualHitsEnabled)return;
+  if(!diagnostics.visualFeedback)return;
   if(judgements===scoreData.lastJudgements)return;
   const profileStart=performanceProfile.enabled?performance.now():0;
   scoreData.lastJudgements=judgements;
@@ -1243,8 +1294,9 @@ function updateScore(beat, judgements, loopAware=false) {
     const preservedBar=scoreData.preserveCameraBar;
     const stillPreserving=preservedBar!==null&&(position.bar===preservedBar||beat<=(preservedBar+1)*scoreData.meter+.001);
     // A scroll listener tracks a deliberate seek's viewport without reading
-    // layout on every ordinary playback frame.
-    if(!stillPreserving){
+    // layout on every ordinary playback frame. The diagnostic switch keeps
+    // the camera fixed so per-frame scroll work can be isolated.
+    if(diagnostics.autoScroll&&!stillPreserving){
       scoreData.preserveCameraBar=null;
       const cameraY=cameraAtBeat(beat,position);
       if(Math.abs(cameraY-scoreData.cameraY)>.05){container.scrollTop=cameraY;scoreData.cameraY=cameraY;}
@@ -1263,7 +1315,7 @@ function flushScoreFeedback(){
 }
 function queueScoreFeedback(judgements){
   if(!Array.isArray(judgements))return;
-  if(!visualHitsEnabled)return;
+  if(!diagnostics.visualFeedback)return;
   // A scoring update is a replacement projection, not an append-only event:
   // a later hit may correct an earlier provisional match. Retain only the
   // newest projection when several MIDI messages arrive in one browser turn.
@@ -1280,7 +1332,7 @@ function queueScoreFeedback(judgements){
 function clearScoreFeedback(preserveViewport=false) {
   cancelQueuedScoreFeedback();
   const empty=[];
-  if(visualHitsEnabled){
+  if(diagnostics.visualFeedback){
     const painted=scoreData.paintedGroups??new Set();
     for(const group of painted){
       delete group.dataset.judgement;group.classList.remove('excellent-flash');
@@ -1383,7 +1435,7 @@ window.rudiment={
   bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,savedNotationTheme,saveNotationTheme,
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):Number.NaN,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,flushScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),playheadDebugSnapshot:()=>playheadDebug.snapshot(),resetPlayheadDebug:()=>playheadDebug.reset(),playheadDebugCsv:()=>playheadDebug.csv(),exportPlayheadDebugCsv:()=>playheadDebug.export(),
+  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,flushScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),playheadDebugSnapshot:()=>playheadDebug.snapshot(),resetPlayheadDebug:()=>playheadDebug.reset(),playheadDebugCsv:()=>playheadDebug.csv(),exportPlayheadDebugCsv:()=>playheadDebug.export(),diagnosticsSnapshot:()=>({...diagnostics}),setDiagnostic:(name,value)=>setDiagnostic(name,value),resetDiagnostics:()=>resetDiagnostics(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };

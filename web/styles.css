@@ -526,3 +526,4 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .adaptive-status button.primary{background:linear-gradient(180deg,#82dbc7,#62c4ae);color:#09241d;border-color:#62c4ae}
 
 .tempo-control input{min-height:24px;min-width:24px}
+.drawer-scroll a.wide-button{display:inline-block;box-sizing:border-box;min-height:36px;border:1px solid #39453f;color:#c2cbc6;background:#1b211e;border-radius:9px;padding:9px 10px;font-size:11px;text-decoration:none;text-align:center}.drawer-scroll a.wide-button:hover{background:#222b27;border-color:#56665e}

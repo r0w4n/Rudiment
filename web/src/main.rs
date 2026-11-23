@@ -183,6 +183,18 @@ enum RepeatTolerance {
     Standard,
     Strict,
 }
+// Runtime state of the bridge's session-only diagnostic switches, seeded
+// once on mount; camelCase matches the bridge's `diagnosticsSnapshot()` keys.
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticsSnapshot {
+    reference_overlay: bool,
+    visual_feedback: bool,
+    metronome_visual: bool,
+    state_tick: bool,
+    auto_scroll: bool,
+    perf_counters: bool,
+}
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = rudiment, js_name = ensureAudio)]
@@ -281,6 +293,10 @@ extern "C" {
     fn load_profiles() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = resetLocalSetup)]
     fn reset_local_setup() -> Promise;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = setDiagnostic)]
+    fn set_diagnostic(name: &str, value: bool);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = diagnosticsSnapshot)]
+    fn diagnostics_snapshot() -> JsValue;
     #[wasm_bindgen(js_namespace = rudiment, js_name = saveImport)]
     fn save_import(hash: &str, name: &str, bytes: &Uint8Array, metadata: JsValue) -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = loadImports)]
@@ -1734,6 +1750,21 @@ fn App() -> impl IntoView {
     let library_personal = RwSignal::new(false);
     let library_page = RwSignal::new(0usize);
     let library_difficulty = RwSignal::new(None::<Difficulty>);
+    // Playhead-smoothness diagnostics: session-only switches seeded from the
+    // bridge so URL parameters still work, while the Settings drawer toggles
+    // them at runtime without URL editing. They are never persisted.
+    let diagnostics_state: DiagnosticsSnapshot =
+        serde_wasm_bindgen::from_value(diagnostics_snapshot()).unwrap_or_default();
+    let diagnostic_reference_overlay = RwSignal::new(diagnostics_state.reference_overlay);
+    let diagnostic_visual_feedback = RwSignal::new(diagnostics_state.visual_feedback);
+    let diagnostic_metronome_visual = RwSignal::new(diagnostics_state.metronome_visual);
+    let diagnostic_state_tick = RwSignal::new(diagnostics_state.state_tick);
+    let diagnostic_auto_scroll = RwSignal::new(diagnostics_state.auto_scroll);
+    let diagnostic_perf_counters = RwSignal::new(diagnostics_state.perf_counters);
+    // A run whose scoring/UI tick was disabled — from its start or part-way —
+    // is a diagnostic run: its summary is not a valid performance and must
+    // not be saved or compared.
+    let diagnostic_run_invalid = RwSignal::new(false);
     let result_modal_open = RwSignal::new(false);
     let result_dismiss_after_ms = RwSignal::new(f64::INFINITY);
     let auto_show_statistics = RwSignal::new(true);
@@ -1887,6 +1918,16 @@ fn App() -> impl IntoView {
     let finish_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
         phase.set("finishing".into());
+        // Diagnostic runs (scoring/UI tick disabled at any point) are not
+        // performances: skip the scorer — which may never have been created —
+        // never save or compare, and return to idle without an error.
+        if diagnostic_run_invalid.get_untracked() || !diagnostic_state_tick.get_untracked() {
+            scoring_for_finish.borrow_mut().take();
+            result.set(None);
+            comparison.set(None);
+            phase.set("complete".into());
+            return;
+        }
         let attempts = repeat_attempt_summaries.get_untracked();
         let summary = if attempts.is_empty() {
             let mut scoring = scoring_for_finish.borrow_mut();
@@ -1979,6 +2020,9 @@ fn App() -> impl IntoView {
             } else {
                 "starting".into()
             });
+            // Each new run starts diagnostically clean; the flag is set when
+            // the scoring/UI tick is disabled while a run is active.
+            diagnostic_run_invalid.set(false);
             progress.set(offset - count_beats);
             timeline_beat.set(offset - count_beats);
             let current_exercise = exercise.get_untracked();
@@ -4008,6 +4052,18 @@ fn App() -> impl IntoView {
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
             <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{pending_clear_history.set(true);}>"Clear history"</button></div><button class="wide-button" on:click=move |_|{pending_reset_settings.set(true);}>"Reset settings & mappings"</button></section>
+            <section id="diagnostics-settings"><h3>"Playhead diagnostics"</h3>
+              <p class="help">"Temporary switches for investigating playhead smoothness. They are session-only: never saved with your settings, and reloading the page restores normal operation. The ?playhead-debug=1, visual-hits and metronome-animation URL parameters still work and these toggles reflect them."</p>
+              <label class="toggle-row"><span>"Reference playhead overlay + trace"<small>"Blue wall-clock reference line beside the notation playhead. Export its frame trace from a tethered console with rudiment.exportPlayheadDebugCsv()."</small></span><input type="checkbox" aria-label="Reference playhead overlay" prop:checked=move || diagnostic_reference_overlay.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_reference_overlay.set(value);set_diagnostic("referenceOverlay",value);}/></label>
+              <label class="toggle-row"><span>"Visual hit feedback"<small>"Notehead colours, accuracy halos and unmatched-strike markers. Scoring itself is unaffected."</small></span><input type="checkbox" aria-label="Visual hit feedback" prop:checked=move || diagnostic_visual_feedback.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_visual_feedback.set(value);set_diagnostic("visualFeedback",value);}/></label>
+              <label class="toggle-row"><span>"Metronome beat lights"<small>"The beat lights and count labels above the transport. The audible metronome has its own mute."</small></span><input type="checkbox" aria-label="Metronome beat lights" prop:checked=move || diagnostic_metronome_visual.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_metronome_visual.set(value);set_diagnostic("metronomeVisual",value);}/></label>
+              <label class="toggle-row"><span>"Auto-scroll camera"<small>"The score page follow-scroll. The playhead keeps moving without it."</small></span><input type="checkbox" aria-label="Auto-scroll camera" prop:checked=move || diagnostic_auto_scroll.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_auto_scroll.set(value);set_diagnostic("autoScroll",value);}/></label>
+              <label class="toggle-row"><span>"Scoring & UI updates"<small>"Disables the ~30 Hz scoring/state work that shares the animation frame. Transport and playhead keep running; the run shows count-in state and its result is NOT saved. This reproduces the once-observed abnormal smooth state on purpose."</small></span><input type="checkbox" aria-label="Scoring and UI updates" prop:checked=move || diagnostic_state_tick.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_state_tick.set(value);set_diagnostic("stateTick",value);if !value && matches!(phase.get_untracked().as_str(), "count_in"|"starting"|"running"|"paused"){diagnostic_run_invalid.set(true);}}/></label>
+              <label class="toggle-row"><span>"Performance counters"<small>"Records callback and feedback timings in memory; read with rudiment.performanceDiagnostics(). Adds a small recording cost while on."</small></span><input type="checkbox" aria-label="Performance counters" prop:checked=move || diagnostic_perf_counters.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_perf_counters.set(value);set_diagnostic("perfCounters",value);}/></label>
+              <div class="button-row"><button on:click=move |_|{set_diagnostic("stateTick",false);diagnostic_state_tick.set(false);set_diagnostic("visualFeedback",false);diagnostic_visual_feedback.set(false);set_diagnostic("metronomeVisual",false);diagnostic_metronome_visual.set(false);set_diagnostic("autoScroll",true);diagnostic_auto_scroll.set(true);set_diagnostic("referenceOverlay",true);diagnostic_reference_overlay.set(true);if matches!(phase.get_untracked().as_str(), "count_in"|"starting"|"running"|"paused"){diagnostic_run_invalid.set(true);}}>"Minimal playhead-only"</button><button on:click=move |_|{set_diagnostic("referenceOverlay",diagnostics_state.reference_overlay);diagnostic_reference_overlay.set(diagnostics_state.reference_overlay);set_diagnostic("visualFeedback",diagnostics_state.visual_feedback);diagnostic_visual_feedback.set(diagnostics_state.visual_feedback);set_diagnostic("metronomeVisual",diagnostics_state.metronome_visual);diagnostic_metronome_visual.set(diagnostics_state.metronome_visual);set_diagnostic("stateTick",diagnostics_state.state_tick);diagnostic_state_tick.set(diagnostics_state.state_tick);set_diagnostic("autoScroll",diagnostics_state.auto_scroll);diagnostic_auto_scroll.set(diagnostics_state.auto_scroll);set_diagnostic("perfCounters",diagnostics_state.perf_counters);diagnostic_perf_counters.set(diagnostics_state.perf_counters);}>"Reset diagnostics"</button></div>
+              <p class="help">{move || format!("Open the independent reference animation at your current tempo ({:.0} BPM) beside Rudiment for a like-for-like smoothness comparison.", bpm.get())}</p>
+              <a class="wide-button" href={move || format!("./public/animation-demo.html?bpm={:.0}&method=transform&fit=1&thickness=3", bpm.get())} target="_blank" rel="noopener">"Open reference animation demo"</a>
+            </section>
           </div>
 
                  {move || pending_clear_history.get().then(|| view!{

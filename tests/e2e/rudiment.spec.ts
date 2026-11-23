@@ -2080,6 +2080,68 @@ test('opt-in playhead diagnostic compares wall-clock motion and follows pause, r
   await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
 });
 
+test('settings diagnostics toggle the reference overlay at runtime and reset restores defaults',async({page})=>{
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  const overlayToggle=page.getByLabel('Reference playhead overlay');
+  await expect(overlayToggle).not.toBeChecked();
+  await overlayToggle.check();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  await expect(page.locator('.playhead-reference-overlay')).toHaveClass(/visible/);
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.playheadDebugSnapshot().frames.length)).toBeGreaterThan(8);
+
+  // Opening settings pauses practice; switching the diagnostic off mid-session
+  // must remove the reference without disturbing the transport.
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await overlayToggle.uncheck();
+  await expect(page.locator('.playhead-reference-overlay')).not.toHaveClass(/visible/);
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:'Resume'}).click();
+  await page.waitForTimeout(250);
+  expect(await page.locator('.playhead-reference-overlay').getAttribute('class')).not.toContain('visible');
+  expect(await page.locator('#playhead')).toHaveClass(/visible/);
+
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByRole('button',{name:'Reset diagnostics'}).click();
+  await expect(overlayToggle).not.toBeChecked();
+  await expect(page.getByLabel('Scoring and UI updates')).toBeChecked();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+});
+
+test('minimal playhead-only diagnostic keeps the transport moving, completes and skips saving',async({page})=>{
+  await page.goto('/');
+  await setTempo(page,'240');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Minimal playhead-only'}).click();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+
+  const sessionsBefore=await page.evaluate(async()=>(await (window as any).rudiment.loadSessions()).length);
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect(page.locator('#playhead')).toHaveClass(/visible/);
+  const first=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat);
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(first+1);
+
+  // The scoring/UI tick is disabled, but the transport still completes on its
+  // own schedule and the run must not be saved as a performance result.
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().activeRun),{timeout:30000}).toBe(false);
+  await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
+  await expect(page.locator('.error-row')).toHaveClass(/hidden/);
+  expect(await page.evaluate(async()=>(await (window as any).rudiment.loadSessions()).length)).toBe(sessionsBefore);
+
+  // Resetting diagnostics restores normal saving.
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByRole('button',{name:'Reset diagnostics'}).click();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.locator('.start-button').click();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().activeRun),{timeout:30000}).toBe(false);
+  expect(await page.evaluate(async()=>(await (window as any).rudiment.loadSessions()).length)).toBeGreaterThan(sessionsBefore);
+});
+
 test('playhead continues moving after entering bar two', async ({ page }) => {
   await page.goto('/');
   await setTempo(page, '240');
