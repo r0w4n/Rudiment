@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261123-1';
+const BRIDGE_BUILD='20261123-2';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -237,7 +237,14 @@ const visualMetronome = {
     const beatInBar=((whole%meter)+meter)%meter;
     const step=Math.floor(beat*subdivision);
     const swing=whole%2===0?-1+fraction*2:1-fraction*2;
-    root.style.setProperty('--metronome-swing',String(swing));
+    // Write the swing on the NEEDLE, not the metronome root. WebKit lacks
+    // fine-grained custom-property dependency tracking, so a var write on the
+    // root button invalidated style for its whole subtree every frame at
+    // 60 fps; the needle is the variable's only consumer and is already a
+    // composited layer. The root's CSS fallback (--metronome-swing:0) keeps
+    // the idle needle centred.
+    if(!this.needle||!this.needle.isConnected)this.needle=root.querySelector('.visual-metronome-sweep i');
+    this.needle?.style.setProperty('--metronome-swing',String(Math.round(swing*1000)/1000));
     // Compare numeric components instead of building a template string every
     // frame; this ran 60 times per second and its allocations were pure GC
     // pressure on devices with a tight frame budget.
@@ -255,9 +262,10 @@ const visualMetronome = {
     }
   },
   stop(){
-    this.pending.length=0;this.lastStep=null;this.lastDisplayBeat=null;this.dots=null;
+    this.pending.length=0;this.lastStep=null;this.lastDisplayBeat=null;this.dots=null;this.needle=null;
     const root=document.getElementById('visual-metronome');if(!root)return;
-    root.classList.remove('active','count-in');root.style.setProperty('--metronome-swing','0');
+    root.classList.remove('active','count-in');
+    root.querySelector('.visual-metronome-sweep i')?.style.removeProperty('--metronome-swing');
     delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
     root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>{dot.classList.remove('current');dot.pulseAnimation?.cancel();dot.pulseAnimation=null;dot.style.boxShadow='';});
   }

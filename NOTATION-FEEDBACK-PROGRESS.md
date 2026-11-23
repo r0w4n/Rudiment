@@ -736,3 +736,37 @@ must be number-driven on the device.
    must be slimmed or split further.
 
 Status: implemented and validated; shipping via the standard worktree flow.
+
+## Ninth task: iPad retest of 20261123-1, sweep-var scope fix, numbers still needed
+
+User's iPad retest of build 20261123-1 (pulse reuse, dot will-change, HUD,
+tick deferral): minimal playhead-only completely smooth; enabling Scoring &
+UI updates returns intermittent micro-jitter; enabling Metronome Beat Lights
+returns a small repeatable per-beat judder; no noticeable improvement versus
+the previous build. Both effects are real on-device but invisible in local
+headless WebKit, so further JS changes without on-device numbers are
+guessing. The HUD (rAF p95, stalls >25 ms, tick p95/max) is the instrument
+that decides the next step; the user's next report should include those
+readings, plus the Settings build line.
+
+One further mechanistic fix shipped meanwhile (20261123-2): render() had
+written --metronome-swing on the metronome ROOT BUTTON every frame; WebKit
+does not track custom-property dependencies finely, so that invalidated the
+whole button subtree for style 60 times per second whenever beat lights were
+on. The var is now written on the needle element itself (its only consumer,
+already composited; CSS root fallback keeps the idle needle centred; cached
+element ref). Strictly smaller invalidation scope, identical visuals.
+
+Decision rule for the next report:
+- rAF p95 ~17 ms and stalls ~0 while jitter is still visible => the residual
+  is compositor-side; stop slimming JS and investigate layers/raster with a
+  Safari Web Inspector Rendering Frames capture.
+- stalls >25 ms appearing with the tick on and tick max high => the
+  post-commit tick overlaps the next frame on iPad; slim/split the tick's own
+  work (feedback-vector serialisation first).
+- per-beat stalls with only beat lights on => the per-beat DOM writes/
+  animation restarts; consider batching or removing dataset writes.
+
+Status: 20261123-2 validated (16 focused e2e incl. metronome suites, qa:quick,
+qa:browser) and shipped via the standard worktree flow; awaiting on-device
+HUD numbers for 20261123-2.
