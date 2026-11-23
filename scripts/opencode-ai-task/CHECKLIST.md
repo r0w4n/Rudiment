@@ -4,51 +4,62 @@ Task: complete and harden PR #9 (OpenCode AI task automation). Final
 stabilisation before future extraction into a reusable automation repository.
 Do NOT merge; do not centralise; do not add model routing.
 
-## Checklist
+### Checklist
 
 ### 1. Publication workflow fix
-- [ ] `publish-pr.sh`: trusted publication sequence as a testable script
+- [x] `publish-pr.sh`: trusted publication sequence as a testable script
       (metadata validation → PR body from validated artifact → askpass push →
       draft PR → orphaned-branch cleanup on PR failure).
-- [ ] Publish step reads meta/summary/title from the validated artifact
+- [x] Publish step reads meta/summary/title from the validated artifact
       directory, never from the publication working clone.
-- [ ] Invalid/missing metadata fails closed BEFORE any push.
-- [ ] PR-creation failure deletes the pushed branch and reports recovery path.
-- [ ] Regression tests: valid artifact → correct branch + draft PR with
+- [x] Invalid/missing metadata fails closed BEFORE any push.
+- [x] PR-creation failure deletes the pushed branch and reports recovery path.
+- [x] Regression tests: valid artifact → correct branch + draft PR with
       correct model/title/summary; missing/malformed metadata rejected;
       failed PR creation leaves no orphaned branch.
 
 ### 2. Failure notification fix
-- [ ] Job results passed via environment variables, not `${needs.*}` in Bash.
-- [ ] `notify-failure.sh` extracted; comment content covered by tests
+- [x] Job results passed via environment variables, not `${needs.*}` in Bash.
+- [x] `notify-failure.sh` extracted; comment content covered by tests
       (implement/validate/publish failure; success produces no stage lines).
-- [ ] Notification step marked continue-on-error so a notification failure
+- [x] Notification step marked continue-on-error so a notification failure
       cannot conceal the original failure.
 
 ### 3. Diagnostic redaction hardening
-- [ ] `redact.sh` fails closed (no `|| true`), verifies its own output.
-- [ ] API key handled literally (awk index replacement) — safe for keys with
+- [x] `redact.sh` fails closed (no `|| true`), verifies its own output.
+- [x] API key handled literally (awk index replacement) — safe for keys with
       regex metacharacters.
-- [ ] Workflow uploads diagnostics only when redaction succeeded
+- [x] Workflow uploads diagnostics only when redaction succeeded
       (step outcome gated).
-- [ ] Minimal diagnostics: redacted log tail (200 lines) instead of raw logs.
-- [ ] Regression tests: metacharacter keys, silent-failure detection,
+- [x] Minimal diagnostics: redacted log tail (200 lines) instead of raw logs.
+- [x] Regression tests: metacharacter keys, silent-failure detection,
       unset-key safety, residual-secret detection.
 
 ### 4. Test suites
-- [ ] test-publish-safety.sh extended (publication cases + e2e via
-      publish-pr.sh).
-- [ ] test-notify-failure.sh new.
-- [ ] test-redact.sh extended.
-- [ ] test-workflow.sh extended (publish-pr.sh call, no `${needs.*}` in run
-      blocks, env-passed results, redaction gating, continue-on-error).
+- [x] test-publish-safety.sh extended (publication cases + e2e via
+      publish-pr.sh) — 34/34.
+- [x] test-notify-failure.sh new — 11/11.
+- [x] test-redact.sh extended — 9/9.
+- [x] test-workflow.sh extended — 64/64.
 
 ### 5. Validation
-- [ ] All suites green (authorise 10, export 11, validate 13, publish+,
-      redact+, notify+, workflow 48+).
-- [ ] `bash -n` all scripts and run blocks; `actionlint` clean;
-      `npm run qa:quick`; pre-commit hook.
+- [x] All suites green: authorise 10/10, export 11/11, validate 13/13,
+      publish-safety 34/34, redact 9/9, notify 11/11, workflow 64/64
+      (152 assertions total).
+- [x] `bash -n` all scripts and run blocks; `actionlint` clean;
+      `npm run qa:quick` 5/5; pre-commit hook passed.
 - [ ] Push; PR #9 description updated; GitHub PR checks observed.
+
+### Test session notes (latest run)
+- 2026-11-23: all fixes implemented; suites listed above executed locally
+  with disposable repositories, stubbed `gh` and dummy credentials
+  (`ghp_dummy...`). No production credentials used, no destructive tests
+  against the real repository, no model calls.
+- Bugs found by the new tests during development: stale metadata leaked
+  between test cases (test fix); `::error` lines go to stdout (test fix);
+  awk POSIX class syntax rejected `[: ]` and unescaped `/` in bracket
+  expressions (script fix — now uses `( |:)*` and escaped `\/`).
+
 
 ### Status notes
 - Progress notes and test results are appended below as work completes.
