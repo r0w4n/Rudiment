@@ -33,6 +33,9 @@ Do NOT merge; do not centralise; do not add model routing.
       `scripts/opencode-ai-task/test-*.sh` suite on pull requests
       (paths-filtered) and `workflow_dispatch`; fails if any test fails;
       read-only permissions; credential persistence disabled.
+- [x] Paths filter removed after review: the regression workflow now runs
+      on EVERY pull request so the check is safe to require for all PRs;
+      static test asserts no paths filter; README documents it.
 - [x] Static tests cover the new workflow.
 - [ ] Manual: add "OpenCode AI task security regression tests" to the
       ruleset's required status checks.

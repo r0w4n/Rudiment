@@ -97,10 +97,13 @@ from a trusted checkout.
    default branch and add *Require a pull request before merging* and
    *Require status checks*, including the check
    **"OpenCode AI task security regression tests"** produced by
-   `.github/workflows/opencode-ai-task-tests.yml` so changes to the
-   automation's security tests are merge-gated. Note that `pull_request`
-   runs created with `GITHUB_TOKEN` are held for write-access approval on
-   the PR page; required checks therefore only pass after approval.
+   `.github/workflows/opencode-ai-task-tests.yml`. That workflow runs on
+   **every** pull request (no paths filter, by design), is read-only and
+   requires no secrets, so it is safe to configure as a required status
+   check for all pull requests; it fails if any security regression test
+   fails. Note that `pull_request` runs created with `GITHUB_TOKEN` are
+   held for write-access approval on the PR page; required checks
+   therefore only pass after approval.
 3. Optional: repository variable `OPENCODE_AI_TASK_MODEL` to override the
    default model (`opencode-go/glm-5.3-flash`).
 

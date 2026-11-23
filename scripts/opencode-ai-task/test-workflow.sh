@@ -206,6 +206,8 @@ if grep -q "pull_request:" "$tests_wf" && grep -q "^on:" "$tests_wf"; then
 else
   ko "regression workflow triggers on pull requests"
 fi
+assert_not_in "$tests_wf" "regression workflow runs on every pull request (no paths filter)" \
+  "^    paths:"
 assert_in "$tests_wf" "regression workflow runs every test file" \
   'test-\*\.sh'
 assert_in "$tests_wf" "regression workflow fails on any test failure" \

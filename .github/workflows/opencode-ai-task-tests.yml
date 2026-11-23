@@ -1,8 +1,10 @@
 name: OpenCode AI task tests
 
 # Executes every security regression test in scripts/opencode-ai-task/ on
-# pull requests so that changes to the automation cannot weaken its
-# guarantees unnoticed. The job fails if any test fails.
+# EVERY pull request (no paths filter, by design) so that changes to the
+# automation cannot weaken its guarantees unnoticed, and so the check is safe
+# to configure as a required status check for all pull requests. The job
+# fails if any test fails.
 #
 # Required status check: add the job name
 #   "OpenCode AI task security regression tests"
@@ -11,10 +13,6 @@ name: OpenCode AI task tests
 
 on:
   pull_request:
-    paths:
-      - 'scripts/opencode-ai-task/**'
-      - '.github/workflows/opencode-ai-task.yml'
-      - '.github/workflows/opencode-ai-task-tests.yml'
   workflow_dispatch:
 
 permissions:
