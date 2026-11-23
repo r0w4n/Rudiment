@@ -2083,6 +2083,7 @@ test('opt-in playhead diagnostic compares wall-clock motion and follows pause, r
 test('settings diagnostics toggle the reference overlay at runtime and reset restores defaults',async({page})=>{
   await page.goto('/');
   await page.getByRole('button',{name:'Open settings'}).click();
+  await expect(page.locator('#diagnostics-settings')).toContainText(/Bridge build: \d{8}-\d+/);
   const overlayToggle=page.getByLabel('Reference playhead overlay');
   await expect(overlayToggle).not.toBeChecked();
   await overlayToggle.check();
@@ -2092,13 +2093,18 @@ test('settings diagnostics toggle the reference overlay at runtime and reset res
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
   await expect(page.locator('.playhead-reference-overlay')).toHaveClass(/visible/);
+  await expect(page.locator('.playhead-debug-hud')).toContainText(/rAF p95 .* ms.*tick p95 .* ms/);
   await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.playheadDebugSnapshot().frames.length)).toBeGreaterThan(8);
+  const hud=await page.evaluate(()=>(window as any).rudiment.playheadHudSnapshot());
+  expect(hud.build).toMatch(/^\d{8}-\d+$/);
+  expect(hud.frame_n).toBeGreaterThan(4);
 
   // Opening settings pauses practice; switching the diagnostic off mid-session
   // must remove the reference without disturbing the transport.
   await page.getByRole('button',{name:'Open settings'}).click();
   await overlayToggle.uncheck();
   await expect(page.locator('.playhead-reference-overlay')).not.toHaveClass(/visible/);
+  await expect(page.locator('.playhead-debug-hud')).toHaveCount(0);
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:'Resume'}).click();
   await page.waitForTimeout(250);

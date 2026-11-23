@@ -11,6 +11,9 @@ const STICKING_PLACEMENT = AnnotationVerticalJustify.BOTTOM;
 const SYSTEM_MARK_BASELINE_CLEARANCE = 24;
 const bridgeUrl = document.currentScript?.src || document.querySelector('script[src*="bridge.js"]')?.src || document.baseURI;
 const publicAsset = path => new URL(path, bridgeUrl).toString();
+// Build identity for the diagnostic drawer and HUD. Bump together with the
+// bridge cache-busting query in web/index.html.
+const BRIDGE_BUILD='20261123-1';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -206,14 +209,25 @@ const visualMetronome = {
     // with the beat lights enabled. The dot's opacity keyframes still fade
     // the glow in and out, so the visible pulse keeps its timing and shape.
     dot.style.boxShadow=index===0?'0 0 11px #e7ad66':'0 0 9px #72d1bd';
-    if(dot.pulseAnimation)dot.pulseAnimation.cancel();
-    const animation=dot.animate([
-      {transform:'scale(1)',opacity:.72},
-      {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1},
-      {transform:'scale(1)',opacity:.72}
-    ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
-    dot.pulseAnimation=animation;
-    animation.onfinish=()=>{if(dot.pulseAnimation===animation){dot.pulseAnimation=null;dot.style.boxShadow='';}};
+    // Reuse one Animation object per dot and restart it each beat. Creating
+    // a fresh WAAPI animation (and its effect) per beat caused per-beat setup
+    // and compositing-layer churn on WebKit, which the iPad bisect isolated
+    // as beat-synchronised playhead judder. Each dot keeps a fixed downbeat
+    // role, so its keyframes never change.
+    let animation=dot.pulseAnimation;
+    if(!animation||dot.pulseDownbeat!==(index===0)){
+      dot.pulseAnimation?.cancel();
+      animation=dot.animate([
+        {transform:'scale(1)',opacity:.72},
+        {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1},
+        {transform:'scale(1)',opacity:.72}
+      ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
+      animation.onfinish=()=>{if(dot.pulseAnimation===animation)dot.style.boxShadow='';};
+      dot.pulseAnimation=animation;
+      dot.pulseDownbeat=index===0;
+    }
+    animation.cancel();
+    animation.play();
   },
   render(beat,meter,subdivision,now){
     if(!diagnostics.metronomeVisual)return;
@@ -266,6 +280,65 @@ function flushPendingTick(){
   const fn=pendingTick;pendingTick=null;
   if(fn)fn();
 }
+// Deferred-tick cost, bounded to a small window so long sessions cannot
+// accumulate measurement memory. Only collected while a diagnostic mode is
+// active, per the project's opt-in profiling policy.
+const tickDurations=[];
+function recordTickDuration(ms){
+  if(!(diagnostics.referenceOverlay||performanceProfile.enabled))return;
+  tickDurations.push(ms);
+  if(tickDurations.length>128)tickDurations.shift();
+}
+// On-device readout for the playhead-smoothness investigation: live frame
+// pacing and deferred-tick cost, visible beside the reference overlay so an
+// iPad report can include measurements without a tethered console.
+const playheadHud={
+  element:null,frameIntervals:[],lastPaint:0,
+  show(){
+    if(this.element?.isConnected)return;
+    this.element=document.createElement('div');
+    this.element.className='playhead-debug-hud';
+    this.element.setAttribute('aria-hidden','true');
+    document.body.appendChild(this.element);
+  },
+  hide(){this.element?.remove();},
+  sample(frameIntervalMs){
+    this.frameIntervals.push(frameIntervalMs);
+    if(this.frameIntervals.length>128)this.frameIntervals.shift();
+  },
+  percentile(values,p){
+    if(!values.length)return Number.NaN;
+    const sorted=[...values].sort((a,b)=>a-b);
+    return sorted[Math.min(sorted.length-1,Math.floor(sorted.length*p))];
+  },
+  render(now){
+    if(now-this.lastPaint<500)return;
+    this.lastPaint=now;
+    if(!this.element?.isConnected){
+      // Self-healing creation so URL-seeded diagnostic pages get the HUD
+      // without an explicit init call at module scope (TDZ ordering).
+      if(!diagnostics.referenceOverlay)return;
+      this.show();
+    }
+    const p95=this.percentile(this.frameIntervals,.95);
+    const stalls=this.frameIntervals.filter(value=>value>25).length;
+    const tickP95=this.percentile(tickDurations,.95);
+    const tickMax=tickDurations.length?Math.max(...tickDurations):Number.NaN;
+    const fixed=value=>Number.isFinite(value)?value.toFixed(1):'—';
+    this.element.textContent=`build ${BRIDGE_BUILD} · rAF p95 ${fixed(p95)} ms · >25 ms: ${stalls} · tick p95 ${fixed(tickP95)} / max ${fixed(tickMax)} ms`;
+  },
+  snapshot(){
+    return {
+      build:BRIDGE_BUILD,
+      frame_p95:this.percentile(this.frameIntervals,.95),
+      frame_over25:this.frameIntervals.filter(value=>value>25).length,
+      frame_n:this.frameIntervals.length,
+      tick_p95:this.percentile(tickDurations,.95),
+      tick_max:tickDurations.length?Math.max(...tickDurations):Number.NaN,
+      tick_n:tickDurations.length,
+    };
+  },
+};
 
 // Maps a transport beat to the notated score beat shown to the user. Count-in
 // beats are transport time, not playable exercise beats: for a later selected
@@ -645,7 +718,7 @@ const audio = {
         // next frame. This is not a second clock - the transport frame alone
         // decides when scoring work is due, and flushPendingTick keeps
         // pause/stop/completion ordered with any dispatched tick.
-        deferTick(()=>{ if(generation===this.generation) onFrame(tickBeat,tickNow,tickStart); });
+        deferTick(()=>{ if(generation!==this.generation)return; const started=performance.now(); onFrame(tickBeat,tickNow,tickStart); recordTickDuration(performance.now()-started); });
       }
       if (elapsedBeats >= countBeats+remaining+scoringTailBeats) {
         // The final scoring tick must land before the run is torn down.
@@ -1083,6 +1156,8 @@ const playheadDebug={
     // mid-practice; only sample frames while the diagnostic is on.
     this.run={options,visibleOffset:offset,initialBeat:offset-countBeats,baseBeat:offset,basePerformance:runPerformance,tempoMap,sourceBpm,tempoScale};
     this.runId++;this.lastFrame=null;
+    // Fresh measurement windows per run so HUD readings describe this run.
+    playheadHud.frameIntervals.length=0;playheadHud.lastPaint=0;tickDurations.length=0;
     if(!this.enabled)return;
     this.raf=requestAnimationFrame(now=>this.frame(now));
   },
@@ -1142,6 +1217,10 @@ const playheadDebug={
       green_row:green?.classList.contains('visible')?Number(green.dataset.row):Number.NaN,blue_row:rendered.visible?position.row:Number.NaN
     };
     this.frames.push(sample);this.lastFrame=sample;
+    if(Number.isFinite(sample.frame_interval_ms)){
+      playheadHud.sample(sample.frame_interval_ms);
+      playheadHud.render(now);
+    }
   },
   frame(now){
     if(!this.run)return;
@@ -1171,6 +1250,7 @@ function setDiagnostic(name,value){
     if(diagnostics.referenceOverlay)document.documentElement.dataset.playheadDebug='1';
     else delete document.documentElement.dataset.playheadDebug;
     if(diagnostics.referenceOverlay){
+      playheadHud.show();
       // Enabled mid-run: resume the reference sampling loop.
       if(playheadDebug.run&&!playheadDebug.raf){
         playheadDebug.lastFrame=null;
@@ -1179,6 +1259,7 @@ function setDiagnostic(name,value){
     }else{
       cancelAnimationFrame(playheadDebug.raf);playheadDebug.raf=0;
       playheadDebug.hide();
+      playheadHud.hide();
     }
   }
   if(name==='perfCounters')performanceProfile.enabled=diagnostics.perfCounters;
@@ -1498,7 +1579,7 @@ window.rudiment={
   bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,savedNotationTheme,saveNotationTheme,
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
   setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):Number.NaN,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,flushScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),playheadDebugSnapshot:()=>playheadDebug.snapshot(),resetPlayheadDebug:()=>playheadDebug.reset(),playheadDebugCsv:()=>playheadDebug.csv(),exportPlayheadDebugCsv:()=>playheadDebug.export(),diagnosticsSnapshot:()=>({...diagnostics}),setDiagnostic:(name,value)=>setDiagnostic(name,value),resetDiagnostics:()=>resetDiagnostics(),
+  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,flushScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),playheadDebugSnapshot:()=>playheadDebug.snapshot(),resetPlayheadDebug:()=>playheadDebug.reset(),playheadDebugCsv:()=>playheadDebug.csv(),exportPlayheadDebugCsv:()=>playheadDebug.export(),diagnosticsSnapshot:()=>({...diagnostics}),setDiagnostic:(name,value)=>setDiagnostic(name,value),resetDiagnostics:()=>resetDiagnostics(),bridgeBuild:()=>BRIDGE_BUILD,playheadHudSnapshot:()=>playheadHud.snapshot(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };

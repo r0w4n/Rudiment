@@ -159,7 +159,7 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .visual-metronome-sweep::after{content:"";position:absolute;left:50%;top:2px;bottom:2px;width:1px;background:#31463d35}
 .visual-metronome-sweep i{position:absolute;left:50%;top:1px;width:7px;height:8px;margin-left:-3.5px;border-radius:5px 5px 2px 2px;background:#809088;transform:translate3d(calc(var(--metronome-swing)*23px),0,0);transition:background .12s;will-change:transform}
 .visual-metronome-beats{display:flex;align-items:center;justify-content:center;gap:5px}
-.visual-metronome-beats i{width:6px;height:6px;border-radius:50%;background:#98a39d55;opacity:.72}
+.visual-metronome-beats i{width:6px;height:6px;border-radius:50%;background:#98a39d55;opacity:.72;will-change:transform,opacity}
 .visual-metronome-beats i:first-child{width:7px;height:7px;border:1px solid #ba7f3888;background:#d69d5544}
 .visual-metronome-beats i.current{background:#43ad91;box-shadow:0 0 6px #43ad9177;opacity:1}
 .visual-metronome-beats i:first-child.current{background:#d89442;box-shadow:0 0 8px #d8944288}
@@ -527,3 +527,4 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 
 .tempo-control input{min-height:24px;min-width:24px}
 .drawer-scroll a.wide-button{display:inline-block;box-sizing:border-box;min-height:36px;border:1px solid #39453f;color:#c2cbc6;background:#1b211e;border-radius:9px;padding:9px 10px;font-size:11px;text-decoration:none;text-align:center}.drawer-scroll a.wide-button:hover{background:#222b27;border-color:#56665e}
+.playhead-debug-hud{position:fixed;left:10px;bottom:10px;z-index:40;max-width:70vw;padding:6px 9px;border-radius:8px;background:#101513d9;color:#cfe3da;font:600 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;pointer-events:none}.playhead-debug-hud:empty{display:none}

@@ -295,6 +295,8 @@ extern "C" {
     fn set_diagnostic(name: &str, value: bool);
     #[wasm_bindgen(js_namespace = rudiment, js_name = diagnosticsSnapshot)]
     fn diagnostics_snapshot() -> JsValue;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = bridgeBuild)]
+    fn bridge_build() -> String;
     #[wasm_bindgen(js_namespace = rudiment, js_name = saveImport)]
     fn save_import(hash: &str, name: &str, bytes: &Uint8Array, metadata: JsValue) -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = loadImports)]
@@ -2129,7 +2131,12 @@ fn App() -> impl IntoView {
                         &score_tempo_map,
                     ));
                 }
-                run_start_ms.set(session_start);
+                // The run origin is constant during a run: skip the signal
+                // write when unchanged so the 30 Hz tick does not churn
+                // reactivity on devices with a tight frame budget.
+                if run_start_ms.get_untracked() != session_start {
+                    run_start_ms.set(session_start);
+                }
                 let visible_beat = beat.min(segment_end - 0.000_001);
                 progress.set(visible_beat);
                 // ~10 Hz is plenty for the 3 px timeline; the final frame of a
@@ -4055,7 +4062,7 @@ fn App() -> impl IntoView {
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
             <section><h3>"Local data"</h3><p class="help">{move || format!("{} completed performance(s) stored only in this browser.",history.get().len())}</p><div class="button-row"><button on:click=move |_|{let promise=export_history();spawn_local(async move{let _=JsFuture::from(promise).await;});}>"Export JSON"</button><button class="danger" on:click=move |_|{pending_clear_history.set(true);}>"Clear history"</button></div><button class="wide-button" on:click=move |_|{pending_reset_settings.set(true);}>"Reset settings & mappings"</button></section>
             <section id="diagnostics-settings"><h3>"Playhead diagnostics"</h3>
-              <p class="help">"Temporary switches for investigating playhead smoothness. They are session-only: never saved with your settings, and reloading the page restores normal operation. The ?playhead-debug=1, visual-hits and metronome-animation URL parameters still work and these toggles reflect them."</p>
+              <p class="help">{format!("Session-only diagnostic switches for investigating playhead smoothness. They are never saved with your settings, and reloading the page restores normal operation. The ?playhead-debug=1, visual-hits and metronome-animation URL parameters still work and these toggles reflect them. Bridge build: {}.", bridge_build())}</p>
               <label class="toggle-row"><span>"Reference playhead overlay + trace"<small>"Blue wall-clock reference line beside the notation playhead. Export its frame trace from a tethered console with rudiment.exportPlayheadDebugCsv()."</small></span><input type="checkbox" aria-label="Reference playhead overlay" prop:checked=move || diagnostic_reference_overlay.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_reference_overlay.set(value);set_diagnostic("referenceOverlay",value);}/></label>
               <label class="toggle-row"><span>"Visual hit feedback"<small>"Notehead colours, accuracy halos and unmatched-strike markers. Scoring itself is unaffected."</small></span><input type="checkbox" aria-label="Visual hit feedback" prop:checked=move || diagnostic_visual_feedback.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_visual_feedback.set(value);set_diagnostic("visualFeedback",value);}/></label>
               <label class="toggle-row"><span>"Metronome beat lights"<small>"The beat lights and count labels above the transport. The audible metronome has its own mute."</small></span><input type="checkbox" aria-label="Metronome beat lights" prop:checked=move || diagnostic_metronome_visual.get() on:change=move |event|{let value=event_target_checked(&event);diagnostic_metronome_visual.set(value);set_diagnostic("metronomeVisual",value);}/></label>

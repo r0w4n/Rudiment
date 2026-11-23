@@ -676,3 +676,63 @@ diagnostics is the final check.
   shows cost.
 - The hidden-SVG mirror still writes every frame (test contract, see
   PERFORMANCE.md); unchanged by design.
+
+## Eighth task: latest-build iPad retest, beat-pulse churn fix, on-device HUD
+
+The user's second iPad bisection (confirmed on the 56ebba0 build served by
+GitHub Pages) found both contributors persist on-device despite the local
+WebKit measurements showing the full configuration at baseline:
+- Scoring & UI updates: intermittent (not beat-locked) micro-stutter.
+- Metronome beat lights: judder precisely on every beat, audible click
+  irrelevant.
+Local headless numbers cannot reproduce iPadOS scheduling; the next iteration
+must be number-driven on the device.
+
+### Changes
+
+1. Beat-locked judder: the per-beat pulse now REUSES one Animation object
+   per dot (cancel + play restart) instead of creating a fresh WAAPI
+   animation each beat, and the beat dots get `will-change: transform,
+   opacity` so WebKit stops promoting/demoting a compositing layer at every
+   pulse start/finish. Visual output unchanged.
+2. On-device measurement without a tethered console: while the reference
+   overlay is enabled, a small fixed-position HUD
+   (`build ... · rAF p95 ... ms · >25ms: N · tick p95/max ... ms`) shows
+   live frame pacing and the deferred scoring tick's actual cost, refreshed
+   twice a second from bounded 128-sample windows. Programmatic access:
+   `rudiment.playheadHudSnapshot()`; per-run windows reset at start.
+   Tick duration is recorded only while a diagnostic mode is active,
+   keeping profiling opt-in.
+3. Deployment hygiene: the bridge cache-buster is bumped
+   (`public/bridge.js?v=20261123-1`) so cached old bridges cannot mask a
+   deploy, and the Settings "Playhead diagnostics" section now states the
+   bridge build (`Bridge build: 20261123-1` via `rudiment.bridgeBuild()`),
+   making the running build verifiable on-device in the Settings drawer.
+4. Minor tick slimming: the run-origin signal write is skipped when the
+   value is unchanged (it is constant during a run), removing one 30 Hz
+   reactive churn source.
+
+### Validation
+
+- Diagnostics e2e extended (build tag, HUD presence/content/snapshot,
+  HUD removal on toggle-off): passing; performance-correctness suite
+  (per-frame data-beat timing, non-rewind, dense traffic + stall recovery):
+  4 passed; qa:quick, qa:browser, qa:a11y, perf:fast enforced budgets: all
+  passed (midi_callback p95 0.50 ms, score_update p95 0.10 ms unchanged).
+
+### Next: the iPad protocol that produces numbers
+
+1. Settings -> enable Reference playhead overlay; note the Bridge build
+   line (must read 20261123-1; if not, clear Safari website data).
+2. Normal configuration, 30 BPM, no hits: read the HUD for ~20 seconds.
+   Record rAF p95, >25ms count and tick p95/max.
+3. Minimal playhead-only: read the HUD again (tick should disappear from
+   the readout - state tick off means no deferred ticks at all).
+4. If the normal-configuration judder persists while rAF p95 stays ~17 ms
+   and stalls are low, the remaining stutter is compositor-side, not
+   main-thread, and the fix direction changes (layer/raster, not JS).
+   If tick p95 is small but stalls cluster after ticks (tick max high), the
+   post-commit task is overlapping the next frame on-device and the tick
+   must be slimmed or split further.
+
+Status: implemented and validated; shipping via the standard worktree flow.
