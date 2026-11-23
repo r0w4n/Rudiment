@@ -179,6 +179,42 @@ assert_in "$here/redact.sh" "redaction verifies its own output" \
 assert_in "$workflow" "diagnostics use a log tail, not raw agent logs" \
   "opencode-log-tail.txt"
 
+# --- Diagnostic secret safety -------------------------------------------------
+diag="$(step_range "Collect and redact failure diagnostics")"; d_start=${diag%% *}; d_end=${diag##* }
+if [ "$d_start" -gt 0 ] && sed -n "${d_start},${d_end}p" "$workflow" | grep -q -- "OPENCODE_API_KEY:"; then
+  ok "diagnostics step receives the API key for redaction"
+else
+  ko "diagnostics step receives the API key for redaction"
+fi
+if sed -n "${d_start},${d_end}p" "$workflow" | grep -qE 'diff\.patch|cp -f "\$\{SPEC_FILE\}"|cp -f "\$\{PR_SUMMARY_FILE\}"'; then
+  ko "diagnostics are minimal (no raw diff, spec or summary uploads)"
+else
+  ok "diagnostics are minimal (no raw diff, spec or summary uploads)"
+fi
+assert_in "$workflow" "diagnostics include only file-name lists" \
+  "changed-files.txt"
+
+# --- Dedicated CI regression workflow ----------------------------------------
+tests_wf="$root/.github/workflows/opencode-ai-task-tests.yml"
+if [ -f "$tests_wf" ]; then
+  ok "dedicated security regression workflow exists"
+else
+  ko "dedicated security regression workflow exists"
+fi
+if grep -q "pull_request:" "$tests_wf" && grep -q "^on:" "$tests_wf"; then
+  ok "regression workflow triggers on pull requests"
+else
+  ko "regression workflow triggers on pull requests"
+fi
+assert_in "$tests_wf" "regression workflow runs every test file" \
+  'test-\*\.sh'
+assert_in "$tests_wf" "regression workflow fails on any test failure" \
+  "exit 1"
+assert_in "$tests_wf" "regression workflow has read-only permissions" \
+  "contents: read"
+assert_in "$tests_wf" "regression workflow drops persisted credentials" \
+  "persist-credentials: false"
+
 # --- Artifact-only data flow ---------------------------------------------------
 assert_in "$workflow" "implement uploads only the artifact directory" \
   'name: opencode-implementation'

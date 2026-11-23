@@ -18,6 +18,25 @@ Do NOT merge; do not centralise; do not add model routing.
       correct model/title/summary; missing/malformed metadata rejected;
       failed PR creation leaves no orphaned branch.
 
+### 1b. Diagnostic secret safety (final hardening round)
+- [x] Diagnostics step now receives `OPENCODE_API_KEY` so `redact.sh` can
+      scrub the key value (previously ran without it).
+- [x] Diagnostics minimised to a redacted log tail plus file-name lists
+      (`changed-files.txt`, `status.txt`); raw diffs, the issue
+      specification and the agent summary are no longer uploaded.
+- [x] Upload remains gated on successful redaction
+      (`steps.diagnostics.outcome == 'success'`).
+- [x] Static tests assert the key is present, raw content is absent.
+
+### 1c. CI regression coverage (final hardening round)
+- [x] New `.github/workflows/opencode-ai-task-tests.yml`: runs every
+      `scripts/opencode-ai-task/test-*.sh` suite on pull requests
+      (paths-filtered) and `workflow_dispatch`; fails if any test fails;
+      read-only permissions; credential persistence disabled.
+- [x] Static tests cover the new workflow.
+- [ ] Manual: add "OpenCode AI task security regression tests" to the
+      ruleset's required status checks.
+
 ### 2. Failure notification fix
 - [x] Job results passed via environment variables, not `${needs.*}` in Bash.
 - [x] `notify-failure.sh` extracted; comment content covered by tests

@@ -95,10 +95,12 @@ from a trusted checkout.
    publish job cannot open the draft PR.
 2. Ruleset "main branch protection": set its ref-name condition to the
    default branch and add *Require a pull request before merging* and
-   *Require status checks*. Note that `pull_request` runs created with
-   `GITHUB_TOKEN` are held for write-access approval on the PR page; the
-   AI PR's checks therefore only run after manual approval — which is also
-   what prevents required checks from being bypassed.
+   *Require status checks*, including the check
+   **"OpenCode AI task security regression tests"** produced by
+   `.github/workflows/opencode-ai-task-tests.yml` so changes to the
+   automation's security tests are merge-gated. Note that `pull_request`
+   runs created with `GITHUB_TOKEN` are held for write-access approval on
+   the PR page; required checks therefore only pass after approval.
 3. Optional: repository variable `OPENCODE_AI_TASK_MODEL` to override the
    default model (`opencode-go/glm-5.3-flash`).
 
@@ -114,8 +116,18 @@ from a trusted checkout.
 - [x] Workflow restructured; `actionlint` + `bash -n` + static tests clean.
 - [x] OpenCode CLI version pinned; secrets redaction for diagnostics.
 - [x] Full test suite green.
+- [x] Publication/notification/redaction findings fixed (see CHECKLIST.md).
+- [x] Diagnostics step receives `OPENCODE_API_KEY` for redaction; diagnostics
+      minimised to a redacted log tail plus file-name lists (no raw diffs,
+      specifications or summaries).
+- [x] Dedicated `opencode-ai-task-tests.yml` CI job runs all
+      `scripts/opencode-ai-task/test-*.sh` suites on pull requests and fails
+      on any test failure.
 - [ ] Post-merge (requires activation): end-to-end live verification
       procedure in this file's "End-to-end validation" section.
+- [ ] Manual: add the required status check
+      "OpenCode AI task security regression tests" to the "main branch
+      protection" ruleset (see below).
 
 ## End-to-end validation (post-merge procedure)
 

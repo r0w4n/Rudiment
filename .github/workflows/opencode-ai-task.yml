@@ -347,13 +347,18 @@ jobs:
       - name: Collect and redact failure diagnostics
         id: diagnostics
         if: failure()
+        env:
+          # Required so the redaction step can scrub the key value from any
+          # diagnostic content before upload; the value is never printed.
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
           set -euo pipefail
           DIAG="${RUNNER_TEMP}/opencode-diagnostics"
           rm -rf "${DIAG}"
           mkdir -p "${DIAG}"
-          # Minimal, deliberately selected diagnostics: the tail of the
-          # newest agent log rather than the raw log directory.
+          # Minimal, explicitly selected diagnostics only: a redacted tail of
+          # the newest agent log plus file-name lists. Full diffs, the issue
+          # specification and the agent summary are deliberately NOT uploaded.
           if [ -d "$HOME/.local/share/opencode/log" ]; then
             LATEST_LOG="$(ls -t "$HOME/.local/share/opencode/log/"*.log 2>/dev/null | head -n 1 || true)"
             if [ -n "${LATEST_LOG}" ]; then
@@ -361,14 +366,8 @@ jobs:
             fi
           fi
           if git rev-parse HEAD >/dev/null 2>&1; then
-            git diff "${BASE_SHA}...HEAD" >"${DIAG}/diff.patch" 2>/dev/null || true
+            git diff --name-only "${BASE_SHA}...HEAD" >"${DIAG}/changed-files.txt" 2>/dev/null || true
             git status --porcelain >"${DIAG}/status.txt" 2>/dev/null || true
-          fi
-          if [ -n "${SPEC_FILE:-}" ] && [ -f "${SPEC_FILE}" ]; then
-            cp -f "${SPEC_FILE}" "${DIAG}/"
-          fi
-          if [ -n "${PR_SUMMARY_FILE:-}" ] && [ -f "${PR_SUMMARY_FILE}" ]; then
-            cp -f "${PR_SUMMARY_FILE}" "${DIAG}/"
           fi
           # Fail closed: if redaction does not succeed, the upload step below
           # is skipped and no diagnostics leave the runner.
