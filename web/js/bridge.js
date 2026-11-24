@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261124-1';
+const BRIDGE_BUILD='20261124-2';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -26,6 +26,8 @@ const diagnosticsDefault = {
   referenceOverlay: diagnosticsParams.get('playhead-debug') === '1',
   visualFeedback: !['0','off','false'].includes((diagnosticsParams.get('visual-hits')||(diagnosticsParams.get('feedback')||'')).toLowerCase()),
   metronomeVisual: !['0','off','false'].includes((diagnosticsParams.get('metronome-animation')||'').toLowerCase()),
+  metronomeNeedle: true,
+  metronomePulses: true,
   stateTick: true,
   autoScroll: true,
   perfCounters: globalThis.__RUDIMENT_PERF__===true,
@@ -202,12 +204,12 @@ const visualMetronome = {
     this.pending.push(event);
     if(step!==this.lastArmedStep){
       this.lastArmedStep=step;
-      this.armPulse(event);
+      if(diagnostics.metronomePulses)this.armPulse(event);
       // Even integer beats begin a needle sweep. Re-arming from the
       // authoritative schedule time keeps the compositor animation
       // phase-locked to the audible clock (drift corrected every two beats)
       // and absorbs tempo changes within one cycle.
-      if(Number.isInteger(beat)&&Math.abs(beat)%2===0){
+      if(diagnostics.metronomeNeedle&&Number.isInteger(beat)&&Math.abs(beat)%2===0){
         const spanMs=this.lastEvenBeatTime!==null?performanceTime-this.lastEvenBeatTime:null;
         this.lastEvenBeatTime=performanceTime;
         this.armNeedle(performanceTime,spanMs&&spanMs>0?spanMs/2:Math.max(1,beatMs??1000));
@@ -1389,8 +1391,21 @@ function setDiagnostic(name,value){
   }
   // Pre-armed pulse animations run on the compositor regardless of later
   // frame callbacks, so switching the beat lights off must cancel them
-  // explicitly (render()'s early return can no longer drain them).
+  // explicitly (render()'s early return can no longer drain them). The
+  // needle and pulse sub-toggles cancel only their own animations so the
+  // on-device bisection (needle vs dots vs labels) stays clean.
   if(name==='metronomeVisual'&&!diagnostics.metronomeVisual)visualMetronome.stop();
+  if(name==='metronomeNeedle'&&!diagnostics.metronomeNeedle){
+    visualMetronome.needleAnimation?.cancel();visualMetronome.needleAnimation=null;visualMetronome.lastEvenBeatTime=null;
+  }
+  if(name==='metronomePulses'&&!diagnostics.metronomePulses){
+    const root=document.getElementById('visual-metronome');
+    root?.querySelectorAll('.visual-metronome-beats i').forEach(dot=>{
+      dot.pulseAnimation?.cancel();dot.pulseAnimation=null;
+      const glow=dot.firstElementChild;
+      glow?.glowAnimation?.cancel();if(glow)glow.glowAnimation=null;
+    });
+  }
   if(name==='perfCounters')performanceProfile.enabled=diagnostics.perfCounters;
   // The HUD shows whenever any measurement mode is active, so production
   // pacing can be measured with the reference overlay's visual overhead off.

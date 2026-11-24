@@ -2116,11 +2116,24 @@ test('settings diagnostics toggle the reference overlay at runtime and reset res
   expect(await page.locator('.playhead-reference-overlay').getAttribute('class')).not.toContain('visible');
   expect(await page.locator('#playhead')).toHaveClass(/visible/);
 
+  // Beat-judder bisection sub-toggles: needle and pulse animations cancel
+  // at runtime and are not re-armed while disabled.
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Metronome sweep needle').uncheck();
+  await page.getByLabel('Metronome beat pulses').uncheck();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:'Resume'}).click();
+  await page.waitForTimeout(400);
+  expect(await page.evaluate(()=>document.querySelector('.visual-metronome-sweep i')?.getAnimations().length??0)).toBe(0);
+  expect(await page.evaluate(()=>document.querySelector('.visual-metronome-beats')?.getAnimations({subtree:true} as GetAnimationsOptions).length??0)).toBe(0);
+
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.getByRole('button',{name:'Reset diagnostics'}).click();
   await expect(overlayToggle).not.toBeChecked();
   await expect(page.getByLabel('Scoring and UI updates')).toBeChecked();
   await expect(page.getByLabel('Performance counters')).not.toBeChecked();
+  await expect(page.getByLabel('Metronome sweep needle')).toBeChecked();
+  await expect(page.getByLabel('Metronome beat pulses')).toBeChecked();
   await expect(page.locator('.playhead-debug-hud')).toHaveCount(0);
   await page.getByRole('button',{name:'Close settings'}).first().click();
 });

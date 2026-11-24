@@ -1057,3 +1057,41 @@ dot shuffle plus style-free attribute writes, and the next step would be
 a Web Inspector Rendering Frames capture on-device.
 
 Status: validated and shipped via the standard worktree flow (20261124-1).
+
+## Fifteenth task: on-device bisection toggles for the beat judder (20261124-2)
+
+The eased pendulum needle (20261124-1) did not change the user's per-beat
+judder. Six builds of locally-verified fixes have not transferred to the
+device; every remaining hypothesis is unfalsifiable from local Chrome/
+WebKit, which cannot reproduce the perception. Instead of a seventh guess,
+the diagnostic drawer gains two bisection sub-toggles so the next on-device
+session pinpoints the element:
+
+- "Sweep needle" - gates only the compositor needle animation (armNeedle;
+  toggling off mid-run cancels it and it is not re-armed).
+- "Beat dot pulses" - gates only the pre-armed pulse/glow animations
+  (armPulse; toggling off cancels dot and glow animations).
+The master "Metronome beat lights" toggle keeps gating the labels and the
+.current dot shuffle, so the four combinations separate needle / pulses /
+labels+shuffle / none.
+
+Interpretation table for the user's next report (with HUD p99 and >18.5 ms
+readings in each state):
+- needle-only judders => the needle animation path on-device (next: remove
+  the per-two-beat duration/startTime rewrites that may block compositor
+  offload, or keyframes A-B-A instead of alternate).
+- pulses-only judders => the pre-armed WAAPI is not offloading on-device
+  (next: CSS animation-delay scheduling or removing the glow layer's
+  blanket will-change).
+- all lights-on combos judder, including labels-only => the .current
+  shuffle / label writes; next: mount a permanent highlight layer.
+- HUD p99 clean (>0 not reached) while judder is visible => main thread
+  fully exonerated; the remaining cause is compositor-side or perceptual,
+  and the definitive step is a Safari Web Inspector Rendering Frames
+  capture from the Mac.
+
+Validation: settings-diagnostics e2e extended (needle/pulse toggles cancel
+animations at runtime and are not re-armed; reset restores both); 16
+focused e2e, qa:quick, qa:browser, qa:a11y, perf:fast all pass.
+
+Status: validated and shipped via the standard worktree flow (20261124-2).
