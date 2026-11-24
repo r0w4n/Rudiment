@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261124-2';
+const BRIDGE_BUILD='20261124-3';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -196,12 +196,18 @@ document.addEventListener('keydown',event=>{
 // carries no style writes, paints or animation restarts - the main thread
 // only records the data-pulse timing attributes the metronome e2e observes.
 const visualMetronome = {
-  pending: [], lastStep: null, lastArmedStep: null, lastDisplayBeat: null,
+  pending: [], lastStep: null, lastArmedStep: null, lastEvenBeatTime: null, lastDisplayBeat: null,
   schedule(performanceTime,beat,meter,subdivision,beatMs){
-    if(!diagnostics.metronomeVisual)return;
+    // The three metronome switches are INDEPENDENT enables: the master
+    // 'beat lights' controls labels and the current-dot highlight, while the
+    // needle and pulse sub-toggles enable their own elements even when the
+    // master is off. Scheduling runs when any element is enabled.
+    if(!(diagnostics.metronomeVisual||diagnostics.metronomeNeedle||diagnostics.metronomePulses))return;
     const step=Math.round(beat*Math.max(1,subdivision));
     const event={performanceTime,beat,meter:Math.max(1,Math.round(meter)),step};
-    this.pending.push(event);
+    // The pending queue is the pulse observation channel only, so it is
+    // pushed and drained under the pulse switch alone.
+    if(diagnostics.metronomePulses)this.pending.push(event);
     if(step!==this.lastArmedStep){
       this.lastArmedStep=step;
       if(diagnostics.metronomePulses)this.armPulse(event);
@@ -218,6 +224,8 @@ const visualMetronome = {
   },
   armNeedle(performanceTime,beatMs){
     const root=document.getElementById('visual-metronome');if(!root)return;
+    // Needle-only bisection mode still highlights the needle colour.
+    root.classList.add('active');
     if(!this.needle||!this.needle.isConnected||!this.needleAnimation){
       this.needle=root.querySelector('.visual-metronome-sweep i');
       const sweep=root.querySelector('.visual-metronome-sweep');
@@ -283,7 +291,7 @@ const visualMetronome = {
     root.dataset.pulse=String(event.step);root.dataset.scheduledAt=String(event.performanceTime);
   },
   render(beat,meter,subdivision,now){
-    if(!diagnostics.metronomeVisual)return;
+    if(!(diagnostics.metronomeVisual||diagnostics.metronomeNeedle||diagnostics.metronomePulses))return;
     const root=document.getElementById('visual-metronome');if(!root)return;
     meter=Math.max(1,Math.round(meter));subdivision=Math.max(1,subdivision);
     const whole=Math.floor(beat);
@@ -291,21 +299,38 @@ const visualMetronome = {
     const step=Math.floor(beat*subdivision);
     // The needle is NOT written here: it is a compositor-driven WAAPI
     // animation re-armed at every even scheduled beat (see schedule/
-    // armNeedle), so beat lights add zero per-frame main-thread work. This
-    // loop only handles the displayed-state change and the pending data
-    // attributes.
-    const last=this.lastDisplayBeat;
-    if(!last||last.count!==beat<0||last.beatInBar!==beatInBar||last.step!==step||last.meter!==meter){
-      this.lastDisplayBeat={count:beat<0,beatInBar,step,meter};
-      root.classList.add('active');root.classList.toggle('count-in',beat<0);
-      root.dataset.beat=String(beatInBar+1);root.dataset.step=String(step);
-      if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
-      this.dots.forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
-      root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
+    // armNeedle), so beat lights add zero per-frame main-thread work. The
+    // displayed labels and the current-dot highlight belong to the MASTER
+    // beat-lights switch; needle-only and pulses-only modes show their
+    // element alone for the on-device bisection.
+    if(diagnostics.metronomeVisual){
+      const last=this.lastDisplayBeat;
+      if(!last||last.count!==beat<0||last.beatInBar!==beatInBar||last.step!==step||last.meter!==meter){
+        this.lastDisplayBeat={count:beat<0,beatInBar,step,meter};
+        root.classList.add('active');root.classList.toggle('count-in',beat<0);
+        root.dataset.beat=String(beatInBar+1);root.dataset.step=String(step);
+        if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+        this.dots.forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
+        root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
+      }
     }
-    while(this.pending.length&&this.pending[0].performanceTime<=now+8){
+    while(diagnostics.metronomePulses&&this.pending.length&&this.pending[0].performanceTime<=now+8){
       const event=this.pending.shift();if(event.step!==this.lastStep){this.lastStep=event.step;this.pulse(event);}
     }
+  },
+  // Labels/current-dot teardown for the master switch alone: leaves needle
+  // and pulse animations running when only the labels are switched off. The
+  // sweep needle's highlighted colour rides the same 'active' class, so it
+  // stays while the needle switch is on.
+  clearLabels(){
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    root.classList.remove('count-in');
+    if(!diagnostics.metronomeNeedle)root.classList.remove('active');
+    this.lastDisplayBeat=null;
+    delete root.dataset.beat;delete root.dataset.step;
+    if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+    this.dots?.forEach(dot=>dot.classList.remove('current'));
+    root.setAttribute('aria-label','Metronome settings');
   },
   stop(){
     this.pending.length=0;this.lastStep=null;this.lastArmedStep=null;this.lastEvenBeatTime=null;this.lastDisplayBeat=null;this.dots=null;this.needle=null;
@@ -1389,12 +1414,10 @@ function setDiagnostic(name,value){
       playheadDebug.hide();
     }
   }
-  // Pre-armed pulse animations run on the compositor regardless of later
-  // frame callbacks, so switching the beat lights off must cancel them
-  // explicitly (render()'s early return can no longer drain them). The
-  // needle and pulse sub-toggles cancel only their own animations so the
-  // on-device bisection (needle vs dots vs labels) stays clean.
-  if(name==='metronomeVisual'&&!diagnostics.metronomeVisual)visualMetronome.stop();
+  // The three metronome switches are independent enables. Switching the
+  // master off clears only its own labels/current-dot state; the needle and
+  // pulse sub-toggles cancel their own compositor animations.
+  if(name==='metronomeVisual'&&!diagnostics.metronomeVisual)visualMetronome.clearLabels();
   if(name==='metronomeNeedle'&&!diagnostics.metronomeNeedle){
     visualMetronome.needleAnimation?.cancel();visualMetronome.needleAnimation=null;visualMetronome.lastEvenBeatTime=null;
   }
@@ -1405,6 +1428,8 @@ function setDiagnostic(name,value){
       const glow=dot.firstElementChild;
       glow?.glowAnimation?.cancel();if(glow)glow.glowAnimation=null;
     });
+    if(root){delete root.dataset.pulse;delete root.dataset.scheduledAt;}
+    visualMetronome.pending.length=0;
   }
   if(name==='perfCounters')performanceProfile.enabled=diagnostics.perfCounters;
   // The HUD shows whenever any measurement mode is active, so production

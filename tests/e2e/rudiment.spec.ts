@@ -2127,10 +2127,21 @@ test('settings diagnostics toggle the reference overlay at runtime and reset res
   expect(await page.evaluate(()=>document.querySelector('.visual-metronome-sweep i')?.getAnimations().length??0)).toBe(0);
   expect(await page.evaluate(()=>document.querySelector('.visual-metronome-beats')?.getAnimations({subtree:true} as GetAnimationsOptions).length??0)).toBe(0);
 
+  // The sub-toggles are INDEPENDENT enables: with the master beat lights
+  // off, the needle alone still animates (and nothing else does).
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByLabel('Metronome beat lights').uncheck();
+  await page.getByLabel('Metronome sweep needle').check();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:'Resume'}).click();
+  await expect.poll(()=>page.evaluate(()=>document.querySelector('.visual-metronome-sweep i')?.getAnimations().length??0)).toBe(1);
+  expect(await page.evaluate(()=>document.querySelector('.visual-metronome-beats')?.getAnimations({subtree:true} as GetAnimationsOptions).length??0)).toBe(0);
+
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.getByRole('button',{name:'Reset diagnostics'}).click();
   await expect(overlayToggle).not.toBeChecked();
   await expect(page.getByLabel('Scoring and UI updates')).toBeChecked();
+  await expect(page.getByLabel('Metronome beat lights')).toBeChecked();
   await expect(page.getByLabel('Performance counters')).not.toBeChecked();
   await expect(page.getByLabel('Metronome sweep needle')).toBeChecked();
   await expect(page.getByLabel('Metronome beat pulses')).toBeChecked();

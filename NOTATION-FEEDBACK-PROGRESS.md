@@ -1095,3 +1095,33 @@ animations at runtime and are not re-armed; reset restores both); 16
 focused e2e, qa:quick, qa:browser, qa:a11y, perf:fast all pass.
 
 Status: validated and shipped via the standard worktree flow (20261124-2).
+
+## Sixteenth task: sub-toggles made independent enables (20261124-3)
+
+User feedback caught a real design flaw in the bisection switches: "Sweep
+needle" and "Beat dot pulses" were implemented as EXTRA gates beneath the
+master "Metronome beat lights" switch, so they could only remove elements
+with the master on and did nothing on their own - exactly what the user
+observed when flipping them on from a lights-off state.
+
+The three switches are now INDEPENDENT enables:
+- "Sweep needle" alone shows only the pendulum sweep (with its highlighted
+  colour, even with the master off).
+- "Beat dot pulses" alone shows only the dot pulses (the pending
+  observation queue is pushed and drained under the pulse switch).
+- "Metronome beat lights" alone shows labels and the current-dot highlight;
+  switching it off clears only its own state (clearLabels) and leaves needle
+  and pulse animations running.
+- Scheduling runs whenever ANY metronome element is enabled.
+- "Minimal playhead-only" now switches all three off.
+
+Validation: settings-diagnostics e2e extended with the independence
+assertions (needle-only mode with master off arms exactly one animation and
+nothing on the dots; reset restores all three); 16 focused e2e, qa:quick,
+qa:browser, qa:a11y, perf:fast all pass.
+
+The bisection protocol from the fifteenth task can now be executed as the
+user naturally attempted: toggle each element on alone, note judder and the
+HUD p99 / >18.5 ms readings per combination.
+
+Status: validated and shipped via the standard worktree flow (20261124-3).
