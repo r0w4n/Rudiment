@@ -159,8 +159,9 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .visual-metronome-sweep::after{content:"";position:absolute;left:50%;top:2px;bottom:2px;width:1px;background:#31463d35}
 .visual-metronome-sweep i{position:absolute;left:50%;top:1px;width:7px;height:8px;margin-left:-3.5px;border-radius:5px 5px 2px 2px;background:#809088;transition:background .12s;will-change:transform}
 .visual-metronome-beats{display:flex;align-items:center;justify-content:center;gap:5px}
-.visual-metronome-beats i{width:6px;height:6px;border-radius:50%;background:#98a39d55;opacity:.72;will-change:transform,opacity}
-.visual-metronome-beats i:first-child{width:7px;height:7px;border:1px solid #ba7f3888;background:#d69d5544}
+.visual-metronome-beats i{position:relative;width:6px;height:6px;border-radius:50%;background:#98a39d55;opacity:.72;will-change:transform,opacity}
+.visual-metronome-beats i:first-child{width:7px;height:7px;border:1px solid #ba7f3888;background:#d69d5544}.visual-metronome-beats i:first-child .visual-metronome-glow{box-shadow:0 0 11px #e7ad66}
+.visual-metronome-glow{position:absolute;inset:0;border-radius:50%;opacity:0;pointer-events:none;will-change:transform,opacity;box-shadow:0 0 9px #72d1bd}
 .visual-metronome-beats i.current{background:#43ad91;box-shadow:0 0 6px #43ad9177;opacity:1}
 .visual-metronome-beats i:first-child.current{background:#d89442;box-shadow:0 0 8px #d8944288}
 .visual-metronome-label{grid-column:3;grid-row:1;text-align:right;font-size:11px;line-height:1;font-weight:800;color:#65706a;margin-left:6px;white-space:nowrap}

@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261123-5';
+const BRIDGE_BUILD='20261123-6';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -188,38 +188,59 @@ document.addEventListener('keydown',event=>{
 // of a digital needle, while the LEDs show beat position and a stronger
 // downbeat. Pulses are queued from the same Tone callback and output timestamp
 // as the audible click, so there is no independent visual timer to drift.
+// The pulse animations are PRE-ARMED at schedule time (the transport knows
+// each beat ~100 ms ahead): each dot's animation and its glow child get a
+// future WAAPI startTime and run on the compositor, so the beat moment itself
+// carries no style writes, paints or animation restarts - the main thread
+// only records the data-pulse timing attributes the metronome e2e observes.
 const visualMetronome = {
-  pending: [], lastStep: null, lastDisplayBeat: null,
-  schedule(performanceTime,beat,meter,subdivision){
+  pending: [], lastStep: null, lastArmedStep: null, lastDisplayBeat: null,
+  schedule(performanceTime,beat,meter,subdivision,beatMs){
     if(!diagnostics.metronomeVisual)return;
     const step=Math.round(beat*Math.max(1,subdivision));
-    this.pending.push({performanceTime,beat,meter:Math.max(1,Math.round(meter)),step});
+    const event={performanceTime,beat,meter:Math.max(1,Math.round(meter)),step};
+    this.pending.push(event);
+    if(step!==this.lastArmedStep){
+      this.lastArmedStep=step;
+      this.armPulse(event);
+      // Even integer beats begin a needle sweep. Re-arming from the
+      // authoritative schedule time keeps the compositor animation
+      // phase-locked to the audible clock (drift corrected every two beats)
+      // and absorbs tempo changes within one cycle.
+      if(Number.isInteger(beat)&&Math.abs(beat)%2===0){
+        const spanMs=this.lastEvenBeatTime!==null?performanceTime-this.lastEvenBeatTime:null;
+        this.lastEvenBeatTime=performanceTime;
+        this.armNeedle(performanceTime,spanMs&&spanMs>0?spanMs/2:Math.max(1,beatMs??1000));
+      }
+    }
   },
-  pulse(event){
+  armNeedle(performanceTime,beatMs){
     const root=document.getElementById('visual-metronome');if(!root)return;
-    // Cache the beat dots: re-querying (and spreading) them on every pulse
-    // was measurable churn at each beat on slower devices. The cache is
-    // invalidated if the markup was rebuilt.
+    if(!this.needle||!this.needle.isConnected||!this.needleAnimation){
+      this.needle=root.querySelector('.visual-metronome-sweep i');
+      const sweep=root.querySelector('.visual-metronome-sweep');
+      this.needleTravel=Math.max(4,(sweep?.clientWidth??58)/2-6);
+      this.needleAnimation?.cancel();
+      this.needleAnimation=this.needle?.animate([
+        {transform:`translate3d(${-this.needleTravel}px,0,0)`},
+        {transform:`translate3d(${this.needleTravel}px,0,0)`}
+      ],{duration:beatMs,iterations:Infinity,direction:'alternate',easing:'linear'});
+    }
+    if(!this.needleAnimation)return;
+    // Duration changes at tempo boundaries; the startTime seek re-anchors the
+    // alternate iterations so the sweep begins at the scheduled even beat.
+    this.needleAnimation.duration=beatMs;
+    this.needleAnimation.startTime=performanceTime;
+  },
+  armPulse(event){
+    const root=document.getElementById('visual-metronome');if(!root)return;
     if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
     const dots=this.dots;
     const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
     const dot=dots[index];if(!dot)return;
-    performanceProfile.record('metronome_visual_jitter_ms',performance.now()-event.performanceTime);
-    // data-* attributes: no CSS matches them, so these per-beat writes carry
-    // no style cost, and the visual-metronome e2e observes them as its
-    // scheduled-vs-observed timing channel.
-    root.dataset.pulse=String(event.step);root.dataset.scheduledAt=String(event.performanceTime);
-    // The glow is a static box-shadow for the pulse's duration instead of an
-    // animated shadow: WebKit repaints while interpolating box-shadow every
-    // frame of the 180 ms pulse, and iPadOS showed beat-positioned stutter
-    // with the beat lights enabled. The dot's opacity keyframes still fade
-    // the glow in and out, so the visible pulse keeps its timing and shape.
-    dot.style.boxShadow=index===0?'0 0 11px #e7ad66':'0 0 9px #72d1bd';
-    // Reuse one Animation object per dot and restart it each beat. Creating
-    // a fresh WAAPI animation (and its effect) per beat caused per-beat setup
-    // and compositing-layer churn on WebKit, which the iPad bisect isolated
-    // as beat-synchronised playhead judder. Each dot keeps a fixed downbeat
-    // role, so its keyframes never change.
+    // One animation per dot, re-used by seeking: a future startTime discards
+    // any in-flight iteration and starts the keyframes exactly at the beat's
+    // output time on the animation timeline.
     let animation=dot.pulseAnimation;
     if(!animation||dot.pulseDownbeat!==(index===0)){
       dot.pulseAnimation?.cancel();
@@ -228,37 +249,42 @@ const visualMetronome = {
         {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1},
         {transform:'scale(1)',opacity:.72}
       ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
-      animation.onfinish=()=>{if(dot.pulseAnimation===animation)dot.style.boxShadow='';};
       dot.pulseAnimation=animation;
       dot.pulseDownbeat=index===0;
     }
-    animation.cancel();
-    animation.play();
+    animation.startTime=event.performanceTime;
+    // The glow is a permanently-mounted child with a static shadow; fading
+    // its opacity replaces the previous per-beat inline box-shadow writes
+    // and their repaints.
+    const glow=dot.firstElementChild;
+    if(glow&&(!glow.glowAnimation||glow.glowDownbeat!==(index===0))){
+      glow.glowAnimation?.cancel();
+      glow.glowAnimation=glow.animate([{opacity:0},{opacity:1,offset:.45},{opacity:0}],{duration:180,easing:'linear'});
+      glow.glowDownbeat=index===0;
+    }
+    if(glow)glow.glowAnimation.startTime=event.performanceTime;
+  },
+  pulse(event){
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    performanceProfile.record('metronome_visual_jitter_ms',performance.now()-event.performanceTime);
+    // Observation channel only: the visual pulse was pre-armed at schedule
+    // time and runs on the compositor, so the beat moment carries no style
+    // or animation work - just these style-free data attributes the
+    // visual-metronome e2e uses as its scheduled-vs-observed timing channel.
+    root.dataset.pulse=String(event.step);root.dataset.scheduledAt=String(event.performanceTime);
   },
   render(beat,meter,subdivision,now){
     if(!diagnostics.metronomeVisual)return;
     const root=document.getElementById('visual-metronome');if(!root)return;
     meter=Math.max(1,Math.round(meter));subdivision=Math.max(1,subdivision);
-    const whole=Math.floor(beat),fraction=((beat%1)+1)%1;
+    const whole=Math.floor(beat);
     const beatInBar=((whole%meter)+meter)%meter;
     const step=Math.floor(beat*subdivision);
-    const swing=whole%2===0?-1+fraction*2:1-fraction*2;
-    // Drive the needle with a direct transform write on the composited
-    // element. The previous per-frame custom-property write made every
-    // frame's style recalc ~44% more expensive on WebKit (calc() styles are
-    // re-resolved for the subtree; CDP RecalcStyleDuration measurement),
-    // which the iPad bisect isolated as beat-lights jitter. The travel is
-    // measured from the rendered sweep width and cached; a resize clears the
-    // needle so the next frame recomputes it.
-    if(!this.needle||!this.needle.isConnected){
-      this.needle=root.querySelector('.visual-metronome-sweep i');
-      const sweep=root.querySelector('.visual-metronome-sweep');
-      this.needleTravel=Math.max(4,(sweep?.clientWidth??58)/2-6);
-    }
-    if(this.needle)this.needle.style.transform=`translate3d(${(swing*this.needleTravel).toFixed(2)}px,0,0)`;
-    // Compare numeric components instead of building a template string every
-    // frame; this ran 60 times per second and its allocations were pure GC
-    // pressure on devices with a tight frame budget.
+    // The needle is NOT written here: it is a compositor-driven WAAPI
+    // animation re-armed at every even scheduled beat (see schedule/
+    // armNeedle), so beat lights add zero per-frame main-thread work. This
+    // loop only handles the displayed-state change and the pending data
+    // attributes.
     const last=this.lastDisplayBeat;
     if(!last||last.count!==beat<0||last.beatInBar!==beatInBar||last.step!==step||last.meter!==meter){
       this.lastDisplayBeat={count:beat<0,beatInBar,step,meter};
@@ -273,13 +299,19 @@ const visualMetronome = {
     }
   },
   stop(){
-    this.pending.length=0;this.lastStep=null;this.lastDisplayBeat=null;this.dots=null;this.needle=null;
+    this.pending.length=0;this.lastStep=null;this.lastArmedStep=null;this.lastEvenBeatTime=null;this.lastDisplayBeat=null;this.dots=null;this.needle=null;
     const root=document.getElementById('visual-metronome');if(!root)return;
     root.classList.remove('active','count-in');
-    // Reset the needle to its centred CSS position.
-    root.querySelector('.visual-metronome-sweep i')?.style.removeProperty('transform');
+    // The needle animation is compositor-driven; cancel it so the needle
+    // returns to its centred CSS position.
+    this.needleAnimation?.cancel();this.needleAnimation=null;
     delete root.dataset.beat;delete root.dataset.step;delete root.dataset.pulse;delete root.dataset.scheduledAt;
-    root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>{dot.classList.remove('current');dot.pulseAnimation?.cancel();dot.pulseAnimation=null;dot.style.boxShadow='';});
+    root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>{
+      dot.classList.remove('current');
+      dot.pulseAnimation?.cancel();dot.pulseAnimation=null;
+      const glow=dot.firstElementChild;
+      glow?.glowAnimation?.cancel();if(glow)glow.glowAnimation=null;
+    });
   }
 };
 
@@ -718,7 +750,7 @@ const audio = {
       // The transport remains alive for the scoring late-delivery drain, but
       // that silent tail is not another musical bar and must not click.
       if(!countIn&&(beat<offset-.000001||beat>=options.totalBeats-.000001))return;
-      visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision);
+      visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision,60000/transport.bpm.value);
       const barSteps=options.meter*subdivision;
       if(options.metronome)this.click(time,((beatStep%barSteps)+barSteps)%barSteps===0,options.timbre);
     };
@@ -1348,6 +1380,10 @@ function setDiagnostic(name,value){
       playheadDebug.hide();
     }
   }
+  // Pre-armed pulse animations run on the compositor regardless of later
+  // frame callbacks, so switching the beat lights off must cancel them
+  // explicitly (render()'s early return can no longer drain them).
+  if(name==='metronomeVisual'&&!diagnostics.metronomeVisual)visualMetronome.stop();
   if(name==='perfCounters')performanceProfile.enabled=diagnostics.perfCounters;
   // The HUD shows whenever any measurement mode is active, so production
   // pacing can be measured with the reference overlay's visual overhead off.

@@ -962,3 +962,62 @@ structurally clean.
 - Counters: retest in isolation - the CDP probe exonerates them structurally.
 
 Status: validated and shipped via the standard worktree flow (20261123-5).
+
+## Thirteenth task: pre-armed compositor pulses and needle (20261123-6)
+
+The user confirmed 20261123-5 removed the scoring/UI jitter (timeline
+scaleX fix validated on-device) but the beat-synchronised metronome judder
+remains. Note: 20261123-6 was not deployed during the first attempt (the
+shipment ended mid-validation after a tracing-probe hang); the user's
+retest of that day necessarily ran the older build. This iteration
+completes and ships it.
+
+### Changes
+
+1. Pulses are PRE-ARMED at schedule time: the transport knows each beat
+   ~100 ms ahead, so each dot's scale/opacity animation and its glow
+   child's opacity animation get a future WAAPI startTime at schedule time
+   and run on the compositor from the beat's output time. The beat moment
+   now carries no style writes, paints or animation restarts; the main
+   thread only records the data-pulse timing attributes that the
+   visual-metronome e2e observes (test contract preserved, within 40 ms).
+   The glow is a permanently-mounted child span with a static shadow
+   (opacity-animated) instead of per-beat inline box-shadow writes.
+2. The sweep needle is no longer written per frame at all: it is a WAAPI
+   animation (transform keyframes, linear, infinite, alternate) re-armed
+   at every even scheduled beat from the authoritative output time, which
+   phase-locks it to the audible clock, corrects drift every two beats and
+   absorbs tempo changes within one cycle. Beat lights now add zero
+   per-frame main-thread work.
+3. Toggling the beat lights off mid-run cancels armed animations
+   explicitly (render's early return can no longer drain them).
+
+### Measurement honesty
+
+The CDP metrics probe CANNOT validate this change: in both headless and
+headed Chromium the needle animation ticks on the main thread, so lights
+still shows ~+0.3-0.6 ms/frame recalc in the probe regardless of whether
+the needle is driven by a var write, a transform write or a WAAPI
+animation. The probe therefore cannot observe compositor offload. The
+on-device evidence that the mechanism class works is the reference demo's
+native method - the same WAAPI shape (transform keyframes, linear,
+infinite) - which the user measured completely smooth on the iPad. That is
+the basis for expecting the needle and pulses to be free on-device.
+
+### Validation
+
+30 focused e2e (metronome clock/pulses, playhead, diagnostics, count-in,
+practice) + performance-correctness (4) pass; qa:quick, qa:browser,
+qa:a11y, perf:fast enforced budgets pass.
+
+### If the beat judder persists on-device after 20261123-6
+
+Remaining per-beat main-thread work is only: the .current class shuffle
+(two dots restyled/repainted per beat), the dataset/aria attribute writes
+(style-free), and whatever WebKit itself does when composited animations
+begin. The next candidate would be the .current shuffle - e.g. a
+permanently-mounted highlight layer animated like the glow, with the class
+kept only for semantics - but that changes visible resting state, so it
+needs the user's confirmation that beats still judder first.
+
+Status: validated and shipped via the standard worktree flow (20261123-6).
