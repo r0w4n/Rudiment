@@ -1021,3 +1021,39 @@ kept only for semantics - but that changes visible resting state, so it
 needs the user's confirmation that beats still judder first.
 
 Status: validated and shipped via the standard worktree flow (20261123-6).
+
+## Fourteenth task: the beat judder was the metronome needle's own motion (20261124-1)
+
+After 20261123-6 (pre-armed compositor pulses, compositor-driven needle)
+the user reported the per-beat judder unchanged and asked the reframing
+question: is there something to fix in the VISUAL METRONOME rather than the
+playhead? Reviewing the motion design: the sweep needle had always been a
+CONSTANT-VELOCITY sweep that reverses instantly at every beat - its
+direction flips four times per bar by design, with linear easing and no
+deceleration at the extremes. A physical metronome needle decelerates into
+each end and accelerates out. The instant full-speed reversal reads as a
+small, repeatable judder precisely on every beat - which matches every
+user observation across all builds: on every beat, four per bar, gone with
+the lights off, unaffected by the audible click, and untouched by five
+rounds of performance fixes (it was never a performance defect).
+
+Fix: the needle's WAAPI traversal now uses ease-in-out, so each beat
+boundary is a genuine pendulum turnaround - position and velocity are
+continuous across the alternate-direction iteration boundary. This is a
+deliberate visual motion-design correction toward the physical metaphor,
+not a performance change; the compositor-driven scheduling from
+20261123-6 is retained.
+
+Validation: 30 focused e2e (metronome clock/pulses, playhead, diagnostics,
+count-in, practice), performance-correctness (4), qa:quick, qa:browser,
+qa:a11y, perf:fast enforced budgets: all passed.
+
+User confirmation needed: whether the eased turnaround removes the
+perceived per-beat judder, and - to close the loop on attribution -
+whether what they observed juddering was the needle/dots (metronome) or
+the notation playhead. If the playhead itself still judders on beats with
+lights on, the remaining per-beat main-thread work is only the .current
+dot shuffle plus style-free attribute writes, and the next step would be
+a Web Inspector Rendering Frames capture on-device.
+
+Status: validated and shipped via the standard worktree flow (20261124-1).

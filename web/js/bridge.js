@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261123-6';
+const BRIDGE_BUILD='20261124-1';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -221,10 +221,17 @@ const visualMetronome = {
       const sweep=root.querySelector('.visual-metronome-sweep');
       this.needleTravel=Math.max(4,(sweep?.clientWidth??58)/2-6);
       this.needleAnimation?.cancel();
+      // Pendulum easing: each one-beat traversal decelerates into its
+      // extreme and accelerates out of it, so the alternate-direction
+      // turnaround at every beat has continuous position AND velocity. The
+      // previous linear sweep reversed at full speed at each beat, which
+      // read as a repeatable per-beat judder - a motion-design artifact of
+      // the metronome itself, not a performance defect (which is why no
+      // amount of main-thread work removal changed it).
       this.needleAnimation=this.needle?.animate([
         {transform:`translate3d(${-this.needleTravel}px,0,0)`},
         {transform:`translate3d(${this.needleTravel}px,0,0)`}
-      ],{duration:beatMs,iterations:Infinity,direction:'alternate',easing:'linear'});
+      ],{duration:beatMs,iterations:Infinity,direction:'alternate',easing:'ease-in-out'});
     }
     if(!this.needleAnimation)return;
     // Duration changes at tempo boundaries; the startTime seek re-anchors the
