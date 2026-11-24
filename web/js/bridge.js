@@ -210,12 +210,19 @@ const visualMetronome = {
     if(diagnostics.metronomePulses)this.pending.push(event);
     if(step!==this.lastArmedStep){
       this.lastArmedStep=step;
-      if(diagnostics.metronomePulses)this.armPulse(event);
+      // Only integer beats arm the per-beat visuals. Subdivision steps must
+      // not re-arm the beat dot's pulse: every re-seek slid the 180 ms pulse
+      // forward to the latest sub-step's schedule time, so at subdivision 4
+      // the pulse fired up to three quarters of a beat late and was
+      // restarted mid-flight two to four times per beat.
+      const onBeat=Number.isInteger(beat);
+      if(diagnostics.metronomePulses&&onBeat)this.armPulse(event);
+      if(diagnostics.metronomeVisual&&onBeat)this.armLights(event);
       // Even integer beats begin a needle sweep. Re-arming from the
       // authoritative schedule time keeps the compositor animation
       // phase-locked to the audible clock (drift corrected every two beats)
       // and absorbs tempo changes within one cycle.
-      if(diagnostics.metronomeNeedle&&Number.isInteger(beat)&&Math.abs(beat)%2===0){
+      if(diagnostics.metronomeNeedle&&onBeat&&Math.abs(beat)%2===0){
         const spanMs=this.lastEvenBeatTime!==null?performanceTime-this.lastEvenBeatTime:null;
         this.lastEvenBeatTime=performanceTime;
         this.armNeedle(performanceTime,spanMs&&spanMs>0?spanMs/2:Math.max(1,beatMs??1000));
@@ -241,17 +248,32 @@ const visualMetronome = {
       this.needleAnimation=this.needle?.animate([
         {transform:`translate3d(${-this.needleTravel}px,0,0)`},
         {transform:`translate3d(${this.needleTravel}px,0,0)`}
-      ],{duration:beatMs,iterations:Infinity,direction:'alternate',easing:'ease-in-out'});
+      // fill:'backwards' keeps the left keyframe applied during the
+      // scheduler's look-ahead instead of dropping to the CSS centre: a
+      // fill:'none' animation in its before-phase (future startTime) fell
+      // back to centre and only snapped onto the pendulum at the beat,
+      // which read as a broken, jumpy needle.
+      ],{duration:beatMs,iterations:Infinity,direction:'alternate',easing:'ease-in-out',fill:'backwards'});
+      // First arm: the needle rests at its CSS centre during the scheduler's
+      // look-ahead and begins its first sweep exactly at the scheduled beat.
+      if(this.needleAnimation)this.needleAnimation.startTime=performanceTime;
+      return;
     }
-    if(!this.needleAnimation)return;
-    // Duration changes at tempo boundaries; the startTime seek re-anchors the
-    // alternate iterations so the sweep begins at the scheduled even beat.
+    // Re-anchor: seek one full pendulum cycle INTO THE PAST. With a forward
+    // seek the animation's currentTime went negative for the whole scheduler
+    // look-ahead (~100 ms); fill:'none' then dropped the keyframes and the
+    // needle fell back to its CSS centre, only to snap to the left keyframe
+    // at the beat - a visible double jump every two beats. Seeking one cycle
+    // back keeps currentTime inside the running animation (2*duration minus
+    // the look-ahead), so the needle continues from wherever it is, still
+    // lands exactly on its left extreme at the scheduled beat, and drift
+    // correction and tempo absorption are preserved.
     this.needleAnimation.duration=beatMs;
-    this.needleAnimation.startTime=performanceTime;
+    this.needleAnimation.startTime=performanceTime-2*this.needleAnimation.duration;
   },
   armPulse(event){
     const root=document.getElementById('visual-metronome');if(!root)return;
-    if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+    if(!this.dots||!this.dots[0]?.isConnected)this.captureDots(root);
     const dots=this.dots;
     const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
     const dot=dots[index];if(!dot)return;
@@ -259,15 +281,22 @@ const visualMetronome = {
     // any in-flight iteration and starts the keyframes exactly at the beat's
     // output time on the animation timeline.
     let animation=dot.pulseAnimation;
-    if(!animation||dot.pulseDownbeat!==(index===0)){
+    // The dot about to be highlighted rests at opacity 1 (the .current
+    // style); with the master switch off it rests at the plain dot's .72.
+    // Keyframes that always rested at .72 made the lit dot pop from .72
+    // back to 1 a moment after every pulse.
+    const lit=diagnostics.metronomeVisual;
+    const restOpacity=lit?1:.72;
+    if(!animation||dot.pulseDownbeat!==(index===0)||dot.pulseLit!==lit){
       dot.pulseAnimation?.cancel();
       animation=dot.animate([
-        {transform:'scale(1)',opacity:.72},
+        {transform:'scale(1)',opacity:restOpacity},
         {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1},
-        {transform:'scale(1)',opacity:.72}
+        {transform:'scale(1)',opacity:restOpacity}
       ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
       dot.pulseAnimation=animation;
       dot.pulseDownbeat=index===0;
+      dot.pulseLit=lit;
     }
     animation.startTime=event.performanceTime;
     // The glow is a permanently-mounted child with a static shadow; fading
@@ -280,6 +309,64 @@ const visualMetronome = {
       glow.glowDownbeat=index===0;
     }
     if(glow)glow.glowAnimation.startTime=event.performanceTime;
+  },
+  // Beat lights: the visible highlight change is pre-armed on the compositor
+  // animation timeline exactly like the pulses, so the switch between dots
+  // happens at the scheduled beat instead of at the first display frame that
+  // happens to observe it (which read as per-beat jitter). The .current class
+  // bookkeeping moves to schedule time; fill:'backwards' holds the previous
+  // look during the look-ahead so the early class move is invisible until the
+  // beat itself.
+  captureDots(root){
+    this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+    // Read each dot's resting and highlighted styles synchronously. The
+    // temporary class toggle cannot paint: it is restored before this task
+    // yields, and captures only run when the dot elements change.
+    const previous=this.dots.map(dot=>dot.classList.contains('current'));
+    this.dotStyles=this.dots.map((dot,index)=>{
+      const resting=getComputedStyle(dot);
+      const normal={backgroundColor:resting.backgroundColor,opacity:resting.opacity};
+      dot.classList.add('current');
+      const lit=getComputedStyle(dot);
+      const current={backgroundColor:lit.backgroundColor,opacity:lit.opacity};
+      dot.classList.toggle('current',previous[index]);
+      return {normal,current};
+    });
+    this.lastLitIndex=null;
+  },
+  armLights(event){
+    const root=document.getElementById('visual-metronome');if(!root)return;
+    if(!this.dots||!this.dotStyles||!this.dots[0]?.isConnected)this.captureDots(root);
+    const dots=this.dots,dotStyles=this.dotStyles;if(!dots||!dotStyles)return;
+    const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
+    const incoming=dots[index],incomingStyles=dotStyles[index];
+    if(!incoming||!incomingStyles)return;
+    // A dot that is already lit (single-beat metres) changes nothing.
+    if(this.lastLitIndex===index)return;
+    const outgoingIndex=this.lastLitIndex;
+    this.lastLitIndex=index;
+    if(outgoingIndex!==null&&outgoingIndex!==index){
+      const outgoing=dots[outgoingIndex],outgoingStyles=dotStyles[outgoingIndex];
+      if(outgoing&&outgoingStyles){
+        outgoing.classList.remove('current');
+        this.lightTransition(outgoing,outgoingStyles.current,outgoingStyles.normal,event.performanceTime);
+      }
+    }
+    incoming.classList.add('current');
+    this.lightTransition(incoming,incomingStyles.normal,incomingStyles.current,event.performanceTime);
+  },
+  lightTransition(dot,from,to,startTime){
+    let animation=dot.lightAnimation;
+    if(!animation||dot.lightFrom!==from.backgroundColor){
+      animation?.cancel();
+      animation=dot.animate([
+        {backgroundColor:from.backgroundColor,opacity:from.opacity},
+        {backgroundColor:to.backgroundColor,opacity:to.opacity}
+      ],{duration:90,easing:'linear',fill:'backwards'});
+      dot.lightAnimation=animation;
+      dot.lightFrom=from.backgroundColor;
+    }
+    animation.startTime=startTime;
   },
   pulse(event){
     const root=document.getElementById('visual-metronome');if(!root)return;
@@ -309,8 +396,8 @@ const visualMetronome = {
         this.lastDisplayBeat={count:beat<0,beatInBar,step,meter};
         root.classList.add('active');root.classList.toggle('count-in',beat<0);
         root.dataset.beat=String(beatInBar+1);root.dataset.step=String(step);
-        if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
-        this.dots.forEach((dot,index)=>dot.classList.toggle('current',index===beatInBar));
+        // The current-dot highlight is pre-armed at schedule time (armLights);
+        // only the non-painting label/aria bookkeeping stays on the frame.
         root.setAttribute('aria-label',`Metronome settings, ${beat<0?'COUNT IN':'PLAY'}, beat ${beatInBar+1} of ${meter}`);
       }
     }
@@ -328,12 +415,15 @@ const visualMetronome = {
     if(!diagnostics.metronomeNeedle)root.classList.remove('active');
     this.lastDisplayBeat=null;
     delete root.dataset.beat;delete root.dataset.step;
-    if(!this.dots||!this.dots[0]?.isConnected)this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
-    this.dots?.forEach(dot=>dot.classList.remove('current'));
+    if(this.dots)this.dots.forEach(dot=>{
+      dot.classList.remove('current');
+      dot.lightAnimation?.cancel();dot.lightAnimation=null;dot.lightFrom=null;
+    });
+    this.lastLitIndex=null;
     root.setAttribute('aria-label','Metronome settings');
   },
   stop(){
-    this.pending.length=0;this.lastStep=null;this.lastArmedStep=null;this.lastEvenBeatTime=null;this.lastDisplayBeat=null;this.dots=null;this.needle=null;
+    this.pending.length=0;this.lastStep=null;this.lastArmedStep=null;this.lastEvenBeatTime=null;this.lastDisplayBeat=null;this.dots=null;this.dotStyles=null;this.lastLitIndex=null;this.needle=null;
     const root=document.getElementById('visual-metronome');if(!root)return;
     root.classList.remove('active','count-in');
     // The needle animation is compositor-driven; cancel it so the needle
@@ -343,6 +433,7 @@ const visualMetronome = {
     root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>{
       dot.classList.remove('current');
       dot.pulseAnimation?.cancel();dot.pulseAnimation=null;
+      dot.lightAnimation?.cancel();dot.lightAnimation=null;dot.lightFrom=null;
       const glow=dot.firstElementChild;
       glow?.glowAnimation?.cancel();if(glow)glow.glowAnimation=null;
     });
