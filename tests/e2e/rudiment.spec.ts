@@ -166,7 +166,9 @@ test('Restart clears painted note feedback', async ({ page }) => {
   await expect(page.locator('#playhead')).toHaveClass(/visible/);
   await expect.poll(() => page.evaluate(() => (window as any).rudiment.currentAudioBeat())).toBeGreaterThan(0.04);
   await page.keyboard.press('j');
-  await expect(page.locator('.score-note[data-judgement]')).toHaveCount(1);
+  // The run keeps painting missed notes as the playhead passes them, so an
+  // exact painted count here races the transport; assert feedback appeared.
+  await expect(page.locator('.score-note[data-judgement]').first()).toBeVisible();
   await page.getByRole('button', { name: /Restart/ }).click();
   await expect(page.locator('.score-note[data-judgement]')).toHaveCount(0);
   await expect(page.locator('.unmatched-hit-marker')).toHaveCount(0);
