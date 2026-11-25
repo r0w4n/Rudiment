@@ -682,6 +682,27 @@ test('built-in difficulty filter finds playable beginner, intermediate and advan
   await expect(page.locator('#notation svg')).toHaveAttribute('data-system-count','2');
 });
 
+test('library difficulty filter persists across reload', async ({page}) => {
+  await page.goto('/');
+  await page.getByRole('button',{name:/MIDI library/}).click();
+  const library=page.getByRole('dialog',{name:'MIDI library'});
+  const difficulty=library.getByLabel('Exercise difficulty');
+  await difficulty.selectOption('Beginner');
+  await library.getByRole('button',{name:'Close MIDI library'}).click();
+  await expect.poll(() => page.evaluate(() => new Promise<string | undefined>((resolve, reject) => {
+    const request = indexedDB.open('rudiment');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const get = request.result.transaction('settings').objectStore('settings').get('app');
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => resolve(get.result?.value?.libraryDifficulty);
+    };
+  }))).toBe('Beginner');
+  await page.reload();
+  await page.getByRole('button',{name:/MIDI library/}).click();
+  await expect(page.getByRole('dialog',{name:'MIDI library'}).getByLabel('Exercise difficulty')).toHaveValue('Beginner');
+});
+
 test('bar popover trigger has no persistent pointer outline and keeps keyboard focus', async ({page}) => {
   await page.goto('/');
   const trigger=page.locator('#bar-selection-trigger');

@@ -72,6 +72,15 @@ impl Difficulty {
     }
 }
 
+fn parse_difficulty_label(label: &str) -> Option<Difficulty> {
+    match label {
+        "Beginner" => Some(Difficulty::Beginner),
+        "Intermediate" => Some(Difficulty::Intermediate),
+        "Advanced" => Some(Difficulty::Advanced),
+        _ => None,
+    }
+}
+
 const BUILTIN_RUDIMENTS: [BuiltinRudiment; 13] = [
     BuiltinRudiment {
         id: "01_roll",
@@ -343,6 +352,8 @@ struct Settings {
     auto_show_statistics: Option<bool>,
     adaptive_enabled: Option<bool>,
     adaptive: Option<AdaptiveSettings>,
+    library_difficulty: Option<String>,
+    selected_track: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1883,40 +1894,84 @@ fn App() -> impl IntoView {
         }
     });
 
-    let save_current_settings = Rc::new(move || {
-        persist_settings(Settings {
-            mode: Some(app_mode.get_untracked()),
-            bpm: Some(bpm.get_untracked()),
-            count_in_bars: Some(count_in.get_untracked()),
-            subdivision: Some(subdivision.get_untracked()),
-            timbre: Some(timbre.get_untracked()),
-            metronome: Some(metronome.get_untracked()),
-            click_volume: Some(click_volume.get_untracked()),
-            snare_volume: Some(snare_volume.get_untracked()),
-            snare_muted: Some(snare_muted.get_untracked()),
-            snare_reference_mode: Some(snare_reference_mode.get_untracked()),
-            loops: Some(loops.get_untracked()),
-            repeat_bar_until_good: Some(repeat_bar_until_good.get_untracked()),
-            repeat_tolerance: Some(repeat_tolerance.get_untracked()),
-            selection_start_bar: None,
-            selection_end_bar: None,
-            selected_bars: Some(selected_bars.get_untracked()),
-            latency_ms: Some(latency_ms.get_untracked()),
-            on_time_ms: Some(on_time_ms.get_untracked()),
-            excellent_ms: Some(excellent_ms.get_untracked()),
-            snare_note: Some(snare_note.get_untracked()),
-            snare_channel: Some(snare_channel.get_untracked()),
-            midi_bindings: Some(midi_bindings.get_untracked()),
-            welcome_dismissed: Some(!welcome.get_untracked()),
-            last_import_hash: selected_import.get_untracked(),
-            auto_show_statistics: Some(auto_show_statistics.get_untracked()),
-            adaptive_enabled: Some(adaptive_enabled.get_untracked()),
-            adaptive: Some(adaptive_settings.get_untracked()),
-        })
+    let snapshot_settings: Rc<dyn Fn() -> Settings> = Rc::new(move || Settings {
+        mode: Some(app_mode.get()),
+        bpm: Some(bpm.get()),
+        count_in_bars: Some(count_in.get()),
+        subdivision: Some(subdivision.get()),
+        timbre: Some(timbre.get()),
+        metronome: Some(metronome.get()),
+        click_volume: Some(click_volume.get()),
+        snare_volume: Some(snare_volume.get()),
+        snare_muted: Some(snare_muted.get()),
+        snare_reference_mode: Some(snare_reference_mode.get()),
+        loops: Some(loops.get()),
+        repeat_bar_until_good: Some(repeat_bar_until_good.get()),
+        repeat_tolerance: Some(repeat_tolerance.get()),
+        selection_start_bar: None,
+        selection_end_bar: None,
+        selected_bars: Some(selected_bars.get()),
+        latency_ms: Some(latency_ms.get()),
+        on_time_ms: Some(on_time_ms.get()),
+        excellent_ms: Some(excellent_ms.get()),
+        snare_note: Some(snare_note.get()),
+        snare_channel: Some(snare_channel.get()),
+        midi_bindings: Some(midi_bindings.get()),
+        welcome_dismissed: Some(!welcome.get()),
+        last_import_hash: selected_import.get(),
+        auto_show_statistics: Some(auto_show_statistics.get()),
+        adaptive_enabled: Some(adaptive_enabled.get()),
+        adaptive: Some(adaptive_settings.get()),
+        library_difficulty: library_difficulty
+            .get()
+            .map(|difficulty| difficulty.label().to_string()),
+        selected_track: Some(exercise.get().selected_track),
     });
+
+    let save_current_settings: Rc<dyn Fn()> = {
+        let snapshot = snapshot_settings.clone();
+        Rc::new(move || persist_settings(snapshot()))
+    };
     ADAPTIVE_SAVE.with(|cell| {
         *cell.borrow_mut() = Some(save_current_settings.clone());
     });
+
+    // Safety net for persistence: re-reads every persisted setting, so any
+    // change - from a control without its own save trigger or from programmatic
+    // updates such as MIDI profiles, adaptive sessions or imports - reaches the
+    // stored settings. Interactive controls keep their immediate save triggers;
+    // this debounce coalesces everything else, and `pagehide` flushes pending
+    // state so closing the browser also retains the latest settings.
+    let auto_save_timer: Rc<RefCell<Option<i32>>> = Rc::new(RefCell::new(None));
+    Effect::new(move |_| {
+        if !settings_loaded.get() {
+            return;
+        }
+        let snapshot = snapshot_settings();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        if let Some(handle) = auto_save_timer.borrow_mut().take() {
+            window.clear_timeout_with_handle(handle);
+        }
+        let commit = Closure::once_into_js(move || persist_settings(snapshot));
+        if let Ok(handle) = window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(commit.unchecked_ref(), 300)
+        {
+            *auto_save_timer.borrow_mut() = Some(handle);
+        }
+    });
+    {
+        let flush = save_current_settings.clone();
+        let listener = Closure::wrap(Box::new(move || {
+            flush();
+        }) as Box<dyn Fn()>);
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .add_event_listener_with_callback("pagehide", listener.as_ref().unchecked_ref());
+        }
+        listener.forget();
+    }
 
     let scoring_for_finish = scoring_engine.clone();
     let finish_run: Rc<dyn Fn()> = Rc::new(move || {
@@ -3204,6 +3259,19 @@ fn App() -> impl IntoView {
                                 &JsValue::from_str(""),
                             );
                             restoring_import.set(false);
+                            // Re-apply the persisted drum-track choice once the
+                            // file is back; the restore callback parses the
+                            // default track.
+                            if let Some(track) = settings.selected_track
+                                && track != exercise.get_untracked().selected_track
+                                && let Ok(parsed) = parse_midi(
+                                    &imported_bytes.get_untracked(),
+                                    &imported_name.get_untracked(),
+                                    Some(track),
+                                )
+                            {
+                                exercise.set(parsed);
+                            }
                         }
                         Err(error) => import_error.set(Some(format!(
                             "The last MIDI file could not be restored: {error}"
@@ -3352,6 +3420,13 @@ fn App() -> impl IntoView {
                         midi_bindings.set(bindings);
                     }
                     welcome.set(!saved.welcome_dismissed.unwrap_or(false));
+                    if let Some(difficulty) = saved
+                        .library_difficulty
+                        .as_deref()
+                        .and_then(parse_difficulty_label)
+                    {
+                        library_difficulty.set(Some(difficulty));
+                    }
                     set_volumes(
                         if snare_muted.get_untracked() {
                             0.0
@@ -3844,7 +3919,7 @@ fn App() -> impl IntoView {
                   <button role="tab" aria-selected=move || (!library_personal.get()).to_string() class=move || if library_personal.get(){""}else{"active"} on:click=move |_|{library_personal.set(false);library_page.set(0);}>{format!("Built-in · {}",BUILTIN_RUDIMENTS.len())}</button>
                   <button role="tab" aria-selected=move || library_personal.get().to_string() class=move || if library_personal.get(){"active"}else{""} on:click=move |_|{library_personal.set(true);library_page.set(0);}>{move || format!("Your imports · {}",saved_imports.get().len())}</button>
                 </div>
-                <label class=move || if library_personal.get(){"library-difficulty hidden"}else{"library-difficulty"}>"Difficulty"<select aria-label="Exercise difficulty" prop:value=move || library_difficulty.get().map(Difficulty::label).unwrap_or("All") on:change=move |event|{library_difficulty.set(match event_target_value(&event).as_str(){"Beginner"=>Some(Difficulty::Beginner),"Intermediate"=>Some(Difficulty::Intermediate),"Advanced"=>Some(Difficulty::Advanced),_=>None});library_page.set(0);}><option value="All">"All levels"</option><option value="Beginner">"Beginner"</option><option value="Intermediate">"Intermediate"</option><option value="Advanced">"Advanced"</option></select></label>
+                <label class=move || if library_personal.get(){"library-difficulty hidden"}else{"library-difficulty"}>"Difficulty"<select aria-label="Exercise difficulty" prop:value=move || library_difficulty.get().map(Difficulty::label).unwrap_or("All") on:change=move |event|{let value=event_target_value(&event);library_difficulty.set(parse_difficulty_label(value.as_str()));library_page.set(0);}><option value="All">"All levels"</option><option value="Beginner">"Beginner"</option><option value="Intermediate">"Intermediate"</option><option value="Advanced">"Advanced"</option></select></label>
                 <div class="library-page" role="list">
                   {move || if library_personal.get(){
                     let imports=saved_imports.get();
@@ -4114,7 +4189,7 @@ fn App() -> impl IntoView {
                            pending_reset_settings.set(false);
                            let promise=reset_local_setup();
                            app_mode.set(AppMode::Practice);
-                           bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);midi_bindings.set(default_midi_bindings());midi_learn.set(None);selected_midi.set(None);midi_status.set("Not connected".into());
+                           bpm.set(60.0);count_in.set(1);subdivision.set(1);timbre.set("woodblock".into());metronome.set(true);auto_show_statistics.set(true);click_volume.set(0.72);snare_volume.set(0.72);snare_muted.set(false);snare_reference_mode.set("hits".into());loops.set(1);repeat_bar_until_good.set(false);repeat_tolerance.set(RepeatTolerance::Standard);selected_bars.set(vec![]);latency_ms.set(0.0);on_time_ms.set(DEFAULT_GOOD_MS);excellent_ms.set(DEFAULT_PERFECT_MS);snare_note.set(38);snare_channel.set(10);midi_bindings.set(default_midi_bindings());midi_learn.set(None);selected_midi.set(None);midi_status.set("Not connected".into());adaptive_enabled.set(false);adaptive_settings.set(AdaptiveSettings::default());selected_import.set(None);library_page.set(0);library_difficulty.set(None);
                            spawn_local(async move{let _=JsFuture::from(promise).await;});
                          }>"Reset"</button>
                        </div>
