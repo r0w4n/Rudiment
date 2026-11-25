@@ -1,0 +1,38 @@
+name: OpenCode AI task
+
+# PROVISIONAL CENTRAL PIN: this immutable SHA belongs to central migration PR
+# https://github.com/r0w4n/central-ai-workflow/pull/1. Before merging this
+# Rudiment PR, replace it with the final reviewed commit from central main and
+# rerun the manual dry-run. See central-ai-workflow/docs/RELEASING.md.
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to check or implement
+        required: true
+        type: string
+      dry_run:
+        description: Run authorisation checks only
+        required: false
+        default: true
+        type: boolean
+
+# The reusable workflow narrows these permissions per job. GitHub does not
+# permit a called workflow to elevate beyond its caller.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  ai-task:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-task'
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@41554c50ec6a1de906546161d170fbddb6af68a1
+    with:
+      issue_number: ${{ format('{0}', github.event.issue.number || inputs.issue_number) }}
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    secrets:
+      OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
