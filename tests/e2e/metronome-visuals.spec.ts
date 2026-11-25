@@ -61,8 +61,11 @@ test('sweep needle never snaps back to centre between beats', async ({ page }) =
   expect(samples.length).toBeGreaterThan(40);
   const travel = Math.max(...samples.map(Math.abs));
   expect(travel).toBeGreaterThan(8);
-  const atCentre = samples.filter(x => Math.abs(x) <= 1).length;
-  expect(atCentre / samples.length).toBeLessThan(0.02);
+  // At 120 BPM, display refresh can repeatedly sample a healthy pendulum
+  // exactly at its centre. Only consecutive near-centre frames indicate a hold.
+  for(let i=1;i<samples.length;i++){
+    expect(Math.max(Math.abs(samples[i-1]),Math.abs(samples[i]))).toBeGreaterThan(1);
+  }
 });
 
 test('beat dot pulses arm exactly on integer beats under sixteenth subdivision', async ({ page }) => {
@@ -131,4 +134,36 @@ test('current-dot highlight is pre-armed at the scheduled beat', async ({ page }
   }
   // The highlight settles on exactly one dot, as before.
   await expect(page.locator('.visual-metronome-beats i.current')).toHaveCount(1);
+});
+
+test('the highlight and its shadow wait for the audible beat',async({page})=>{
+  await startPractice(page,{bpm:'120'});
+  const sample=await page.evaluate(()=>new Promise<{early:boolean,lit:boolean}>(resolve=>{
+    const root=document.querySelector('#visual-metronome')!;
+    const observer=new MutationObserver(()=>{
+      const dot=root.querySelector<HTMLElement & {lightAnimation?:Animation}>('i.current');
+      const start=Number(dot?.lightAnimation?.startTime);
+      if(!dot||start-performance.now()<25)return;
+      observer.disconnect();
+      const highlight=dot.querySelector('.visual-metronome-highlight');
+      const visible=()=>getComputedStyle(dot).boxShadow!=='none'||Boolean(highlight
+        &&Number(getComputedStyle(highlight).opacity)>.01&&getComputedStyle(highlight).boxShadow!=='none');
+      const early=visible();
+      setTimeout(()=>resolve({early,lit:visible()}),start-performance.now()+120);
+    });
+    observer.observe(root,{subtree:true,attributes:true,attributeFilter:['class']});
+  }));
+  expect(sample).toEqual({early:false,lit:true});
+});
+
+test('needle traversal follows the exercise tempo map',async({page})=>{
+  await startPractice(page,{bpm:'120'});
+  await page.evaluate(()=>(window as any).rudiment.startAudio({
+    bpm:120,sourceBpm:120,totalBeats:12,exerciseBeats:16,meter:4,subdivision:1,
+    tempoMap:[{beat:2,bpm:180}]
+  },()=>{},()=>{}));
+  const duration=()=>page.locator('.visual-metronome-sweep i').evaluate(needle=>
+    Number(needle.getAnimations()[0]?.effect?.getTiming().duration));
+  await expect.poll(duration).toBeCloseTo(500,0);
+  await expect.poll(duration).toBeCloseTo(60000/180,0);
 });

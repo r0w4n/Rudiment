@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 
 const manifest=JSON.parse(readFileSync('web/public/exercises/performance/manifest.json','utf8')) as {fixtures:Record<string,{name:string,bars:number,subdivision:number,noteCount:number}>};
@@ -19,7 +19,7 @@ test('deterministic performance fixtures preserve every onset and simultaneous d
   expect(await page.locator('.score-note').evaluateAll(notes=>notes.reduce((sum,note)=>sum+(note.getAttribute('data-midi-notes')?.split(',').length??0),0))).toBe(dense.noteCount);
 });
 
-test('high-rate MIDI feedback paints by the next frame and Restart clears it',async({page})=>{
+async function installMidiKit(page: Page) {
   await page.addInitScript(()=>{
     const input={id:'perf-kit',name:'Performance Kit',manufacturer:'Rudiment',type:'input',state:'connected',connection:'open',onmidimessage:null as null|((event:unknown)=>void),onstatechange:null,open:async()=>input,close:async()=>input,addEventListener:()=>{},removeEventListener:()=>{},dispatch:(data:number[],timestamp=performance.now())=>input.onmidimessage?.({data:new Uint8Array(data),timeStamp:timestamp})};
     const access={inputs:new Map([[input.id,input]]),outputs:new Map(),sysexEnabled:false,onstatechange:null,addEventListener:()=>{},removeEventListener:()=>{}};
@@ -27,6 +27,43 @@ test('high-rate MIDI feedback paints by the next frame and Restart clears it',as
     Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
     Object.assign(window,{__performanceInput:input});
   });
+}
+
+test('buffered output and calibrated MIDI agree with the audible beat',async({page})=>{
+  await installMidiKit(page);
+  await page.addInitScript(()=>{
+    // Model the hardware output independently of Rudiment's clock conversion.
+    Object.defineProperty(AudioContext.prototype,'outputLatency',{get:()=>.24});
+    AudioContext.prototype.getOutputTimestamp=function(){
+      return this.currentTime<.24?{contextTime:0,performanceTime:0}
+        :{contextTime:this.currentTime-.24,performanceTime:performance.now()};
+    };
+    let clicks=0;
+    const start=AudioBufferSourceNode.prototype.start;
+    AudioBufferSourceNode.prototype.start=function(...args){
+      const app=(window as any).rudiment;
+      if(app?.identifyMetronomeBuffer(this.buffer)&&++clicks===2){
+        const audible=performance.now()+((args[0]??0)-this.context.currentTime+.24)*1000;
+        setTimeout(()=>{(window as any).__beatError=app.currentAudioBeat()-1-(performance.now()-audible)/1000;},audible-performance.now());
+        const strike=audible+150;
+        setTimeout(()=>(window as any).__performanceInput.dispatch([0x99,38,100],strike),strike-performance.now());
+      }
+      return start.apply(this,args);
+    };
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  const settings=page.locator('#settings-dialog');
+  await settings.getByLabel('Count-in').selectOption('0');
+  await settings.getByLabel('Manual offset').fill('150');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect.poll(()=>page.evaluate(()=>Math.abs((window as any).__beatError))).toBeLessThan(.035);
+  await expect(page.locator('.score-note[data-beat="1"]')).toHaveAttribute('data-judgement','perfect');
+});
+
+test('high-rate MIDI feedback paints by the next frame and Restart clears it',async({page})=>{
+  await installMidiKit(page);
   await page.goto('/');
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');

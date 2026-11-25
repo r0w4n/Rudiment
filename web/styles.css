@@ -154,21 +154,23 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .score-meta{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:12px}
 .score-meta>div:first-child{min-width:0;overflow:hidden;white-space:nowrap}
 .score-actions{justify-self:end}
-.score-meta>.visual-metronome{--metronome-swing:0;width:126px;height:38px;display:grid;grid-template-columns:58px 1fr auto;grid-template-rows:20px;column-gap:9px;align-content:center;align-items:center;justify-self:center;color:#65706a}
+
 .visual-metronome-sweep{position:relative;width:58px;height:12px;border-radius:999px;background:#17201b12;border:1px solid #26352e24;overflow:hidden}
 .visual-metronome-sweep::after{content:"";position:absolute;left:50%;top:2px;bottom:2px;width:1px;background:#31463d35}
 .visual-metronome-sweep i{position:absolute;left:50%;top:1px;width:7px;height:8px;margin-left:-3.5px;border-radius:5px 5px 2px 2px;background:#809088;transition:background .12s;will-change:transform}
 .visual-metronome-beats{display:flex;align-items:center;justify-content:center;gap:5px}
-.visual-metronome-beats i{position:relative;width:6px;height:6px;border-radius:50%;background:#98a39d55;opacity:.72;will-change:transform,opacity}
-.visual-metronome-beats i:first-child{width:7px;height:7px;border:1px solid #ba7f3888;background:#d69d5544}.visual-metronome-beats i:first-child .visual-metronome-glow{box-shadow:0 0 11px #e7ad66}
-.visual-metronome-glow{position:absolute;inset:0;border-radius:50%;opacity:0;pointer-events:none;will-change:transform,opacity;box-shadow:0 0 9px #72d1bd}
-.visual-metronome-beats i.current{background:#43ad91;box-shadow:0 0 6px #43ad9177;opacity:1}
-.visual-metronome-beats i:first-child.current{background:#d89442;box-shadow:0 0 8px #d8944288}
+.visual-metronome-beats i{position:relative;width:6px;height:6px;border-radius:50%;will-change:transform}
+.visual-metronome-beats i::before{content:"";position:absolute;inset:0;border-radius:inherit;background:#98a39d55;opacity:.72}
+.visual-metronome-beats i:first-child{width:7px;height:7px}.visual-metronome-beats i:first-child::before{border:1px solid #ba7f3888;background:#d69d5544}.visual-metronome-beats i:first-child .visual-metronome-glow{box-shadow:0 0 11px #e7ad66}
+.visual-metronome-glow{position:absolute;inset:0;border-radius:50%;opacity:0;pointer-events:none;will-change:opacity;box-shadow:0 0 9px #72d1bd}
+.visual-metronome-highlight{position:absolute;inset:0;border-radius:inherit;background:#43ad91;box-shadow:0 0 6px #43ad9177;opacity:0;pointer-events:none;will-change:opacity}
+.visual-metronome-beats i:first-child .visual-metronome-highlight{background:#d89442;box-shadow:0 0 8px #d8944288}
+.visual-metronome-beats i.current .visual-metronome-highlight{opacity:1}
 .visual-metronome-label{grid-column:3;grid-row:1;text-align:right;font-size:11px;line-height:1;font-weight:800;color:#65706a;margin-left:6px;white-space:nowrap}
 .visual-metronome.active .visual-metronome-sweep i{background:#248f73}
 .visual-metronome.count-in .visual-metronome-label{color:#a56d2d}
-@media(max-width:700px){.score-meta{gap:6px}.score-meta>.visual-metronome{width:76px;grid-template-columns:34px 1fr;column-gap:5px}.visual-metronome-sweep{width:34px}.visual-metronome-beats{gap:3px}.visual-metronome-label{display:none}}
-@media(orientation:landscape) and (max-height:600px){.score-meta>.visual-metronome{height:28px;grid-template-rows:16px 8px}.visual-metronome-label{font-size:6px}}
+@media(max-width:700px){.score-meta{gap:6px}.visual-metronome-sweep{width:34px}.visual-metronome-beats{gap:3px}.visual-metronome-label{display:none}}
+@media(orientation:landscape) and (max-height:600px){.visual-metronome-label{font-size:6px}}
 .score-meta{grid-template-columns:1fr}
 .score-file-info{align-self:center;justify-self:end;z-index:12}
 .score-file-info summary{width:30px;height:28px;border:0;background:transparent;color:#46514b;border-radius:0;box-shadow:none;transition:color .15s}
@@ -331,7 +333,7 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 /* Contextual metronome uses the same compact surface as bar selection. */
 .topbar{grid-template-columns:minmax(160px,.75fr) minmax(220px,1fr) minmax(190px,auto) auto auto 42px;grid-template-areas:"brand exercise status library stats settings"}
 .score-meta>div.metronome-context{position:relative;z-index:20;display:block;justify-self:center;overflow:visible;white-space:normal}
-.metronome-context>.visual-metronome{--metronome-swing:0;width:126px;height:38px;display:grid;grid-template-columns:58px 1fr auto;grid-template-rows:20px;column-gap:9px;align-content:center;align-items:center;padding:0;border:0;border-radius:6px;background:transparent;color:#65706a}
+.metronome-context>.visual-metronome{width:126px;height:38px;display:grid;grid-template-columns:58px 1fr auto;grid-template-rows:20px;column-gap:9px;align-content:center;align-items:center;padding:0;border:0;border-radius:6px;background:transparent;color:#65706a}
 .metronome-context>.visual-metronome:hover,.metronome-context>.visual-metronome[aria-expanded=true]{background:#26352e0d}
 .metronome-popover{top:calc(100% + 5px);bottom:auto;left:50%;transform:translate(-50%,var(--metronome-offset-y,0px));width:min(420px,calc(100vw - 32px));display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--space-fields);max-height:none;overflow:visible}
 .metronome-popover .bar-selection-popover-head,.metronome-popover .metronome-preview-error,.metronome-popover .metronome-scheduling-help{grid-column:1/-1}

@@ -1125,3 +1125,87 @@ user naturally attempted: toggle each element on alone, note judder and the
 HUD p99 / >18.5 ms readings per combination.
 
 Status: validated and shipped via the standard worktree flow (20261124-3).
+
+## 25 November — visual metronome and MIDI clock review
+
+The later commit e8cce98 changed the light and needle scheduling after the
+sixteenth entry. Earlier attribution to pendulum easing was contradicted by
+the device retest. The independent switches remain useful for bisection.
+Safari 26.6.2 is installed on the Mac. Its driver initially refused to open
+a session because Safari's Allow remote automation setting is disabled.
+
+### Native Safari measurements
+
+A temporary localhost probe ran the built app in normal foreground macOS
+Safari, with a native Resume click to unlock audio. The Single Paradiddle
+ran continuously at 60 BPM. Each pass sampled six seconds after 500 ms of
+settling in each configuration: all, off, lights, pulses, needle, off, all.
+The probe was external to the production build. A second pass also counted
+animation creation and observed the current dot's computed shadow at class
+changes. These are browser timeline observations, not a GPU trace or a
+camera measurement of displayed frames.
+
+- Original e8cce98 and revised visuals both delivered 360 rAF samples per
+  window, with p99 18 ms in every configuration. This run provides no
+  evidence of a recurring missed main-thread frame when lights are enabled.
+- In the original all-on window Safari applied the incoming shadow **48–95 ms
+  before the scheduled beat**. The scheduled colour animation did not cover
+  the shadow switched by the current class. This produced an early visual cue
+  followed by the pulse. In the revised lights-only window the dot had no
+  early shadow; four reusable highlight animations were created instead of
+  eleven. A separate browser regression checks the actual highlight is invisible
+  during look-ahead and visible after onset. Perceived smoothness still needs
+  comparison on the reporting user's display.
+- The new highlight fades a statically painted colour and shadow together.
+  This removes synchronous computed-style capture, class probing, competing
+  opacity effects and per-direction animation replacement. The needle uses
+  the scheduled tempo and updates its KeyframeEffect timing. The earlier
+  assignment to Animation.duration only created a JavaScript property.
+  The stable sweep runs freely between phase corrections.
+
+### Output and scoring clocks
+
+The Tone 15 rawContext supplied by standardized-audio-context does not expose
+the native output timestamp. The earlier conversion therefore silently used
+render time on supported devices. Even if a timestamp was available, a
+120 ms cutoff rejected genuine buffered routes. A Chrome test intercepted the
+scheduled audio source independently and simulated 240 ms of output delay:
+the old projection led by 240 ms. The revised bridge reads the backing
+context solely for clock correlation, or uses outputLatency when no fresh
+timestamp is available. Both time conversions use the same mapping.
+
+Positive input calibration was subtracted from MIDI timestamps but absent
+from the scoring watermark and tail. Both now allow for positive calibration.
+The calibrated test strike is delivered with its original Web MIDI timestamp,
+150 ms after the simulated audible beat, and scores Perfect. Existing match
+windows, note identity and session scoring policy remain in force.
+
+With an audible output timestamp, a restart's first frames could read the
+previous run before the new scheduled start. Run-scoped tick queries return
+zero in that interval, the scoring frontier cannot advance into the future,
+and warm resumes/retries count already-buffered output toward their lead-in.
+The bar mirror now updates when the bar changes within a system as well.
+Focused retry, pause/resume, selection and tempo-map regressions passed.
+
+Independent diagnostic switches, deferred scoring ticks and their stop-time
+flush, optional reference overlay, composited playhead, and batched feedback
+remain useful. No new playback timer, scoring engine or dependency was needed.
+Removed the unused tempo callback clone, obsolete sweep variable and CSS
+selectors for the former metronome parent. The metronome suite now runs in
+shared browser QA. The physical Android MIDI/audio route from 24 November
+and the iPad have not been measured in this investigation.
+
+### Validation
+
+The initial full run exposed the output-clock, selection and restart issues
+above. After the fixes, all 13 gates in `npm run qa:full` passed, including
+125 browser correctness cases, 12 accessibility cases, 110 Rust tests
+(one study benchmark ignored by design), 14 JS unit tests and fast
+performance. Chrome 158 measured 0.50 ms p95 MIDI callback (262 samples)
+and 0.10 ms p95 score update (41 samples). Absolute budgets passed; the
+baseline lacks matching browser metadata for a relative performance claim.
+The one-minute endurance run completed 43 batches of 64 simulated strikes,
+including pause/resume cycles, and ended with no active run or scheduled
+voices. The default 15-minute endurance workload was not run. The security
+gate reported three moderate npm findings in the existing lint dependency
+tree and the existing allowed unmaintained Rust crate warning.

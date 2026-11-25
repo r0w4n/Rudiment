@@ -857,7 +857,7 @@ test('non-contiguous selected bars play in score order and accept the first hit 
         if(diagnostics.activeRun){
           started=true;
           const bar=Number(document.querySelector('#playhead')?.getAttribute('data-bar'));
-          if(Number.isFinite(bar)&&transitions.at(-1)?.bar!==bar)transitions.push({bar,time:performance.now()});
+          if(diagnostics.currentBeat>targets[0].beat&&Number.isFinite(bar)&&transitions.at(-1)?.bar!==bar)transitions.push({bar,time:performance.now()});
           if(pending){
             const judgement=document.querySelector(`.score-note[data-beat="${pending.source}"]`)?.getAttribute('data-judgement')??null;
             if(judgement||performance.now()>=pending.deadline){hits.push({bar:pending.bar,judgement});pending=null;}

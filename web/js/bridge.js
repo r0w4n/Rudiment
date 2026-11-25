@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261124-3';
+const BRIDGE_BUILD='20261125-1';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -118,7 +118,14 @@ const performanceProfile={
 // Tone's implicit "now" includes a 100 ms scheduler look-ahead. That is
 // correct for scheduling clicks, but ahead of what the listener hears NOW.
 // Read the same transport at the audio output's current context time instead.
-const transportBeat=(run,now=performance.now())=>run.offset+Tone.getTransport().getTicksAtTime(audio.outputTime(now))/Tone.getTransport().PPQ-run.countBeats;
+function elapsedTransportBeats(run,now){
+  const outputTime=audio.outputTime(now);
+  // The output can still be playing the preceding run during look-ahead.
+  if(outputTime<run.transportStart)return 0;
+  const transport=Tone.getTransport();
+  return transport.getTicksAtTime(outputTime)/transport.PPQ;
+}
+const transportBeat=(run,now=performance.now())=>run.offset+elapsedTransportBeats(run,now)-run.countBeats;
 const presentation=createPresentationHost(()=>audio.activeRun?{beat:Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)),tempoBpm:Tone.getTransport().bpm.value}:null,highwayError);
 let highwayHandle=null,highwayObserver=null,highwaySelected=false;
 function highwayError(error){
@@ -196,7 +203,7 @@ document.addEventListener('keydown',event=>{
 // carries no style writes, paints or animation restarts - the main thread
 // only records the data-pulse timing attributes the metronome e2e observes.
 const visualMetronome = {
-  pending: [], lastStep: null, lastArmedStep: null, lastEvenBeatTime: null, lastDisplayBeat: null,
+  pending: [], lastStep: null, lastArmedStep: null, lastDisplayBeat: null,
   schedule(performanceTime,beat,meter,subdivision,beatMs){
     // The three metronome switches are INDEPENDENT enables: the master
     // 'beat lights' controls labels and the current-dot highlight, while the
@@ -223,9 +230,7 @@ const visualMetronome = {
       // phase-locked to the audible clock (drift corrected every two beats)
       // and absorbs tempo changes within one cycle.
       if(diagnostics.metronomeNeedle&&onBeat&&Math.abs(beat)%2===0){
-        const spanMs=this.lastEvenBeatTime!==null?performanceTime-this.lastEvenBeatTime:null;
-        this.lastEvenBeatTime=performanceTime;
-        this.armNeedle(performanceTime,spanMs&&spanMs>0?spanMs/2:Math.max(1,beatMs??1000));
+        this.armNeedle(performanceTime,beatMs);
       }
     }
   },
@@ -238,135 +243,71 @@ const visualMetronome = {
       const sweep=root.querySelector('.visual-metronome-sweep');
       this.needleTravel=Math.max(4,(sweep?.clientWidth??58)/2-6);
       this.needleAnimation?.cancel();
-      // Pendulum easing: each one-beat traversal decelerates into its
-      // extreme and accelerates out of it, so the alternate-direction
-      // turnaround at every beat has continuous position AND velocity. The
-      // previous linear sweep reversed at full speed at each beat, which
-      // read as a repeatable per-beat judder - a motion-design artifact of
-      // the metronome itself, not a performance defect (which is why no
-      // amount of main-thread work removal changed it).
       this.needleAnimation=this.needle?.animate([
         {transform:`translate3d(${-this.needleTravel}px,0,0)`},
         {transform:`translate3d(${this.needleTravel}px,0,0)`}
-      // fill:'backwards' keeps the left keyframe applied during the
-      // scheduler's look-ahead instead of dropping to the CSS centre: a
-      // fill:'none' animation in its before-phase (future startTime) fell
-      // back to centre and only snapped onto the pendulum at the beat,
-      // which read as a broken, jumpy needle.
       ],{duration:beatMs,iterations:Infinity,direction:'alternate',easing:'ease-in-out',fill:'backwards'});
-      // First arm: the needle rests at its CSS centre during the scheduler's
-      // look-ahead and begins its first sweep exactly at the scheduled beat.
       if(this.needleAnimation)this.needleAnimation.startTime=performanceTime;
       return;
     }
-    // Re-anchor: seek one full pendulum cycle INTO THE PAST. With a forward
-    // seek the animation's currentTime went negative for the whole scheduler
-    // look-ahead (~100 ms); fill:'none' then dropped the keyframes and the
-    // needle fell back to its CSS centre, only to snap to the left keyframe
-    // at the beat - a visible double jump every two beats. Seeking one cycle
-    // back keeps currentTime inside the running animation (2*duration minus
-    // the look-ahead), so the needle continues from wherever it is, still
-    // lands exactly on its left extreme at the scheduled beat, and drift
-    // correction and tempo absorption are preserved.
-    this.needleAnimation.duration=beatMs;
-    this.needleAnimation.startTime=performanceTime-2*this.needleAnimation.duration;
+    // Correct a running sweep only when the tempo or its audible phase changes.
+    const cycle=2*beatMs,animation=this.needleAnimation;
+    const phase=Math.abs((performanceTime-animation.startTime)%cycle);
+    if(animation.effect.getTiming().duration===beatMs&&Math.min(phase,cycle-phase)<2)return;
+    animation.effect.updateTiming({duration:beatMs});
+    animation.startTime=performanceTime-cycle;
   },
   armPulse(event){
     const root=document.getElementById('visual-metronome');if(!root)return;
-    if(!this.dots||!this.dots[0]?.isConnected)this.captureDots(root);
-    const dots=this.dots;
+    const dots=this.beatDots(root);
     const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
     const dot=dots[index];if(!dot)return;
     // One animation per dot, re-used by seeking: a future startTime discards
     // any in-flight iteration and starts the keyframes exactly at the beat's
     // output time on the animation timeline.
-    let animation=dot.pulseAnimation;
-    // The dot about to be highlighted rests at opacity 1 (the .current
-    // style); with the master switch off it rests at the plain dot's .72.
-    // Keyframes that always rested at .72 made the lit dot pop from .72
-    // back to 1 a moment after every pulse.
-    const lit=diagnostics.metronomeVisual;
-    const restOpacity=lit?1:.72;
-    if(!animation||dot.pulseDownbeat!==(index===0)||dot.pulseLit!==lit){
-      dot.pulseAnimation?.cancel();
-      animation=dot.animate([
-        {transform:'scale(1)',opacity:restOpacity},
-        {transform:index===0?'scale(1.9)':'scale(1.65)',opacity:1},
-        {transform:'scale(1)',opacity:restOpacity}
+    if(!dot.pulseAnimation){
+      dot.pulseAnimation=dot.animate([
+        {transform:'scale(1)'},
+        {transform:index===0?'scale(1.9)':'scale(1.65)'},
+        {transform:'scale(1)'}
       ],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});
-      dot.pulseAnimation=animation;
-      dot.pulseDownbeat=index===0;
-      dot.pulseLit=lit;
     }
-    animation.startTime=event.performanceTime;
+    dot.pulseAnimation.startTime=event.performanceTime;
     // The glow is a permanently-mounted child with a static shadow; fading
     // its opacity replaces the previous per-beat inline box-shadow writes
     // and their repaints.
     const glow=dot.firstElementChild;
-    if(glow&&(!glow.glowAnimation||glow.glowDownbeat!==(index===0))){
-      glow.glowAnimation?.cancel();
+    if(glow&&!glow.glowAnimation){
       glow.glowAnimation=glow.animate([{opacity:0},{opacity:1,offset:.45},{opacity:0}],{duration:180,easing:'linear'});
-      glow.glowDownbeat=index===0;
     }
     if(glow)glow.glowAnimation.startTime=event.performanceTime;
   },
-  // Beat lights: the visible highlight change is pre-armed on the compositor
-  // animation timeline exactly like the pulses, so the switch between dots
-  // happens at the scheduled beat instead of at the first display frame that
-  // happens to observe it (which read as per-beat jitter). The .current class
-  // bookkeeping moves to schedule time; fill:'backwards' holds the previous
-  // look during the look-ahead so the early class move is invisible until the
-  // beat itself.
-  captureDots(root){
-    this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
-    // Read each dot's resting and highlighted styles synchronously. The
-    // temporary class toggle cannot paint: it is restored before this task
-    // yields, and captures only run when the dot elements change.
-    const previous=this.dots.map(dot=>dot.classList.contains('current'));
-    this.dotStyles=this.dots.map((dot,index)=>{
-      const resting=getComputedStyle(dot);
-      const normal={backgroundColor:resting.backgroundColor,opacity:resting.opacity};
-      dot.classList.add('current');
-      const lit=getComputedStyle(dot);
-      const current={backgroundColor:lit.backgroundColor,opacity:lit.opacity};
-      dot.classList.toggle('current',previous[index]);
-      return {normal,current};
-    });
-    this.lastLitIndex=null;
+  beatDots(root){
+    if(!this.dots?.[0]?.isConnected){
+      this.dots=[...root.querySelectorAll('.visual-metronome-beats i')];
+      this.lastLitIndex=null;
+    }
+    return this.dots;
   },
   armLights(event){
     const root=document.getElementById('visual-metronome');if(!root)return;
-    if(!this.dots||!this.dotStyles||!this.dots[0]?.isConnected)this.captureDots(root);
-    const dots=this.dots,dotStyles=this.dotStyles;if(!dots||!dotStyles)return;
-    const index=((Math.floor(event.beat)%event.meter)+event.meter)%event.meter;
-    const incoming=dots[index],incomingStyles=dotStyles[index];
-    if(!incoming||!incomingStyles)return;
-    // A dot that is already lit (single-beat metres) changes nothing.
-    if(this.lastLitIndex===index)return;
-    const outgoingIndex=this.lastLitIndex;
+    const dots=this.beatDots(root);
+    const index=((event.beat%event.meter)+event.meter)%event.meter;
+    if(!dots[index]||index===this.lastLitIndex)return;
+    if(this.lastLitIndex!=null)this.lightTransition(dots[this.lastLitIndex],false,event.performanceTime);
+    this.lightTransition(dots[index],true,event.performanceTime);
     this.lastLitIndex=index;
-    if(outgoingIndex!==null&&outgoingIndex!==index){
-      const outgoing=dots[outgoingIndex],outgoingStyles=dotStyles[outgoingIndex];
-      if(outgoing&&outgoingStyles){
-        outgoing.classList.remove('current');
-        this.lightTransition(outgoing,outgoingStyles.current,outgoingStyles.normal,event.performanceTime);
-      }
-    }
-    incoming.classList.add('current');
-    this.lightTransition(incoming,incomingStyles.normal,incomingStyles.current,event.performanceTime);
   },
-  lightTransition(dot,from,to,startTime){
-    let animation=dot.lightAnimation;
-    if(!animation||dot.lightFrom!==from.backgroundColor){
-      animation?.cancel();
-      animation=dot.animate([
-        {backgroundColor:from.backgroundColor,opacity:from.opacity},
-        {backgroundColor:to.backgroundColor,opacity:to.opacity}
-      ],{duration:90,easing:'linear',fill:'backwards'});
-      dot.lightAnimation=animation;
-      dot.lightFrom=from.backgroundColor;
+  lightTransition(dot,lit,startTime){
+    // Only the opacity of a static highlight (including its shadow) changes.
+    // Backwards fill holds the previous appearance during audio look-ahead.
+    dot.classList.toggle('current',lit);
+    if(!dot.lightAnimation){
+      dot.lightAnimation=dot.lastElementChild.animate([{opacity:0},{opacity:1}],
+        {duration:90,fill:'backwards'});
     }
-    animation.startTime=startTime;
+    dot.lightAnimation.effect.updateTiming({direction:lit?'normal':'reverse'});
+    dot.lightAnimation.startTime=startTime;
   },
   pulse(event){
     const root=document.getElementById('visual-metronome');if(!root)return;
@@ -417,13 +358,13 @@ const visualMetronome = {
     delete root.dataset.beat;delete root.dataset.step;
     if(this.dots)this.dots.forEach(dot=>{
       dot.classList.remove('current');
-      dot.lightAnimation?.cancel();dot.lightAnimation=null;dot.lightFrom=null;
+      dot.lightAnimation?.cancel();dot.lightAnimation=null;
     });
     this.lastLitIndex=null;
     root.setAttribute('aria-label','Metronome settings');
   },
   stop(){
-    this.pending.length=0;this.lastStep=null;this.lastArmedStep=null;this.lastEvenBeatTime=null;this.lastDisplayBeat=null;this.dots=null;this.dotStyles=null;this.lastLitIndex=null;this.needle=null;
+    this.pending.length=0;this.lastStep=null;this.lastArmedStep=null;this.lastDisplayBeat=null;this.dots=null;this.lastLitIndex=null;this.needle=null;
     const root=document.getElementById('visual-metronome');if(!root)return;
     root.classList.remove('active','count-in');
     // The needle animation is compositor-driven; cancel it so the needle
@@ -433,7 +374,7 @@ const visualMetronome = {
     root.querySelectorAll('.visual-metronome-beats i').forEach(dot=>{
       dot.classList.remove('current');
       dot.pulseAnimation?.cancel();dot.pulseAnimation=null;
-      dot.lightAnimation?.cancel();dot.lightAnimation=null;dot.lightFrom=null;
+      dot.lightAnimation?.cancel();dot.lightAnimation=null;
       const glow=dot.firstElementChild;
       glow?.glowAnimation?.cancel();if(glow)glow.glowAnimation=null;
     });
@@ -585,6 +526,10 @@ const audio = {
   preload() {
     this.state = 'loading';
     this.raw ??= Tone.getContext().rawContext;
+    // Tone 15 wraps the native AudioContext with standardized-audio-context,
+    // which exposes currentTime but omits the output timestamp and latency.
+    // Limit access to the pinned wrapper's backing context to this adapter.
+    this.outputContext ??= this.raw._nativeAudioContext ?? this.raw;
     if (!this.master) {
       this.master = this.raw.createGain(); this.master.gain.value = .84;
       this.snareGain = this.raw.createGain(); this.snareGain.gain.value = .72;
@@ -693,27 +638,19 @@ const audio = {
     if(this.buffers.length||Object.keys(this.drumBuffers).length||Object.keys(this.metronomeBuffers).length)this.updateSampleState();
     return { state: this.state, sampleLayers: this.buffers.filter(Boolean).length, drumSampleCount:Object.values(this.drumBuffers).filter(Boolean).length, metronomeSampleCount:Object.values(this.metronomeBuffers).filter(Boolean).length };
   },
-  perfAt(audioTime) {
-    const direct = performance.now() + (audioTime - this.raw.currentTime) * 1000;
-    if (this.raw.getOutputTimestamp) {
-      const time = this.raw.getOutputTimestamp();
-      const output = time.performanceTime + (audioTime - time.contextTime) * 1000;
-      // Some engines report a zero/stale output timestamp until the first render quantum.
-      if (Number.isFinite(output) && Math.abs(output - direct) < 120) return output;
-    }
-    return direct;
-  },
+  // Both projections use the same output-clock correlation. A fresh device
+  // timestamp can trail the rendering clock by hundreds of milliseconds.
   outputTime(now) {
-    const timestamp=this.raw?.getOutputTimestamp?.();
-    if(timestamp){
-      const direct=now+(timestamp.contextTime-this.raw.currentTime)*1000;
-      if(Number.isFinite(timestamp.performanceTime)&&Number.isFinite(direct)
-        && Math.abs(timestamp.performanceTime-direct)<120)
-        return timestamp.contextTime+(now-timestamp.performanceTime)/1000;
+    const context=this.outputContext,time=context.getOutputTimestamp?.();
+    if(time&&time.performanceTime>0&&Number.isFinite(time.contextTime)&&time.contextTime>=0
+      &&Math.abs(now-time.performanceTime)<1000){
+      return time.contextTime+(now-time.performanceTime)/1000;
     }
-    // No reliable output timestamp: the unscheduled audio context time is
-    // still preferable to Tone.now() with its intentional look-ahead.
-    return this.raw?.currentTime??Tone.immediate();
+    return context.currentTime-(context.outputLatency||0);
+  },
+  perfAt(audioTime) {
+    const now=performance.now();
+    return now+(audioTime-this.outputTime(now))*1000;
   },
   playSnare(velocity = 105, when = null, articulation = 'center') {
     const profileStart=performanceProfile.enabled?performance.now():0;
@@ -837,7 +774,7 @@ const audio = {
     const requested=Math.max(30,Math.min(240,Number(bpm)||60)),run=this.activeRun;
     if(!run)return false;
     run.tempoScale=requested/run.sourceBpm;
-    const transport=Tone.getTransport(),elapsed=transport.getTicksAtTime(this.outputTime(performance.now()))/transport.PPQ;
+    const transport=Tone.getTransport(),elapsed=elapsedTransportBeats(run,performance.now());
     const rawBeat=run.offset+elapsed-run.countBeats,exerciseBeat=Math.max(run.offset,rawBeat);
     const value=tempoAtBeat(exerciseBeat,run.tempoMap,run.sourceBpm)*run.tempoScale;
     transport.bpm.setValueAtTime(value,Tone.now());
@@ -875,7 +812,7 @@ const audio = {
       // The transport remains alive for the scoring late-delivery drain, but
       // that silent tail is not another musical bar and must not click.
       if(!countIn&&(beat<offset-.000001||beat>=options.totalBeats-.000001))return;
-      visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision,60000/transport.bpm.value);
+      visualMetronome.schedule(this.perfAt(time),beat,options.meter,subdivision,60000/transport.bpm.getValueAtTime(time));
       const barSteps=options.meter*subdivision;
       if(options.metronome)this.click(time,((beatStep%barSteps)+barSteps)%barSteps===0,options.timbre);
     };
@@ -893,7 +830,14 @@ const audio = {
     // Establish the scoring origin from the actual scheduled start. Tone
     // starts at Tone.now(), not raw.currentTime; schedule setup may itself
     // take several frames on a dense exercise.
-    const transportStart=Tone.now(),runAudio=transportStart+countInSeconds,runPerformance=this.perfAt(runAudio);
+    // A warm retry/resume already has audio buffered to the output. Count
+    // that delay towards look-ahead, retaining at least one scheduler interval.
+    const clock=Tone.getContext();
+    const transportStart=options.immediate
+      ?Math.max(this.raw.currentTime+clock.updateInterval,this.outputTime(performance.now())+clock.lookAhead)
+      :Tone.now();
+    const runAudio=transportStart+countInSeconds,runPerformance=this.perfAt(runAudio);
+    this.activeRun.transportStart=transportStart;
     this.activeRun.runPerformance=runPerformance;
     transport.start(transportStart);
     const initialBeat=offset-countBeats;
@@ -913,7 +857,7 @@ const audio = {
       // Keep the score at the exact paused position during the short audio
       // scheduling lead-in. Without the clamp, resuming visibly jumps the
       // playhead backwards before the Tone transport starts.
-      const now = performance.now(), elapsedBeats=transport.getTicksAtTime(this.outputTime(now))/transport.PPQ;
+      const now = performance.now(), elapsedBeats=elapsedTransportBeats(this.activeRun,now);
       const frameInterval=now-lastAnimationFrame;
       performanceProfile.record('animation_frame_interval_ms',frameInterval);lastAnimationFrame=now;
       // The HUD measures the PRODUCTION transport frame's own cadence (not
@@ -1510,7 +1454,7 @@ function setDiagnostic(name,value){
   // pulse sub-toggles cancel their own compositor animations.
   if(name==='metronomeVisual'&&!diagnostics.metronomeVisual)visualMetronome.clearLabels();
   if(name==='metronomeNeedle'&&!diagnostics.metronomeNeedle){
-    visualMetronome.needleAnimation?.cancel();visualMetronome.needleAnimation=null;visualMetronome.lastEvenBeatTime=null;
+    visualMetronome.needleAnimation?.cancel();visualMetronome.needleAnimation=null;
   }
   if(name==='metronomePulses'&&!diagnostics.metronomePulses){
     const root=document.getElementById('visual-metronome');
@@ -1683,12 +1627,13 @@ function updateScore(beat, judgements, loopAware=false) {
     if(performanceProfile.enabled)playhead.dataset.beat=String(beat);
     const overlay=scoreData.playheadOverlay;
     if(position.row!==scoreData.lastPlayheadRow){
-      playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.row=String(position.row);playhead.dataset.bar=String(position.bar);
+      playhead.setAttribute('y1',String(position.y1));playhead.setAttribute('y2',String(position.y2));playhead.dataset.row=String(position.row);
       // WebKit freezes composited layers whose geometry mutates every frame;
       // write overlay geometry only at row boundaries and transform per frame.
       if(overlay){overlay.style.top=`${position.y1}px`;overlay.style.height=`${Math.max(1,position.y2-position.y1)}px`;}
       scoreData.lastPlayheadRow=position.row;
     }
+    if(playhead.dataset.bar!==String(position.bar))playhead.dataset.bar=String(position.bar);
     if(overlay)overlay.style.transform=`translate3d(${position.x}px,0,0)`;
     const visible=beat>=0&&beat<=scoreData.totalBeats;
     if(visible!==scoreData.lastPlayheadVisible){

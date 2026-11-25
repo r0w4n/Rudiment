@@ -1590,7 +1590,7 @@ fn MetronomeSettings(
 ) -> impl IntoView {
     let tempo_input = change_tempo.clone();
     let tempo_input2 = change_tempo.clone();
-    let _tempo_input3 = change_tempo.clone();
+
     let tempo_commit = change_tempo.clone();
     let tempo_commit2 = change_tempo.clone();
     let tempo_enter = change_tempo;
@@ -2094,7 +2094,9 @@ fn App() -> impl IntoView {
                 .unwrap_or(current_exercise.tempo_bpm);
             let final_effective_bpm =
                 final_source_bpm * bpm.get_untracked() / current_exercise.tempo_bpm.max(1.0);
-            let scoring_tail_beats = SCORING_TAIL_MS * final_effective_bpm / 60_000.0;
+            let scoring_tail_beats = (SCORING_TAIL_MS + latency_ms.get_untracked().max(0.0))
+                * final_effective_bpm
+                / 60_000.0;
             let options=json_compatible(&serde_json::json!({"bpm":bpm.get_untracked(),"sourceBpm":current_exercise.tempo_bpm,"tempoMap":tempo_events,"countInBeats":count_beats,"meter":bar_beats,"exerciseBeats":exercise_length,"displayRangeStart":range_start,"displayRangeBeats":sequence.length(),"displayBars":sequence.bars,"totalBeats":segment_end,"offsetBeat":offset,"immediate":immediate,"subdivision":subdivision.get_untracked(),"metronome":metronome.get_untracked(),"timbre":timbre.get_untracked(),"referenceNotes":reference_notes,"scoringTailBeats":scoring_tail_beats})).unwrap_or(JsValue::NULL);
             let origin_set = Rc::new(Cell::new(false));
             let tracking_started = Rc::new(Cell::new(false));
@@ -2179,8 +2181,10 @@ fn App() -> impl IntoView {
                     }
                 }
                 if beat >= offset - 0.000_001 {
-                    let watermark = session_start
-                        + elapsed_ms_at_beat(beat, scoring_bpm, &score_tempo_map)
+                    let watermark = (session_start
+                        + elapsed_ms_at_beat(beat, scoring_bpm, &score_tempo_map))
+                    .min(now)
+                        - latency_ms.get_untracked().max(0.0)
                         - SCORING_DELIVERY_GRACE_MS;
                     let scoring_result = {
                         let mut scoring = scoring_for_frame.borrow_mut();
@@ -3719,7 +3723,7 @@ fn App() -> impl IntoView {
                 <div class="metronome-context">
                   <button id="visual-metronome" class="visual-metronome" type="button" aria-label=move || format!("Metronome settings, {:.0} BPM", bpm.get()) aria-haspopup="dialog" aria-controls="metronome-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Metronome)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Metronome){None}else{Some(ContextPopup::Metronome)})>
                     <span class="visual-metronome-sweep" aria-hidden="true"><i></i></span>
-                    <span class="visual-metronome-beats" aria-hidden="true">{move || (0..beats_per_bar(&exercise.get()).round().max(1.0) as usize).map(|_|view!{<i><span class="visual-metronome-glow"></span></i>}).collect_view()}</span>
+                    <span class="visual-metronome-beats" aria-hidden="true">{move || (0..beats_per_bar(&exercise.get()).round().max(1.0) as usize).map(|_|view!{<i><span class="visual-metronome-glow"></span><span class="visual-metronome-highlight"></span></i>}).collect_view()}</span>
                     <small class="visual-metronome-label" aria-hidden="true">{move || format!("{:.0} BPM", bpm.get())}</small>
                   </button>
                     <div id="metronome-popover" class=move || if context_popup.get()==Some(ContextPopup::Metronome){"bar-selection-popover metronome-popover"}else{"bar-selection-popover metronome-popover hidden"} role="dialog" aria-label="Metronome">

@@ -44,6 +44,7 @@ const checks = {
       'tests/e2e/server.spec.ts',
       'tests/e2e/rudiment.spec.ts',
       'tests/e2e/performance-correctness.spec.ts',
+      'tests/e2e/metronome-visuals.spec.ts',
       'tests/e2e/presentation.spec.ts',
       '--output=test-results/browser',
     ],

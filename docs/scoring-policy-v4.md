@@ -14,7 +14,8 @@ reproducible.
   Perfect (±20 ms), Good (±60 ms), Early/Late, note points (100/95/60), the
   50-point invalid-hit penalty, ratings and mastery rules are unchanged.
 - Tone.Transport remains the musical clock. Its existing frame callback
-  advances a scoring watermark 32 ms behind the transport position. This is a
+  advances a scoring watermark 32 ms behind the transport position, with an
+  additional allowance for positive input calibration. This is a
   delivery allowance for browser MIDI callbacks, not a second matching window.
 - A note's valid hit window closes at its inclusive late boundary. It finalizes
   one additional matching window later (200 ms after onset by default), which
@@ -23,7 +24,8 @@ reproducible.
   rejected and the attempt stops with a visible reliability error; a confirmed
   judgement is never rewritten to hide late delivery.
 - Completion includes a silent 234 ms transport tail (200 ms decision horizon,
-  32 ms delivery allowance and 2 ms boundary margin). MIDI remains eligible
+  32 ms delivery allowance and 2 ms boundary margin), extended by any
+  positive input calibration. MIDI remains eligible
   during this tail, but the metronome and reference notes do not play.
 
 Count-in time never advances playable scoring time. Pausing stops the transport
