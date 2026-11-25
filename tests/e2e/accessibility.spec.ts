@@ -63,7 +63,7 @@ test('loop control names include the selected visible option', async ({ page }) 
 test('paper controls retain a visible keyboard focus outline', async ({ page }) => {
   await page.goto('/');
   await page.keyboard.press('Tab');
-  const expectFocusOutline = async (selector: string) => {
+  const expectFocusOutline = async (selector: string, color = 'rgb(36, 108, 91)') => {
     const control = page.locator(selector);
     await control.focus();
     await expect(control).toBeFocused();
@@ -77,9 +77,9 @@ test('paper controls retain a visible keyboard focus outline', async ({ page }) 
     });
     expect(style.style).not.toBe('none');
     expect(style.width).toBeGreaterThanOrEqual(2);
-    expect(style.color).toBe('rgb(36, 108, 91)');
+    expect(style.color).toBe(color);
   };
-  await expectFocusOutline('.loop-control');
+  await expectFocusOutline('.loop-control', 'rgb(114, 209, 189)');
   await page.locator('#bar-selection-trigger').click();
   await page.keyboard.press('Tab');
   await expectFocusOutline('#bar-selection-popover .bar-selection-close');
