@@ -154,7 +154,7 @@ function highwayExerciseChanged(){
 }
 function savedHighwayMode(){try{return localStorage.getItem('rudiment-visualisation')==='highway';}catch{return false;}}
 function saveHighwayMode(selected){try{localStorage.setItem('rudiment-visualisation',selected?'highway':'notation');}catch{/* Storage is optional. */}}
-function savedNotationTheme(){try{return localStorage.getItem('rudiment-notation-theme')==='dark';}catch{return false;}}
+function savedNotationTheme(){try{return localStorage.getItem('rudiment-notation-theme')!=='light';}catch{return true;}}
 function saveNotationTheme(dark){try{localStorage.setItem('rudiment-notation-theme',dark?'dark':'light');}catch{/* Storage is optional. */}}
 function tempoAtBeat(beat,map,initialBpm){let bpm=initialBpm;for(const change of map){if(change.beat>beat)break;bpm=change.bpm;}return bpm;}
 function transportPositionAtBeat(beat,meter){const bars=Math.floor(beat/meter),within=beat-bars*meter;return `${bars}:${within}:0`;}
