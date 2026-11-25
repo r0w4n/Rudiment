@@ -30,7 +30,7 @@ permissions:
 jobs:
   ai-task:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-task'
-    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@765be848ea1e6858b69542522f44d6bd7f3efa72
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@41554c50ec6a1de906546161d170fbddb6af68a1
     with:
       issue_number: ${{ format('{0}', github.event.issue.number || inputs.issue_number) }}
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
