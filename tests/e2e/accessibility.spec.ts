@@ -87,9 +87,7 @@ test('paper controls retain a visible keyboard focus outline', async ({ page }) 
   await page.locator('#visual-metronome').click();
   await page.keyboard.press('Tab');
   await expectFocusOutline('#metronome-popover .bar-selection-close');
-  const popup = page.locator('#metronome-popover');
-  await popup.getByLabel('Tempo in BPM').focus();
-  await expect(popup.locator('.tempo-control')).not.toHaveCSS('box-shadow', 'none');
+  await expectFocusOutline('#metronome-popover input[aria-label="Tempo in BPM"]');
 });
 
 test('light popover fields use a light native scheme and contrast-safe colors', async ({ page }) => {
