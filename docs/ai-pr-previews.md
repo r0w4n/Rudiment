@@ -79,14 +79,20 @@ performed by workflow YAML.
 
 ### Branch protection
 
-On `main` (Settings > Branches > Branch protection ruleset / protection):
+The `main required status checks` ruleset (Settings > Rules > Rulesets) is
+active on `main`:
 
-- Require a pull request before merging (merging stays a manual review
-  action; the AI automation never merges).
-- Require status checks to pass: `Code quality, unit tests, and build`,
-  `Browser correctness and accessibility`, `fast` (performance),
-  `CodeQL (javascript-typescript)`, `CodeQL (rust)`, and
-  `npm and RustSec advisory audits`.
+- **Require status checks to pass** before the branch is updated:
+  `Code quality, unit tests, and build`, `Browser correctness and
+  accessibility`, `fast` (performance), `CodeQL (javascript-typescript)`, and
+  `CodeQL (rust)`. `security.yml` keeps its path-based trigger and is not a
+  required check, because path-filtered workflows never report on PRs outside
+  their paths.
+- The repository administrator is listed as a bypass actor, so the
+  established local merge-and-push integration flow keeps working; GitHub
+  logs every bypass and the merge UI states it explicitly. The automation
+  itself has no bypass: a failing required check blocks any automated merge,
+  and nothing in the automation merges (no `gh pr merge` anywhere).
 
 ## Failure modes
 
@@ -97,3 +103,24 @@ On `main` (Settings > Branches > Branch protection ruleset / protection):
   an explicit remediation message instead of a generic Git error.
 - A failed PR creation in the AI task workflow deletes the pushed branch so
   no orphan `ai/issue-<n>` branch remains.
+
+## Validated end to end
+
+Validated against a temporary same-repository `ai/*` pull request (opened,
+updated and closed without merging):
+
+- All repository PR checks (`quality`, `performance`, `codeql`) started
+  automatically with no approval gate and reported on the PR.
+- The preview bundle built from the PR commit with the production relative
+  asset paths; index, bridge script, CSS and WASM all served over the
+  `pr-<number>/` subpath.
+- A new push to the PR re-triggered the preview build for the new commit;
+  closing the PR cancelled an in-flight build and triggered cleanup.
+- Publishing and removing the preview directory on the `gh-pages` branch
+  (the exact operations the publish and cleanup stages run) were verified
+  against the live Pages site, including the 404 after removal, the intact
+  root page, and an unchanged production site.
+- Missing App credentials fail the publish and cleanup stages with the
+  documented remediation message; the sticky PR comment reports the failure
+  with the run link. The App-backed happy path completes the same operations
+  once the one-time configuration above is performed.
