@@ -99,3 +99,5 @@ On `main` (Settings > Branches > Branch protection ruleset / protection):
   no orphan `ai/issue-<n>` branch remains.
 
 Used to validate the AI PR preview pipeline (docs/ai-pr-previews.md).
+
+Second commit to validate preview updates on synchronize.
