@@ -35,7 +35,11 @@ jobs:
           npm run bundle
       - name: Build production assets once
         working-directory: web
-        run: trunk build index.html --release --locked=true --skip-version-check --dist ../dist --public-url "./"
+        run: |
+          started=$(date +%s)
+          trunk build index.html --release --locked=true --skip-version-check --dist ../dist --public-url "./"
+          duration=$(( $(date +%s) - started ))
+          echo "Production compilation: ${duration}s" >>"$GITHUB_STEP_SUMMARY"
       - name: Run browser tests with runner Chrome
         run: npm run qa:browser -- --skip-build
       - name: Run accessibility gates with runner Chrome

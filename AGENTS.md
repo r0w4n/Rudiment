@@ -68,7 +68,7 @@ When modifying the controller/host or adding a renderer:
 
 ## Setup and focused checks
 
-- Use Node 22, stable Rust with `wasm32-unknown-unknown`, Trunk 0.22.1 and `npm ci`; browser tests also require installed Google Chrome and `python3`, and security QA requires `cargo-audit`. See `QA.md` for setup and check scope.
+- Use Node 22, the Rust toolchain pinned in `rust-toolchain.toml` with `wasm32-unknown-unknown`, Trunk 0.22.1 and `npm ci`; browser tests also require installed Google Chrome and `python3`, and security QA requires `cargo-audit`. See `QA.md` for setup and check scope.
 
 - Focus a Rust test with `cargo test -p rudiment-core --locked <test-name>` (or `-p rudiment-web`). For a focused browser test, first run `npm run build`, then `npx playwright test tests/e2e/<file>.spec.ts -g '<test name>'`. Playwright starts its own Python server for `dist/` on an ephemeral port; it does not test the dev server.
 

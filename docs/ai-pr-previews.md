@@ -34,6 +34,31 @@ Merging stays a manual action in every case. Nothing in this flow pushes to
 Human-created pull requests keep their normal behaviour; the preview workflow
 only acts on same-repository branches named `ai/*`.
 
+## AI task environment ownership
+
+Rudiment owns the environment used by the implementation agent. The central
+caller opts into `.github/actions/setup-ai-task`, which delegates to the same
+`.github/actions/setup-rudiment` action used by repository CI. It installs
+Node 22, the Rust toolchain pinned in `rust-toolchain.toml`, the WASM target,
+Trunk 0.22.1 and locked npm dependencies, then verifies their versions. It
+does not compile the application before OpenCode starts; the agent runs the
+relevant checks for its change and the pull-request workflows remain the
+authoritative quality gates.
+
+The setup summary records exact npm, Rust and Trunk cache hits, npm install
+duration and total environment preparation time. Rust cache identity includes
+the dependency manifests and lockfile, pinned toolchain, compilation target and
+Trunk version; npm and Trunk caches include their lock/version/checksum inputs.
+Only dependency downloads, compiled dependencies and the verified tool binary
+are cached—never credentials, model sessions or agent state.
+
+The AI implementation job restores compatible caches but disables every cache
+save. This matters because the setup action and OpenCode share a runner:
+post-job cache saves would otherwise be able to persist files after the agent
+had modified them. Ordinary CI saves npm and Trunk caches immediately during
+setup, and Rust post-job saves remain enabled only in repository validation
+jobs. Untrusted pull requests remain confined to GitHub's branch cache scope.
+
 ## Preview isolation model
 
 - The `build` job checks out the PR commit and executes untrusted PR code
