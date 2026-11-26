@@ -1,9 +1,8 @@
 name: OpenCode AI task
 
-# PROVISIONAL CENTRAL PIN: this immutable SHA belongs to central migration PR
-# https://github.com/r0w4n/central-ai-workflow/pull/1. Before merging this
-# Rudiment PR, replace it with the final reviewed commit from central main and
-# rerun the manual dry-run. See central-ai-workflow/docs/RELEASING.md.
+# The reusable workflow is pinned to the reviewed release commit of
+# r0w4n/central-ai-workflow main. Update the SHA only after a reviewed and
+# merged central pull request; see central-ai-workflow/docs/RELEASING.md.
 
 on:
   issues:
@@ -30,9 +29,21 @@ permissions:
 jobs:
   ai-task:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-task'
-    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@41554c50ec6a1de906546161d170fbddb6af68a1
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@5df0a5c0ee06b398536bc4571a6da4b5cad379ab
     with:
       issue_number: ${{ format('{0}', github.event.issue.number || inputs.issue_number) }}
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      # Provision the pinned Rust/WASM/Trunk toolchain and verify the web
+      # build before the agent starts.
+      toolchain_profile: rudiment-web
+      # AI pull requests are created ready for review; merging stays manual.
+      draft: false
     secrets:
       OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+      # GitHub App publication credentials. Pull requests created with the
+      # resulting App token start this repository's PR workflows
+      # automatically instead of being held for approval. The App must be
+      # installed on this repository with contents: write and pull requests:
+      # write. See docs/ai-pr-previews.md for the one-time configuration.
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}

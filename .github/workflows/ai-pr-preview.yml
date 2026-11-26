@@ -1,0 +1,346 @@
+name: AI PR preview
+
+# Isolated browser previews of same-repository AI pull requests, published to
+# the GitHub Pages site of the dedicated preview repository
+# r0w4n/Rudiment-previews under pr-<number>/. Production Rudiment Pages
+# deployment (.github/workflows/pages.yml) is untouched by this workflow.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PREVIEWS_REPOSITORY: r0w4n/Rudiment-previews
+  PREVIEW_BASE_URL: https://r0w4n.github.io/Rudiment-previews
+
+jobs:
+  build:
+    name: Build PR preview bundle
+    # Trusted, same-repository AI branches only: the build job executes
+    # untrusted PR code, so it runs with no write permissions and no secrets.
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'ai/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: ./.github/actions/setup-rudiment
+      - name: Generate browser assets
+        run: |
+          npm run fixtures
+          npm run bundle
+      - name: Build preview assets once with relative paths
+        # Same production build as pages.yml; the relative public URL keeps
+        # the bundle valid under the preview subpath pr-<number>/.
+        working-directory: web
+        run: trunk build index.html --release --locked=true --skip-version-check --dist ../dist --public-url "./"
+      - name: Verify deployable asset graph
+        run: |
+          test -s dist/index.html
+          grep -q '<title>Rudiment' dist/index.html
+          test -s dist/public/bridge.js
+          test ! -e dist/public/reference
+          test -n "$(find dist -name '*.wasm' -print -quit)"
+          grep -q 'href="./' dist/index.html
+          grep -q "from './" dist/index.html
+          ! grep -Eq '(src|href)="/' dist/index.html
+      - name: Upload preview bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: ai-pr-preview
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish preview to Rudiment-previews
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # Serialise pushes to the shared gh-pages branch across PRs.
+    concurrency:
+      group: ai-pr-preview-gh-pages
+      cancel-in-progress: false
+    steps:
+      - name: Download preview bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: ai-pr-preview
+          path: dist
+
+      - name: Guard the untrusted preview bundle
+        # The bundle was produced by untrusted PR code. Treat it strictly as
+        # data: refuse anything that could escape the preview directory or
+        # confuse Git before it is committed anywhere privileged.
+        run: |
+          set -euo pipefail
+          test -s dist/index.html
+          test -s dist/public/bridge.js
+          test -n "$(find dist -name '*.wasm' -print -quit)"
+          [ -z "$(find dist -type l -print -quit)" ] || {
+            echo "::error::The preview bundle contains symbolic links."
+            exit 1
+          }
+          [ -z "$(find dist -name '.git' -print -quit)" ] || {
+            echo "::error::The preview bundle contains Git metadata entries."
+            exit 1
+          }
+          ! grep -Eq '(src|href)="/' dist/index.html
+
+      - name: Mint GitHub App preview publication token
+        # Cross-repository publication credential, scoped to the preview
+        # repository's contents only. The GitHub App must be installed on
+        # Rudiment-previews with contents: write.
+        id: app-token
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        if: env.APP_ID != '' && env.APP_PRIVATE_KEY != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: r0w4n
+          repositories: Rudiment-previews
+          permission-contents: write
+
+      - name: Publish the preview
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PREVIEW_PATH: pr-${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [ -n "${GH_TOKEN}" ] || {
+            echo "::error::GitHub App credentials are not configured; the preview cannot be published."
+            echo "::error::Fix: add the APP_ID and APP_PRIVATE_KEY Actions secrets and install the Rudiment automation GitHub App on ${PREVIEWS_REPOSITORY} with contents: write. See docs/ai-pr-previews.md."
+            exit 1
+          }
+          ASKPASS="${RUNNER_TEMP}/git-askpass.$$.sh"
+          cat >"${ASKPASS}" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            Username*) printf '%s\n' "x-access-token" ;;
+            *)         printf '%s\n' "${GH_TOKEN}" ;;
+          esac
+          ASKPASS
+          chmod 700 "${ASKPASS}"
+          export GIT_ASKPASS="${ASKPASS}"
+          export GIT_TERMINAL_PROMPT=0
+
+          PAGES_DIR="${RUNNER_TEMP}/previews-pages"
+          rm -rf "${PAGES_DIR}"
+          if ! git clone --depth 1 --branch gh-pages \
+              "https://github.com/${PREVIEWS_REPOSITORY}.git" "${PAGES_DIR}"; then
+            echo "::notice::gh-pages branch missing; creating an orphan branch."
+            mkdir -p "${PAGES_DIR}"
+            git -C "${PAGES_DIR}" init -q -b gh-pages
+          fi
+
+          # Replace only this PR's directory; every other preview stays put.
+          rm -rf "${PAGES_DIR:?}/${PREVIEW_PATH}"
+          mkdir -p "${PAGES_DIR}/${PREVIEW_PATH}"
+          cp -R dist/. "${PAGES_DIR}/${PREVIEW_PATH}/"
+          touch "${PAGES_DIR}/.nojekyll"
+
+          git -C "${PAGES_DIR}" config user.name "rudiment-previews-bot"
+          git -C "${PAGES_DIR}" config user.email "rudiment-previews-bot@users.noreply.github.com"
+          git -C "${PAGES_DIR}" add -A
+          if git -C "${PAGES_DIR}" diff --cached --quiet; then
+            echo "::notice::Preview already up to date for ${PREVIEW_PATH}."
+          else
+            git -C "${PAGES_DIR}" commit -q -m "Deploy PR ${{ github.event.pull_request.number }} preview at ${HEAD_SHA}"
+            git -C "${PAGES_DIR}" push -q origin gh-pages
+          fi
+          rm -f "${ASKPASS}"
+
+      - name: Summarise the preview deployment
+        env:
+          PREVIEW_PATH: pr-${{ github.event.pull_request.number }}
+        run: |
+          echo "Preview deployed: ${{ env.PREVIEW_BASE_URL }}/${PREVIEW_PATH}/" >>"${GITHUB_STEP_SUMMARY}"
+          echo "Commit: ${{ github.event.pull_request.head.sha }}" >>"${GITHUB_STEP_SUMMARY}"
+
+  report:
+    name: Record the preview link on the PR
+    needs: [build, publish]
+    if: success() && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Create or update the sticky preview comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PREVIEW_PATH: pr-${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- rudiment-ai-pr-preview -->'
+          BODY="${MARKER}
+          ## 🧪 Rudiment preview
+
+          **Preview URL:** ${{ env.PREVIEW_BASE_URL }}/${PREVIEW_PATH}/
+
+          Built from commit \`${HEAD_SHA}\` with the same production build and
+          relative asset paths as the deployment from \`main\`. The preview is
+          updated automatically for every new commit and removed when this PR
+          is closed or merged. Production is never affected by previews."
+
+          COMMENT_ID="$(gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | head -n1)"
+          if [ -n "${COMMENT_ID}" ]; then
+            gh api -X PATCH "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}" -f body="${BODY}" >/dev/null
+            echo "::notice::Updated preview comment ${COMMENT_ID}."
+          else
+            gh api -X POST "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="${BODY}" >/dev/null
+            echo "::notice::Created preview comment."
+          fi
+
+  report-failure:
+    name: Record the preview failure on the PR
+    needs: [build, publish]
+    if: failure() && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Create or update the sticky preview-failure comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- rudiment-ai-pr-preview -->'
+          BODY="${MARKER}
+          ## 🧪 Rudiment preview
+
+          ⚠️ **Preview deployment failed.** Inspect the workflow logs for the
+          actionable error: ${RUN_URL}
+
+          Production is unaffected; this only skips the preview for this
+          commit. Push a fix or rerun the workflow to retry."
+
+          COMMENT_ID="$(gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | head -n1)"
+          if [ -n "${COMMENT_ID}" ]; then
+            gh api -X PATCH "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}" -f body="${BODY}" >/dev/null
+            echo "::notice::Updated preview comment ${COMMENT_ID} with the failure."
+          else
+            gh api -X POST "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="${BODY}" >/dev/null
+            echo "::notice::Created preview failure comment."
+          fi
+
+  cleanup:
+    name: Remove the preview when the PR closes
+    if: >-
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'ai/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: ai-pr-preview-gh-pages
+      cancel-in-progress: false
+    steps:
+      - name: Mint GitHub App preview publication token
+        id: app-token
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        if: env.APP_ID != '' && env.APP_PRIVATE_KEY != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: r0w4n
+          repositories: Rudiment-previews
+          permission-contents: write
+
+      - name: Remove the preview directory
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PREVIEW_PATH: pr-${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [ -n "${GH_TOKEN}" ] || {
+            echo "::error::GitHub App credentials are not configured; the preview cannot be removed automatically."
+            echo "::error::Fix: add the APP_ID and APP_PRIVATE_KEY Actions secrets and install the Rudiment automation GitHub App on ${PREVIEWS_REPOSITORY} with contents: write. See docs/ai-pr-previews.md."
+            exit 1
+          }
+          ASKPASS="${RUNNER_TEMP}/git-askpass.$$.sh"
+          cat >"${ASKPASS}" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            Username*) printf '%s\n' "x-access-token" ;;
+            *)         printf '%s\n' "${GH_TOKEN}" ;;
+          esac
+          ASKPASS
+          chmod 700 "${ASKPASS}"
+          export GIT_ASKPASS="${ASKPASS}"
+          export GIT_TERMINAL_PROMPT=0
+
+          PAGES_DIR="${RUNNER_TEMP}/previews-pages"
+          rm -rf "${PAGES_DIR}"
+          git clone --depth 1 --branch gh-pages \
+            "https://github.com/${PREVIEWS_REPOSITORY}.git" "${PAGES_DIR}"
+          if [ ! -e "${PAGES_DIR}/${PREVIEW_PATH}" ]; then
+            echo "::notice::No preview directory ${PREVIEW_PATH} to remove."
+            exit 0
+          fi
+          git -C "${PAGES_DIR}" rm -rq "${PREVIEW_PATH}"
+          git -C "${PAGES_DIR}" config user.name "rudiment-previews-bot"
+          git -C "${PAGES_DIR}" config user.email "rudiment-previews-bot@users.noreply.github.com"
+          git -C "${PAGES_DIR}" commit -q -m "Remove PR ${{ github.event.pull_request.number }} preview (PR closed)"
+          git -C "${PAGES_DIR}" push -q origin gh-pages
+          rm -f "${ASKPASS}"
+
+      - name: Retire the sticky preview comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PREVIEW_PATH: pr-${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- rudiment-ai-pr-preview -->'
+          BODY="${MARKER}
+          ## 🧪 Rudiment preview
+
+          This PR was closed or merged; its preview at
+          \`${{ env.PREVIEW_BASE_URL }}/${PREVIEW_PATH}/\` has been removed."
+
+          COMMENT_ID="$(gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | head -n1)"
+          if [ -n "${COMMENT_ID}" ]; then
+            gh api -X PATCH "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}" -f body="${BODY}" >/dev/null
+          fi
