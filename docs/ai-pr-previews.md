@@ -97,3 +97,5 @@ On `main` (Settings > Branches > Branch protection ruleset / protection):
   an explicit remediation message instead of a generic Git error.
 - A failed PR creation in the AI task workflow deletes the pushed branch so
   no orphan `ai/issue-<n>` branch remains.
+
+Used to validate the AI PR preview pipeline (docs/ai-pr-previews.md).
