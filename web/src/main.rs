@@ -1614,11 +1614,27 @@ fn MetronomeSettings(
     let save_count = save.clone();
     let save_subdivision = save.clone();
     let save_timbre = save.clone();
+    // The BPM value above the tempo slider must follow the thumb live. The
+    // reactive `prop:value` binding already tracks `bpm`, but dragging was
+    // observed leaving the number stale in the field (#18), so the slider's
+    // own input/change events also mirror the authoritative tempo straight
+    // into the display. Reading `bpm` after `change_tempo` keeps the mirror
+    // desync-safe: when tempo changes are suppressed (adaptive sessions) the
+    // unchanged tempo is mirrored instead of the raw slider position.
+    let bpm_display = NodeRef::<leptos::html::Input>::new();
+    let mirror_bpm_display = move || {
+        if let Some(bpm_display) = bpm_display.get() {
+            bpm_display.set_value(&bpm.get_untracked().round().to_string());
+        }
+    };
+    let mirror_on_input = mirror_bpm_display;
+    let mirror_on_commit = mirror_bpm_display;
     view! {
       <label class="toggle-row metronome-enabled"><span>"Click during exercise"</span><input type="checkbox" prop:checked=move || metronome.get() on:change=move |event|{metronome.set(event_target_checked(&event));save_enabled();}/></label>
       <div class="tempo-field"><span>"Tempo (BPM)"</span>
           <div class="tempo-value">
             <input aria-label="Tempo in BPM" title="Type a tempo from 30 to 240 BPM" type="number" inputmode="numeric" min="30" max="240" step="1"
+              node_ref=bpm_display
               prop:value=move || bpm.get().round().to_string()
               on:focus=move |event|{event_target::<web_sys::HtmlInputElement>(&event).select();}
               on:input=move |event|{
@@ -1647,12 +1663,13 @@ fn MetronomeSettings(
           on:input=move |event|{
             if let Ok(value)=event_target_value(&event).parse::<f64>() {
               tempo_input(value.round());save_input();
+              mirror_on_input();
             }
           }
           on:change=move |event|{
             let input=event_target::<web_sys::HtmlInputElement>(&event);
             let value=input.value().parse::<f64>().ok().filter(|value|value.is_finite()).unwrap_or_else(||bpm.get_untracked()).round().clamp(30.0,240.0);
-            tempo_commit(value);input.set_value(&value.to_string());save_commit();
+            tempo_commit(value);input.set_value(&value.to_string());mirror_on_commit();save_commit();
           }/>
       </div>
       <label class="metronome-count-in">"Count-in"<select prop:value=move || count_in.get().to_string() on:change=move |event|{count_in.set(event_target_value(&event).parse().unwrap_or(1));save_count();}><option value="0">"Off"</option><option value="1">"1 bar"</option><option value="2">"2 bars"</option></select></label>
