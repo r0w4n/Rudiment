@@ -1617,19 +1617,6 @@ fn MetronomeSettings(
     view! {
       <label class="toggle-row metronome-enabled"><span>"Click during exercise"</span><input type="checkbox" prop:checked=move || metronome.get() on:change=move |event|{metronome.set(event_target_checked(&event));save_enabled();}/></label>
       <div class="tempo-field"><span>"Tempo (BPM)"</span>
-        <div class="tempo-control tempo-drag-control">
-          <input type="range" class="tempo-slider" aria-label="Tempo slider" title="Drag to change tempo from 30 to 240 BPM" min="30" max="240" step="1"
-            prop:value=move || bpm.get().round().to_string()
-            on:input=move |event|{
-              if let Ok(value)=event_target_value(&event).parse::<f64>() {
-                tempo_input(value.round());save_input();
-              }
-            }
-            on:change=move |event|{
-              let input=event_target::<web_sys::HtmlInputElement>(&event);
-              let value=input.value().parse::<f64>().ok().filter(|value|value.is_finite()).unwrap_or_else(||bpm.get_untracked()).round().clamp(30.0,240.0);
-              tempo_commit(value);input.set_value(&value.to_string());save_commit();
-            }/>
           <div class="tempo-value">
             <input aria-label="Tempo in BPM" title="Type a tempo from 30 to 240 BPM" type="number" inputmode="numeric" min="30" max="240" step="1"
               prop:value=move || bpm.get().round().to_string()
@@ -1655,7 +1642,18 @@ fn MetronomeSettings(
               }/>
             <span>"BPM"</span>
           </div>
-        </div>
+        <input type="range" class="tempo-slider" aria-label="Tempo slider" title="Drag to change tempo from 30 to 240 BPM" min="30" max="240" step="1"
+          prop:value=move || bpm.get().round().to_string()
+          on:input=move |event|{
+            if let Ok(value)=event_target_value(&event).parse::<f64>() {
+              tempo_input(value.round());save_input();
+            }
+          }
+          on:change=move |event|{
+            let input=event_target::<web_sys::HtmlInputElement>(&event);
+            let value=input.value().parse::<f64>().ok().filter(|value|value.is_finite()).unwrap_or_else(||bpm.get_untracked()).round().clamp(30.0,240.0);
+            tempo_commit(value);input.set_value(&value.to_string());save_commit();
+          }/>
       </div>
       <label class="metronome-count-in">"Count-in"<select prop:value=move || count_in.get().to_string() on:change=move |event|{count_in.set(event_target_value(&event).parse().unwrap_or(1));save_count();}><option value="0">"Off"</option><option value="1">"1 bar"</option><option value="2">"2 bars"</option></select></label>
       <label class="metronome-subdivision">"Subdivision"<select prop:value=move || subdivision.get().to_string() on:change=move |event|{subdivision.set(event_target_value(&event).parse().unwrap_or(1));save_subdivision();}><option value="1">"Quarter notes"</option><option value="2">"Eighth notes"</option><option value="4">"Sixteenth notes"</option></select></label>
