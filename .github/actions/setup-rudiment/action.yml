@@ -133,7 +133,11 @@ runs:
         TRUNK_CACHE_HIT: ${{ steps.trunk-cache.outputs.cache-hit }}
       run: |
         total=$(( $(date +%s) - STARTED ))
-        trunk_hit="${TRUNK_CACHE_HIT:-not-requested}"
+        if [ "${{ inputs.trunk }}" = true ]; then
+          trunk_hit="${TRUNK_CACHE_HIT:-false}"
+        else
+          trunk_hit=not-requested
+        fi
         {
           echo "### Rudiment environment preparation"
           echo
