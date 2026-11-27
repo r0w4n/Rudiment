@@ -3331,10 +3331,13 @@ fn App() -> impl IntoView {
         });
     }
     // Startup fallback: if no MIDI connection is established within three
-    // seconds, surface the shared connection modal so the kit can be
-    // connected and configured in one place. Browsers without Web MIDI have
-    // nothing to connect, so they are never interrupted. This runs once; a
-    // manual dismissal keeps it closed for the rest of the session.
+    // seconds while a connection could still be made, surface the shared
+    // connection modal so the kit can be connected and configured in one
+    // place. It stays quiet when the browser has no Web MIDI, when the user
+    // denied the permission (a modal every session would only nag after an
+    // explicit refusal), or when permission was granted but no kit is even
+    // plugged in. This runs once; a manual dismissal keeps it closed for the
+    // rest of the session, and settings remain the manual entry point.
     {
         let open_modal = Closure::once_into_js(move || {
             if midi_modal_dismissed.get_untracked()
@@ -3342,9 +3345,13 @@ fn App() -> impl IntoView {
                     &midi_ports.get_untracked(),
                     selected_midi.get_untracked().as_deref(),
                 )
-                || midi_permission.get_untracked().as_deref() == Some("unsupported")
             {
                 return;
+            }
+            match midi_permission.get_untracked().as_deref() {
+                Some("unsupported") | Some("denied") => return,
+                Some("granted") if midi_ports.get_untracked().is_empty() => return,
+                _ => {}
             }
             midi_modal_auto.set(true);
             midi_modal_open.set(true);

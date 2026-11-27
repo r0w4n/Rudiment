@@ -7,7 +7,7 @@ async function setTempo(page: Page, value: string) {
   await page.getByLabel('Close metronome settings').click();
 }
 
-const topNavSelectors = ['#midi-library-trigger', '#stats-trigger', '#settings-trigger', '.topbar .status-pill', '.topbar .brand'];
+const topNavSelectors = ['#midi-library-trigger', '#stats-trigger', '#settings-trigger', '.topbar .brand'];
 
 // Guards the iPad top-navigation touch fix: every control must keep a
 // 44x44 CSS-pixel target, use `touch-action: manipulation` so WebKit's
@@ -59,7 +59,7 @@ test('first-use workspace renders real notation and lifecycle controls', async (
   await expect(page.locator('.score-note')).toHaveCount(32);
   await expect(page.locator('#notation')).toContainText('R');
   await expect(page.locator('#notation')).toContainText('L');
-  await expect(page.getByRole('button',{name:'MIDI connection'})).toBeVisible();
+  await expect(page.locator('.topbar .status-pill')).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Import MIDI'})).toHaveCount(0);
   const startButton=page.getByRole('button',{name:/Start practice/});
   await expect(startButton.locator('.start-instruction')).toHaveText('Hit your drum or press J to start');
@@ -846,7 +846,7 @@ test('non-contiguous selected bars play in score order and accept the first hit 
     Object.assign(window,{__sequenceInput:input});
   });
   await page.goto('/');
-  await expect(page.getByRole('button',{name:/MIDI connection/})).toContainText('Sequence Kit');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Sequence Kit · connected');
   await page.evaluate(()=>(window as any).rudiment.loadBundledFromLibrary('public/exercises/performance/medium.mid','Performance Medium'));
   await expect(page.locator('.score-note')).toHaveCount(480);
   await setTempo(page,'240');
@@ -1766,8 +1766,12 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   const audioDiagnostics = () => page.evaluate(() =>
     (window as unknown as { rudiment: { audioDiagnostics(): { contextState: string; sampleLayers: number; snareStarts: number } } }).rudiment.audioDiagnostics()
   );
-  await expect(page.locator('.status-pill')).toContainText('Acceptance Kit · connected');
-  await page.getByRole('button', { name: 'MIDI connection' }).click();
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Acceptance Kit · connected');
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByRole('button', { name: 'Open MIDI connection setup' }).click();
+  await page.locator('#midi-connection-modal').getByRole('button', { name: 'Retry connection' }).click();
+  await page.getByRole('button', { name: 'Continue without MIDI' }).click();
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
   await expect.poll(async () => (await audioDiagnostics()).contextState).toBe('running');
   await expect.poll(async () => (await audioDiagnostics()).sampleLayers).toBe(4);
   await page.getByRole('button', { name: 'Stats' }).click();
@@ -1777,14 +1781,14 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /Pause/ })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByText('MIDI diagnostics').click();
+  await page.locator('#settings-dialog').getByText('MIDI diagnostics').click();
   const startsBeforeLow = (await audioDiagnostics()).snareStarts;
   await page.evaluate(() => {
     const input = (window as unknown as { __rudimentFakeInput: { dispatch(data: number[],timestamp?:number): void } }).__rudimentFakeInput;
     input.dispatch([0x99, 38, 1],1234.567);
   });
-  await expect(page.locator('.diagnostics')).toContainText('1234.567 ms');
-  await expect(page.locator('.diagnostics')).toContainText('velocity 1');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('1234.567 ms');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('velocity 1');
   await expect.poll(async () => (await audioDiagnostics()).snareStarts).toBe(startsBeforeLow + 1);
   const startsAfterLow = startsBeforeLow + 1;
   await page.evaluate(() => {
@@ -1795,30 +1799,30 @@ test('simulated Web MIDI preserves message details and filters non-attacks', asy
   await page.waitForTimeout(60);
   expect((await audioDiagnostics()).snareStarts).toBe(startsAfterLow);
   await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99,38,100]));
-  await expect(page.locator('.diagnostics')).toContainText('note_on');
-  await expect(page.locator('.diagnostics')).toContainText('note_off');
-  await expect(page.locator('.diagnostics')).toContainText('cc');
-  await expect(page.locator('.diagnostics')).toContainText(/153,\s*38,\s*100/);
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('note_on');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('note_off');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('cc');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText(/153,\s*38,\s*100/);
   await expect(page.locator('.live-assessment')).toHaveCount(0);
   await page.getByRole('button', { name: 'Learn snare' }).click();
   await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99, 40, 112]));
-  await expect(page.getByText('snare · note 40, channel 10')).toBeVisible();
+  await expect(page.locator('#settings-dialog').getByText('snare · note 40, channel 10')).toBeVisible();
   await page.getByRole('button', { name: 'Learn kick' }).click();
   await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99, 60, 108]));
-  await expect(page.getByText('kick · note 60, channel 10')).toBeVisible();
+  await expect(page.locator('#settings-dialog').getByText('kick · note 60, channel 10')).toBeVisible();
   await page.getByRole('button', { name: 'Learn open hi-hat' }).click();
   await page.evaluate(() => (window as unknown as { __rudimentFakeInput: { dispatch(data: number[]): void } }).__rudimentFakeInput.dispatch([0x99, 61, 106]));
-  await expect(page.getByText('open hi-hat · note 61, channel 10')).toBeVisible();
+  await expect(page.locator('#settings-dialog').getByText('open hi-hat · note 61, channel 10')).toBeVisible();
   await page.waitForTimeout(400);
   await page.evaluate(() => (window as unknown as { __rudimentFakeAccess: { disconnect(): void } }).__rudimentFakeAccess.disconnect());
-  await expect(page.locator('.midi-state')).toContainText('Drums disconnected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Drums disconnected');
   await page.evaluate(() => (window as unknown as { __rudimentFakeAccess: { reconnect(): void } }).__rudimentFakeAccess.reconnect());
-  await expect(page.locator('.midi-state')).toContainText('Acceptance Kit · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Acceptance Kit · connected');
   await page.reload();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await expect(page.getByText('snare · note 40, channel 10')).toBeVisible();
-  await expect(page.getByText('kick · note 60, channel 10')).toBeVisible();
-  await expect(page.getByText('open hi-hat · note 61, channel 10')).toBeVisible();
+  await expect(page.locator('#settings-dialog').getByText('snare · note 40, channel 10')).toBeVisible();
+  await expect(page.locator('#settings-dialog').getByText('kick · note 60, channel 10')).toBeVisible();
+  await expect(page.locator('#settings-dialog').getByText('open hi-hat · note 61, channel 10')).toBeVisible();
 });
 
 test('MIDI monitoring does not generate a substitute snare when sample decoding stalls', async ({ page }) => {
@@ -1838,8 +1842,12 @@ test('MIDI monitoring does not generate a substitute snare when sample decoding 
     Object.assign(window,{__rudimentMidiWebInput:input});
   });
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('MIDIWeb Kit · connected');
-  await page.getByRole('button',{name:'MIDI connection'}).click();
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('MIDIWeb Kit · connected');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.getByRole('button',{name:'Open MIDI connection setup'}).click();
+  await page.locator('#midi-connection-modal').getByRole('button',{name:'Retry connection'}).click();
+  await page.getByRole('button',{name:'Continue without MIDI'}).click();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.evaluate(()=>(window as unknown as {__rudimentMidiWebInput:{dispatch(data:number[]):void}}).__rudimentMidiWebInput.dispatch([0x99,38,96]));
   await page.waitForTimeout(100);
   const diagnostics=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
@@ -1869,22 +1877,27 @@ test('multiple MIDI inputs remain silent until one device is selected', async ({
     Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
     Object.assign(window, { __rudimentMidiInputs: { first, second } });
   });
+  await page.clock.install();
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('Choose a MIDI input');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Choose a MIDI input');
+  await page.clock.fastForward(3_100);
+  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toBeVisible();
+  await page.getByRole('button', { name: 'Continue without MIDI' }).click();
+  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByText('MIDI diagnostics').click();
+  await page.locator('#settings-dialog').getByText('MIDI diagnostics').click();
   await page.evaluate(() => {
     const { first, second } = (window as any).__rudimentMidiInputs;
     first.dispatch([0x99, 38, 90]); second.dispatch([0x99, 38, 100]);
   });
-  await expect(page.locator('.diagnostics')).toContainText('No MIDI messages received yet.');
-  await page.getByLabel('Input device').selectOption('kit-b');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('No MIDI messages received yet.');
+  await page.locator('#settings-dialog').getByLabel('Input device').selectOption('kit-b');
   await page.evaluate(() => {
     const { first, second } = (window as any).__rudimentMidiInputs;
     first.dispatch([0x99, 38, 91]); second.dispatch([0x99, 38, 101]);
   });
-  await expect(page.locator('.diagnostics')).toContainText('velocity 101');
-  await expect(page.locator('.diagnostics')).not.toContainText('velocity 91');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('velocity 101');
+  await expect(page.locator('#settings-dialog .diagnostics')).not.toContainText('velocity 91');
 });
 
 test('previously authorised sole MIDI input reconnects automatically', async ({ page }) => {
@@ -1896,7 +1909,7 @@ test('previously authorised sole MIDI input reconnects automatically', async ({ 
     localStorage.setItem('rudiment-midi-input',input.id);
   });
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('Returning Kit · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Returning Kit · connected');
   await expect(page.locator('.mode-segment')).toHaveCount(0);
   await expect(page.getByLabel('Select bars')).toBeVisible();
 });
@@ -1912,17 +1925,21 @@ test('last selected MIDI input reconnects automatically when several inputs are 
     Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
     Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
   });
+  await page.clock.install();
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('Choose a MIDI input');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Choose a MIDI input');
+  await page.clock.fastForward(3_100);
+  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toBeVisible();
+  await page.getByRole('button', { name: 'Continue without MIDI' }).click();
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Input device').selectOption('kit-b');
-  await expect(page.locator('.midi-state')).toContainText('Kit B · connected');
+  await page.locator('#settings-dialog').getByLabel('Input device').selectOption('kit-b');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Kit B · connected');
   await page.reload();
-  await expect(page.locator('.status-pill')).toContainText('Kit B · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Kit B · connected');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Input device').selectOption('kit-a');
+  await page.locator('#settings-dialog').getByLabel('Input device').selectOption('kit-a');
   await page.reload();
-  await expect(page.locator('.status-pill')).toContainText('Kit A · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Kit A · connected');
 });
 
 test('remembered MIDI input reconnects when the browser changes its port id', async ({ page }) => {
@@ -1939,7 +1956,7 @@ test('remembered MIDI input reconnects when the browser changes its port id', as
     localStorage.setItem('rudiment-midi-input-identity',JSON.stringify({name:'Stage Drums',manufacturer:'Acme'}));
   });
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('Stage Drums · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Stage Drums · connected');
   expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('new-browser-id');
 });
 
@@ -1953,10 +1970,10 @@ test('auto-connect selects a sole MIDI input even when a different input was rem
     localStorage.setItem('rudiment-midi-input-identity',JSON.stringify({name:'Stage Drums',manufacturer:'Acme'}));
   });
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('Other Kit · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Other Kit · connected');
   expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('other-kit');
   await page.reload();
-  await expect(page.locator('.status-pill')).toContainText('Other Kit · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Other Kit · connected');
 });
 
 test('multiple MIDI inputs wait for a selection when the remembered input is unavailable', async ({ page }) => {
@@ -1973,7 +1990,7 @@ test('multiple MIDI inputs wait for a selection when the remembered input is una
     localStorage.setItem('rudiment-midi-input-identity',JSON.stringify({name:'Stage Drums',manufacturer:'Acme'}));
   });
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('Choose a MIDI input');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Choose a MIDI input');
   expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('remembered-kit');
 });
 
@@ -1989,9 +2006,9 @@ test('a sole MIDI input plugged in after startup connects automatically', async 
     Object.assign(window,{__lateMidiAccess:access});
   });
   await page.goto('/');
-  await expect(page.locator('.status-pill')).toContainText('No MIDI drums detected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('No MIDI drums detected');
   await page.evaluate(()=>(window as any).__lateMidiAccess.connect());
-  await expect(page.locator('.status-pill')).toContainText('Late Kit · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Late Kit · connected');
 });
 
 test('MIDI hotplug selects the remaining input and pauses only when the selected input disconnects', async ({ page }) => {
@@ -2014,26 +2031,31 @@ test('MIDI hotplug selects the remaining input and pauses only when the selected
     Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
     Object.assign(window,{__hotplug:{first,second,access}});
   });
+  await page.clock.install();
   await page.goto('/');
+  await page.clock.fastForward(3_100);
+  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toBeVisible();
+  await page.getByRole('button', { name: 'Continue without MIDI' }).click();
+  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByLabel('Input device').selectOption('kit-b');
+  await page.locator('#settings-dialog').getByLabel('Input device').selectOption('kit-b');
   await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect(page.getByRole('button',{name:'Pause'})).toBeVisible();
   await page.evaluate(()=>{const {first,access}=(window as any).__hotplug;access.change(first,false);});
-  await expect(page.locator('.status-pill')).toContainText('Kit B · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Kit B · connected');
   await expect(page.getByRole('button',{name:'Pause'})).toBeVisible();
   await page.evaluate(()=>{const {first,access}=(window as any).__hotplug;access.change(first,true);});
-  await expect(page.locator('.status-pill')).toContainText('Kit B · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Kit B · connected');
   await page.evaluate(()=>{const {second,access}=(window as any).__hotplug;access.change(second,false);});
-  await expect(page.locator('.status-pill')).toContainText('Kit A · connected');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Kit A · connected');
   await expect(page.getByRole('button',{name:'Resume'})).toBeVisible();
   expect(await page.evaluate(()=>localStorage.getItem('rudiment-midi-input'))).toBe('kit-a');
   await page.getByRole('button',{name:'Open settings'}).click();
-  await page.getByText('MIDI diagnostics').click();
+  await page.locator('#settings-dialog').getByText('MIDI diagnostics').click();
   await page.evaluate(()=>{const {first,second}=(window as any).__hotplug;first.dispatch([0x99,38,77]);second.dispatch([0x99,38,88]);});
-  await expect(page.locator('.diagnostics')).toContainText('velocity 77');
-  await expect(page.locator('.diagnostics')).not.toContainText('velocity 88');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('velocity 77');
+  await expect(page.locator('#settings-dialog .diagnostics')).not.toContainText('velocity 88');
 });
 
 test('past unplayed notes become missed while future notes stay neutral and the playhead interpolates continuously', async ({ page }) => {
@@ -3048,14 +3070,12 @@ test('top toolbar fits and preserves control order at mobile and desktop widths'
         topbar.querySelector<HTMLElement>('.brand')!,
         topbar.querySelector<HTMLElement>('.settings-trigger')!,
       ].map(element=>element.getBoundingClientRect());
-      const status=topbar.querySelector<HTMLElement>('.status-pill')!.getBoundingClientRect();
       const toolbar=topbar.getBoundingClientRect();
       const overlaps=(a:DOMRect,b:DOMRect)=>a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top;
       return {
         horizontalOverflow:document.documentElement.scrollWidth>width||document.body.scrollWidth>width,
         controlsFit:controls.every(box=>box.left>=toolbar.left&&box.right<=toolbar.right&&box.top>=toolbar.top&&box.bottom<=toolbar.bottom),
         controlsOverlap:controls.some((box,index)=>controls.slice(index+1).some(other=>overlaps(box,other))),
-        statusFits:status.left>=toolbar.left&&status.right<=toolbar.right&&status.top>=toolbar.top&&status.bottom<=toolbar.bottom,
         order:controls.map(box=>({left:box.left,top:box.top,centerY:(box.top+box.bottom)/2})),
         sourceOrder:[...topbar.children]
           .filter(element=>element.matches('#midi-library-trigger,#stats-trigger,.settings-trigger,.brand'))
@@ -3066,7 +3086,6 @@ test('top toolbar fits and preserves control order at mobile and desktop widths'
     expect(layout.horizontalOverflow,`${width}px has horizontal overflow`).toBe(false);
     expect(layout.controlsFit,`${width}px clips a toolbar control`).toBe(true);
     expect(layout.controlsOverlap,`${width}px overlaps toolbar controls`).toBe(false);
-    expect(layout.statusFits,`${width}px clips the MIDI status bar`).toBe(true);
     expect(layout.sourceOrder).toEqual(['MIDI library · 13 exercises','Stats','Rudiment','Open settings']);
 
     if(width<=700){
@@ -3077,25 +3096,32 @@ test('top toolbar fits and preserves control order at mobile and desktop widths'
 });
 
 test('permission denial and narrow layout remain usable', async ({ page }) => {
+  await page.clock.install();
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => { throw new Error('Permission denied by user'); } });
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
+  // A denied permission is a deliberate refusal: the app does not nag with
+  // the startup modal every session, but the setup stays available.
+  await page.clock.fastForward(3_100);
+  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await expect(page.locator('.midi-state')).toContainText('MIDI error · Permission denied by user');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('MIDI error · Permission denied by user');
+  await page.getByRole('button', { name: 'Open MIDI connection setup' }).click();
+  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toBeVisible();
+  await page.getByRole('button', { name: 'Continue without MIDI' }).click();
+  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Connect / rescan MIDI'})).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Play snare hit' })).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/narrow-practice.png', fullPage: true });
 });
 
-test('Pixel 8 Pro keeps MIDI connection visible and practice controls on-screen in both orientations',async({page})=>{
+test('Pixel 8 Pro keeps practice controls on-screen in both orientations without permanent MIDI controls',async({page})=>{
   await page.setViewportSize({width:448,height:998});
   await page.goto('/');
-  const midi=page.getByRole('button',{name:'MIDI connection'});
-  await expect(midi).toBeVisible();
-  expect(await midi.evaluate(element=>{const box=element.getBoundingClientRect();return box.left>=0&&box.right<=innerWidth&&box.top>=0&&box.bottom<=innerHeight;})).toBe(true);
+  await expect(page.locator('.topbar .status-pill')).toHaveCount(0);
   const portraitFits=await page.evaluate(()=>({
     pageFits:document.documentElement.scrollHeight<=innerHeight&&document.body.scrollHeight<=innerHeight,
     controls:[...document.querySelectorAll('.topbar,.welcome,.score-card,.transport')].every(element=>{const box=element.getBoundingClientRect();return box.top>=0&&box.bottom<=innerHeight;}),
@@ -3111,7 +3137,6 @@ test('Pixel 8 Pro keeps MIDI connection visible and practice controls on-screen 
     horizontalFits:document.documentElement.scrollWidth<=innerWidth&&document.body.scrollWidth<=innerWidth,
   }));
   expect(layout).toEqual({pageFits:true,controls:true,horizontalFits:true});
-  await expect(midi).toBeVisible();
   await expect(page.getByRole('button',{name:/Start practice/})).toBeVisible();
 });
 
