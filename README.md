@@ -45,6 +45,13 @@ The static release is written to `dist/`. `npm run build` and `npm run dev` dete
 
 Dependency security is checked separately by `.github/workflows/security.yml` on lockfile changes and every Monday. RustSec audits Cargo dependencies and npm audits the JavaScript lockfile; CodeQL scans JavaScript/TypeScript and Rust; Dependabot monitors Cargo, npm and GitHub Actions weekly with grouped updates.
 
+AI-generated pull requests support repeated, authorised review revisions on
+the same branch with `/ai revise <feedback>`. Each successful revision reruns
+Rudiment's existing checks and replaces the isolated PR preview; merging and
+production deployment remain manual. See
+[docs/ai-pr-previews.md](docs/ai-pr-previews.md) for the security model, status
+comments, App configuration, and retry procedure.
+
 ## Architecture
 
 - `crates/core`: web-independent Rust domain model, SMF normalisation with `midly`, instrument mapping, onset-grid and rhythmic-value inference, configurable per-note timing classification, one-to-one matching and Score v1 aggregation.

@@ -1,18 +1,33 @@
 name: OpenCode AI task
 
-# The reusable workflow is pinned to the reviewed release commit of
-# r0w4n/central-ai-workflow. This provisional immutable pin is the head of
-# central PR #5; replace it with that PR's reviewed main commit before taking
-# this migration out of draft or merging it. See central docs/RELEASING.md.
+# Provisional immutable pin to the reviewed head of the linked Central AI PR.
+# After that PR merges, replace this with its reviewed main merge commit and
+# rerun validation before merging this consumer PR.
 
 on:
   issues:
     types: [labeled]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
-      issue_number:
-        description: Issue number to check or implement
+      task_mode:
+        description: Initial issue implementation or failed revision retry
         required: true
+        default: implementation
+        type: choice
+        options: [implementation, revision]
+      issue_number:
+        description: Issue number (implementation mode)
+        required: false
+        type: string
+      pr_number:
+        description: Existing PR number (revision retry)
+        required: false
+        type: string
+      comment_id:
+        description: Original /ai revise comment ID (revision retry)
+        required: false
         type: string
       dry_run:
         description: Run authorisation checks only
@@ -29,10 +44,18 @@ permissions:
 
 jobs:
   ai-task:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-task'
-    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@cd0af4e3b5e9c8a0a66d3b27b17376c39762fc82
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && github.event.label.name == 'ai-task') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/ai revise'))
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@bbd079db4beb7fe01b6ef3d0c38474f2b0d7522c
     with:
-      issue_number: ${{ format('{0}', github.event.issue.number || inputs.issue_number) }}
+      task_mode: ${{ github.event_name == 'issue_comment' && 'revision' || inputs.task_mode || 'implementation' }}
+      issue_number: ${{ format('{0}', github.event_name == 'issues' && github.event.issue.number || inputs.issue_number) }}
+      pr_number: ${{ format('{0}', github.event_name == 'issue_comment' && github.event.issue.number || inputs.pr_number) }}
+      comment_id: ${{ format('{0}', github.event_name == 'issue_comment' && github.event.comment.id || inputs.comment_id) }}
+      automation_pr_author: central-ai-publisher[bot]
+      approved_base_branch: main
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
       # Run Rudiment's local setup action. It installs and verifies the
       # development environment without redundantly compiling the application.
