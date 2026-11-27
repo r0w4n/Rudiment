@@ -70,9 +70,11 @@ When modifying the controller/host or adding a renderer:
 
 - Use Node 22, the Rust toolchain pinned in `rust-toolchain.toml` with `wasm32-unknown-unknown`, Trunk 0.22.1 and `npm ci`; browser tests also require installed Google Chrome and `python3`, and security QA requires `cargo-audit`. See `QA.md` for setup and check scope.
 
-- Focus a Rust test with `cargo test -p rudiment-core --locked <test-name>` (or `-p rudiment-web`). For a focused browser test, first run `npm run build`, then `npx playwright test tests/e2e/<file>.spec.ts -g '<test name>'`. Playwright starts its own Python server for `dist/` on an ephemeral port; it does not test the dev server.
+- Focus a Rust test with `cargo test -p rudiment-core --locked <test-name>` (or `-p rudiment-web`). For a focused browser test, run `npx playwright test tests/e2e/<file>.spec.ts -g '<test name>'`. Playwright builds from the current source before starting its Python server for `dist/` on an ephemeral port; it does not test the dev server. To reuse a build from the same job, set `RUDIMENT_E2E_SKIP_BUILD=1`; a source and output fingerprint rejects stale assets.
 
-- `npm run qa:browser`, `qa:a11y` and `qa:performance` each build first. Pass `-- --skip-build` only if the current `dist/` was already built in the same job. QA overwrites `quality-results/latest.{json,md}` on each run; detailed logs are in `quality-results/logs/`.
+- `npm run qa:browser`, `qa:a11y` and `qa:performance` each build first. Pass `-- --skip-build` only if the current `dist/` was already built in the same job; browser startup verifies the recorded source and output fingerprints. QA overwrites `quality-results/latest.{json,md}` on each run; detailed logs are in `quality-results/logs/`.
+
+- During an AI development run, use the smallest tests covering changed behavior. Run focused tests after meaningful changes, limit an unchanged failure to one rerun after a specific fix, and reserve time to commit and report. Do not use `git stash` as a baseline comparison without rebuilding the clean checkout. The PR quality workflows run the comprehensive browser, accessibility, performance, and unit gates.
 
 - `npm run hooks:install` enables tracked hooks; pre-push includes security/browser/a11y, with performance opt-in via `RUDIMENT_PRE_PUSH_PERF=1`.
 

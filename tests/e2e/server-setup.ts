@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 
 async function stopServer(server: ChildProcess) {
@@ -9,6 +9,10 @@ async function stopServer(server: ChildProcess) {
 }
 
 export default async function startServer() {
+  if (process.env.RUDIMENT_E2E_SKIP_BUILD !== '1') {
+    execFileSync('npm', ['run', 'build'], { stdio: 'inherit' });
+  }
+  execFileSync('node', ['scripts/qa/build-provenance.mjs', 'verify'], { stdio: 'inherit' });
   const server = spawn('python3', ['-u', '-m', 'http.server', '0', '--bind', '127.0.0.1', '--directory', 'dist'], {
     stdio: ['ignore', 'pipe', 'inherit'],
   });
