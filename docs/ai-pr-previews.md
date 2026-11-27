@@ -6,6 +6,8 @@ labelled `ai-task` is implemented by OpenCode through the reusable workflow in
 `.github/workflows/opencode-ai-task.yml`), published as a ready-for-review
 pull request, checked automatically by the existing repository workflows, and
 previewed in the browser through an isolated GitHub Pages deployment.
+Authorised review feedback can be sent back to OpenCode on that same PR; the
+resulting commit reruns the same checks and replaces the existing preview.
 
 Merging stays a manual action in every case. Nothing in this flow pushes to
 `main`, and the production GitHub Pages deployment
@@ -33,6 +35,43 @@ Merging stays a manual action in every case. Nothing in this flow pushes to
 
 Human-created pull requests keep their normal behaviour; the preview workflow
 only acts on same-repository branches named `ai/*`.
+
+## Requesting an AI revision
+
+On an open PR created by `central-ai-publisher[bot]` from an `ai/issue-<n>`
+branch, `r0w4n` can add a comment beginning with:
+
+```text
+/ai revise Describe the focused correction to make.
+```
+
+The lightweight Rudiment caller forwards only explicit command comments to
+the generic Central AI workflow. Central revalidates the human, PR creator,
+same-repository head, `main` base, linked authorised issue, immutable comment
+ID, open state, and exact current head. OpenCode starts from the current PR
+implementation and commits only the requested correction to the existing
+branch; it does not create another issue or PR.
+
+Requests for the same PR are queued with cancellation disabled. Each feedback
+comment has one audit comment that moves from accepted to completed or failed
+and links the workflow run and resulting commit. Ordinary comments, bot
+comments, empty feedback, closed or merged PRs, forks, unexpected branches,
+and unauthorised users cannot start an agent. Feedback is untrusted task data
+and cannot change workflow files, secrets, protected paths, permissions, model
+selection, or publication rules.
+
+The revision push uses the GitHub App, so GitHub emits the normal
+`pull_request/synchronize` event. `quality.yml`, `performance.yml`,
+`codeql.yml`, applicable `security.yml` jobs, and `ai-pr-preview.yml` rerun.
+The preview workflow publishes to the existing `pr-<number>/` directory and
+updates its sticky comment; it never touches production Pages.
+
+To retry a failed run, manually dispatch **OpenCode AI task**, select
+`revision`, and enter the existing PR number plus the numeric ID of the
+original `/ai revise` comment (visible in the comment permalink). Leave
+`dry_run` enabled to recheck policy without writing a status comment or running
+OpenCode; disable it for the actual retry. GitHub's **Re-run jobs** action is
+also supported. Never repost identical feedback merely to retry.
 
 ## AI task environment ownership
 
@@ -128,6 +167,9 @@ active on `main`:
   an explicit remediation message instead of a generic Git error.
 - A failed PR creation in the AI task workflow deletes the pushed branch so
   no orphan `ai/issue-<n>` branch remains.
+- A failed revision updates its audit comment with the workflow run and manual
+  retry inputs. If the PR head changed while OpenCode was working, publication
+  fails rather than overwriting the newer commit.
 
 ## Validated end to end
 
@@ -149,3 +191,10 @@ updated and closed without merging):
   documented remediation message; the sticky PR comment reports the failure
   with the run link. The App-backed happy path completes the same operations
   once the one-time configuration above is performed.
+
+The generic revision path is covered by Central's realistic event/API and
+publication tests, while `npm run test:automation` verifies Rudiment's event
+routing, immutable pin, App identity, project-owned setup, PR checks, and
+preview `synchronize` trigger. A controlled live `/ai revise` cycle remains the
+final post-merge acceptance check because model execution and GitHub Pages
+publication require repository credentials.
