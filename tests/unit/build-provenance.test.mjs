@@ -7,10 +7,11 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const script = fileURLToPath(new URL('../../scripts/qa/build-provenance.mjs', import.meta.url));
+const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 
 test('a source edit or changed compiled asset invalidates the Playwright build', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'rudiment-build-'));
-  const run = (command, args) => execFileSync(command, args, { cwd: root, stdio: 'pipe' });
+  const run = (command, args) => execFileSync(command, args, { cwd: root, stdio: 'pipe', env: gitEnv });
   try {
     run('git', ['init', '-q']);
     run('git', ['config', 'user.name', 'Test']);

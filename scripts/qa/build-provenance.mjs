@@ -4,10 +4,13 @@ import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const marker = path.resolve('dist/.rudiment-build.json');
+// Git exports repository-local variables while running hooks. They must not
+// override the checkout (or a separate clean worktree) inspected here.
+const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 
 async function sourceFingerprint() {
   const hash = createHash('sha256');
-  const git = (...args) => execFileSync('git', args, { encoding: 'buffer' });
+  const git = (...args) => execFileSync('git', args, { encoding: 'buffer', env: gitEnv });
   hash.update(git('rev-parse', 'HEAD'));
   hash.update(git('diff', '--binary', 'HEAD', '--'));
   const untracked = git('ls-files', '--others', '--exclude-standard', '-z')
