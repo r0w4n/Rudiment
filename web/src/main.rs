@@ -224,6 +224,8 @@ extern "C" {
     fn stop_audio();
     #[wasm_bindgen(js_namespace = rudiment, js_name = currentAudioBeat)]
     fn current_audio_beat() -> f64;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = audioOutputRunning)]
+    fn audio_output_running() -> bool;
     #[wasm_bindgen(js_namespace = rudiment, js_name = bindPresentationSnapshot)]
     fn bind_presentation_snapshot(callback: &Function);
     #[wasm_bindgen(js_namespace = rudiment, js_name = unbindPresentation)]
@@ -3717,15 +3719,25 @@ fn App() -> impl IntoView {
 
     let visibility_pause = pause_run.clone();
     let visibility = Closure::wrap(Box::new(move || {
-        if web_sys::window()
+        if !matches!(
+            phase.get_untracked().as_str(),
+            "running" | "count_in" | "starting"
+        ) {
+            return;
+        }
+        let hidden = web_sys::window()
             .and_then(|window| window.document())
             .map(|document| document.visibility_state() == web_sys::VisibilityState::Hidden)
-            .unwrap_or(false)
-            && matches!(
-                phase.get_untracked().as_str(),
-                "running" | "count_in" | "starting"
-            )
-        {
+            .unwrap_or(false);
+        // Background policy: pause when the page is hidden. On returning, also
+        // recover a run the OS froze mid-flight. Mobile browsers suspend the
+        // output AudioContext in the background, and the transport clock
+        // derives from that context, so a returned page can stay nominally
+        // "playing" while silent and visually frozen: the animation frames are
+        // live again but never reach the run's end. A clean pause gives the
+        // correct Play button and a defined resume position; the resume path
+        // re-unlocks the context and restarts from there.
+        if hidden || !audio_output_running() {
             visibility_pause();
         }
     }) as Box<dyn FnMut()>);
