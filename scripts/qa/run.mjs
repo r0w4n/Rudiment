@@ -21,7 +21,7 @@ const checks = {
   'js-unit': {
     label: 'JavaScript unit tests',
     command: 'node',
-    args: ['--test', 'tests/unit/highway-controller.test.mjs'],
+    args: ['--test', 'tests/unit/highway-controller.test.mjs', 'tests/unit/build-provenance.test.mjs'],
   },
   build: { label: 'Production WASM/browser build', command: 'npm', args: ['run', 'build'] },
   'npm-audit': {
@@ -42,6 +42,7 @@ const checks = {
       'playwright',
       'test',
       'tests/e2e/server.spec.ts',
+      'tests/e2e/midi-startup.spec.ts',
       'tests/e2e/rudiment.spec.ts',
       'tests/e2e/performance-correctness.spec.ts',
       'tests/e2e/metronome-visuals.spec.ts',
@@ -154,7 +155,12 @@ for (const name of selected) {
   const execution = spawnSync(check.command, check.args, {
     cwd: process.cwd(),
     encoding: 'utf8',
-    env: { ...process.env, CI: process.env.CI ?? '1', FORCE_COLOR: '0' },
+    env: {
+      ...process.env,
+      CI: process.env.CI ?? '1',
+      FORCE_COLOR: '0',
+      ...(name === 'browser' || name === 'a11y' ? { RUDIMENT_E2E_SKIP_BUILD: '1' } : {}),
+    },
     maxBuffer: 50 * 1024 * 1024,
   });
   const output = `${execution.stdout ?? ''}${execution.stderr ?? ''}`;

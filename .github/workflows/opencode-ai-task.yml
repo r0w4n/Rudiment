@@ -1,17 +1,31 @@
 name: OpenCode AI task
 
-# The reusable workflow is pinned to the reviewed release commit of
-# r0w4n/central-ai-workflow main. Update the SHA only after a reviewed and
-# merged central pull request; see central-ai-workflow/docs/RELEASING.md.
+# Immutable pin to the reviewed Central AI revision status fix (PR #8).
 
 on:
   issues:
     types: [labeled]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
-      issue_number:
-        description: Issue number to check or implement
+      task_mode:
+        description: Initial issue implementation or failed revision retry
         required: true
+        default: implementation
+        type: choice
+        options: [implementation, revision]
+      issue_number:
+        description: Issue number (implementation mode)
+        required: false
+        type: string
+      pr_number:
+        description: Existing PR number (revision retry)
+        required: false
+        type: string
+      comment_id:
+        description: Original /ai revise comment ID (revision retry)
+        required: false
         type: string
       dry_run:
         description: Run authorisation checks only
@@ -28,14 +42,22 @@ permissions:
 
 jobs:
   ai-task:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-task'
-    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@5df0a5c0ee06b398536bc4571a6da4b5cad379ab
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && github.event.label.name == 'ai-task') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/ai revise'))
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@c67ae2faf349dbddb2bfff0c5e0261d86ecf2756
     with:
-      issue_number: ${{ format('{0}', github.event.issue.number || inputs.issue_number) }}
+      task_mode: ${{ github.event_name == 'issue_comment' && 'revision' || inputs.task_mode || 'implementation' }}
+      issue_number: ${{ format('{0}', github.event_name == 'issues' && github.event.issue.number || inputs.issue_number) }}
+      pr_number: ${{ format('{0}', github.event_name == 'issue_comment' && github.event.issue.number || inputs.pr_number) }}
+      comment_id: ${{ format('{0}', github.event_name == 'issue_comment' && github.event.comment.id || inputs.comment_id) }}
+      automation_pr_author: central-ai-publisher[bot]
+      approved_base_branch: main
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-      # Provision the pinned Rust/WASM/Trunk toolchain and verify the web
-      # build before the agent starts.
-      toolchain_profile: rudiment-web
+      # Run Rudiment's local setup action. It installs and verifies the
+      # development environment without redundantly compiling the application.
+      setup: true
       # AI pull requests are created ready for review; merging stays manual.
       draft: false
     secrets:

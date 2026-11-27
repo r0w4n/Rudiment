@@ -4,7 +4,7 @@ Rudiment is a client-side drum practice app. It opens directly on a four-bar sin
 
 ## Run locally
 
-Prerequisites: current stable Rust, the `wasm32-unknown-unknown` target, Trunk 0.22+, Node.js 20+ and npm.
+Prerequisites: Rust 1.99.1 (pinned in `rust-toolchain.toml`), the `wasm32-unknown-unknown` target, Trunk 0.22.1, Node.js 22 and npm.
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -44,6 +44,13 @@ The static release is written to `dist/`. `npm run build` and `npm run dev` dete
 `.github/workflows/pages.yml` tests the application, builds one relocatable release for both Playwright and GitHub Pages, verifies the deployable app asset graph, and deploys through the official Pages actions after every push to `main` (or a manual workflow dispatch). The workflow uses the hosted runner's bundled Chrome and an integrity-checked prebuilt Trunk binary, avoiding a custom browser image and a source build of the deployment tool. Before the first deployment, set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**; repository settings cannot be changed by the workflow's restricted `GITHUB_TOKEN`. No custom secrets are required. The deployed URL is shown on the workflow's `github-pages` environment after a successful run.
 
 Dependency security is checked separately by `.github/workflows/security.yml` on lockfile changes and every Monday. RustSec audits Cargo dependencies and npm audits the JavaScript lockfile; CodeQL scans JavaScript/TypeScript and Rust; Dependabot monitors Cargo, npm and GitHub Actions weekly with grouped updates.
+
+AI-generated pull requests support repeated, authorised review revisions on
+the same branch with `/ai revise <feedback>`. Each successful revision reruns
+Rudiment's existing checks and replaces the isolated PR preview; merging and
+production deployment remain manual. See
+[docs/ai-pr-previews.md](docs/ai-pr-previews.md) for the security model, status
+comments, App configuration, and retry procedure.
 
 ## Architecture
 
