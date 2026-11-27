@@ -2315,7 +2315,17 @@ test('count-in for a selected bar never traverses the preceding bar', async ({ p
   await expect(page.getByLabel('Select bars')).toContainText('BAR 4 / 4');
 
   await page.getByRole('button', { name: /Start practice/ }).click();
-  await expect.poll(() => page.locator('#notation').evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  // The count-in camera must present the selected bar before the first
+  // playable beat. An engraved score that overflows the notation viewport
+  // must be scrolled; one that fits already shows every bar, so the camera
+  // has nothing to move and scrollTop legitimately stays 0.
+  await expect.poll(() => page.locator('#notation').evaluate(element => {
+    const view = element.getBoundingClientRect();
+    const bar = element.querySelector('.score-bar-highlight[data-score-bar="3"]')?.getBoundingClientRect();
+    if (!bar) return false;
+    if (element.scrollHeight > element.clientHeight + 1) return element.scrollTop > 0 && bar.bottom <= view.bottom + 1;
+    return bar.top >= view.top - 1 && bar.bottom <= view.bottom + 1;
+  })).toBe(true);
   await expect.poll(() => page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat)).toBeGreaterThan(8.25);
   expect(await page.evaluate(() => (window as any).rudiment.audioDiagnostics().currentBeat)).toBeLessThan(12);
   await expect(page.locator('#playhead')).not.toHaveClass(/visible/);
