@@ -1,8 +1,6 @@
 name: OpenCode AI task
 
-# Provisional immutable pin to the linked Central AI recovery PR head.
-# After that PR merges, replace it with the reviewed main merge commit and
-# rerun validation before merging this consumer PR.
+# Immutable pin to the reviewed Central AI revision status fix (PR #8).
 
 on:
   issues:
@@ -48,7 +46,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'issues' && github.event.label.name == 'ai-task') ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/ai revise'))
-    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@91ebc35fc5cda0cf3fcd4c392319a57762d5aa99
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@c67ae2faf349dbddb2bfff0c5e0261d86ecf2756
     with:
       task_mode: ${{ github.event_name == 'issue_comment' && 'revision' || inputs.task_mode || 'implementation' }}
       issue_number: ${{ format('{0}', github.event_name == 'issues' && github.event.issue.number || inputs.issue_number) }}
