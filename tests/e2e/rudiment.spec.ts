@@ -393,6 +393,13 @@ test('sampled metronome uses the accented and regular recordings on the transpor
   expect(orderedScheduling[Math.floor(orderedScheduling.length/2)]).toBeLessThan(2);
   expect(Math.max(...scheduling)).toBeLessThan(10);
   await page.getByRole('button', { name: /Pause/ }).click();
+  // The paused beat must be the settled position the resume path reuses, not
+  // a live transport read that races the pause landing on slow or loaded
+  // runners (the click can resolve before the renderer applies the pause, so
+  // currentBeat would still advance and ceil() could land a step early).
+  // activeRun is cleared last in the bridge's stop(), so observing it false
+  // means the pause fully landed and lastBeat is final.
+  await expect.poll(()=>page.evaluate(()=>!(window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
   const paused=await page.evaluate(()=>(window as any).rudiment.audioDiagnostics());
   expect(paused.scheduledVoices).toBe(0);
   await page.evaluate(()=>(window as any).__metronomeSourceEvents=[]);

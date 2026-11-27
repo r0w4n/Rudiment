@@ -1,7 +1,7 @@
 import * as Tone from 'tone';
 import { WebMidi } from 'webmidi';
 import { openDB } from 'idb';
-import { Renderer, Stave, StaveNote, GraceNote, GraceNoteGroup, Voice, Formatter, Beam, Annotation, AnnotationVerticalJustify, Articulation, BarlineType, Dot, Fraction, Tuplet } from 'vexflow';
+import { Renderer, Stave, StaveNote, GraceNote, GraceNoteGroup, Voice, Formatter, Beam, Annotation, AnnotationVerticalJustify, Articulation, BarlineType, Dot, Fraction, Tuplet, Metrics } from 'vexflow';
 import { createPresentationHost } from './presentation-host.mjs';
 import { createHighwaySvg } from './highway-svg.mjs';
 
@@ -520,6 +520,23 @@ function scoreBeatForDisplay(musicalBeat, offset, options){
   return Array.isArray(bars)&&bars.length?Number(bars[Math.min(barIndex,bars.length-1)])*options.meter+position-barIndex*options.meter:rangeStart+position;
 }
 
+// Score position of the next display downbeat after a musical beat, so the
+// notation playhead can preview the next system during its lead-in. A bar
+// selection or loop continues on the display sequence, and a run whose final
+// pass ends at that boundary has no further downbeat to lead into (null).
+function nextDownbeatScoreBeat(musicalBeat, options){
+  const meter=options.meter,rangeStart=Number(options.displayRangeStart)||0;
+  const rangeBeats=Math.max(.001,Number(options.displayRangeBeats)||options.exerciseBeats);
+  const rel=musicalBeat-rangeStart;
+  if(!(rel>=0))return null;
+  const pass=Math.floor(rel/rangeBeats),within=rel-pass*rangeBeats;
+  const barIndex=Math.floor(within/meter);
+  const nextDownbeat=(barIndex+1)*meter<rangeBeats-.000001
+    ?rangeStart+pass*rangeBeats+(barIndex+1)*meter
+    :rangeStart+(pass+1)*rangeBeats;
+  return nextDownbeat<options.totalBeats-.000001?scoreBeatForDisplay(nextDownbeat,options.offsetBeat||0,options):null;
+}
+
 // Tone.Transport is the single musical transport; source nodes use callback audio time.
 const audio = {
   raw: null, snareGain: null, clickGain: null, master: null, buffers: [], buffersPromise: null, drumBuffers: {}, drumBuffersPromise: null, drumSampleErrors: {}, drumStarts: {kick:0,closed_hat:0,open_hat:0}, openHatVoices:new Set(), metronomeBuffers: {}, metronomeBuffersPromise: null, metronomeSampleErrors: {}, layerGains: [], layerPeaks: [], sampleErrors: [], snareStarts: 0, lastSnareError: null, lastMetronomeError:null, voices:new Set(), scheduledVoices:new Set(), raf: 0, generation: 0, state: 'locked', activeRun:null, lastBeat:0,
@@ -869,13 +886,14 @@ const audio = {
       const musicalBeat=Math.min(beat,options.totalBeats-.000001);
       this.lastBeat=Math.min(beat,options.totalBeats);
       const scoreBeat=scoreBeatForDisplay(musicalBeat,offset,options);
+      const leadInBeat=scoreBeat>=0?nextDownbeatScoreBeat(musicalBeat,options):null;
       const bars=options.displayBars;
       if(scoreBeat>=0&&Array.isArray(bars)&&bars.length){
         const displayBar=Math.floor(scoreBeat/options.meter),previous=this.activeRun?.lastDisplayBar;
         if(Number.isInteger(previous)&&displayBar!==previous&&displayBar!==previous+1)scrollScoreToBeat(scoreBeat);
         if(this.activeRun)this.activeRun.lastDisplayBar=displayBar;
       }
-      updateScore(scoreBeat,undefined,true);
+      updateScore(scoreBeat,undefined,true,leadInBeat);
       if(presentation.isActive())presentation.position(musicalBeat,transport.bpm.value);
       visualMetronome.render(musicalBeat,options.meter,subdivision,now);
       // UI counters and scoring state do not need 60 updates per second. Keep
@@ -1086,7 +1104,9 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
         const hands=[...new Set(group.hits.map(hit=>hit.hand).filter(hand=>hand==='R'||hand==='L'))];
         // Keep sticking below the staff so accents cannot displace individual hand labels.
         if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter',11,'700'),0);
-        if(group.hits.some(hit=>hit.accent))note.addModifier(new Articulation('a>').setPosition(3),0);
+        // Tag the accent glyph so theme CSS can colour it without per-frame work;
+        // VexFlow renders articulations as plain text inside the notehead group.
+        if(group.hits.some(hit=>hit.accent)){note.rudimentAccent=new Articulation('a>').setPosition(3);note.addModifier(note.rudimentAccent,0);}
         barSlotBeats.set(note,group.position);slots.push(note);
         for(const hit of group.hits){const key=pitchForHit(hit),meta={note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,key,headIndex:Math.max(0,keys.indexOf(key)),row,bar};notesMeta.push(meta);firstNoteByRow[row]??=meta;}
         const ornamentHits=group.graceHits;
@@ -1117,14 +1137,29 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     const firstSlot=barSlots.get(firstBar)?.[0],firstContext=firstSlot?.getTickContext();
     const rowStartRelativeX=firstSlot&&firstContext?firstSlot.getX()+firstSlot.getGlyphWidth()/2:0;
     const rowStartX=staves[row].getNoteStartX()+rowStartRelativeX;
-    const pixelsPerBeat=barWidth/metersPerBar;
+    // The row's final bar must end at its drawn barline. Extrapolating a full
+    // barWidth from the first engraved beat overshoots the system: the bar's
+    // linear beat map starts at the first notehead centre (inset from the
+    // staff origin by the formatter's left padding), so its end would land in
+    // the blank margin right of the final barline. Compress that bar's beat
+    // span onto the actual staff width and keep the engraved noteheads on the
+    // same map, so the playhead and the notes stay aligned and the playhead
+    // never leaves the system.
+    const barlineX=staves[row].getX()+staves[row].getWidth();
+    // VexFlow draws a note at tickContext.x + stave note start + Stave.padding,
+    // so the padded origin must be removed here for the notehead centres to
+    // land on the linear beat map anchored at the staff origin. Any residual
+    // glyph-metrics offset is absorbed by the post-draw correction below.
+    const stavePadding=Metrics.get('Stave.padding',0);
     for(let bar=firstBar;bar<lastBar;bar++){
       const layout=barLayouts[bar],xStart=rowStartX+(bar-firstBar)*barWidth;
-      layout.xStart=xStart;layout.xEnd=xStart+barWidth;
+      const beatSpan=bar===lastBar-1?Math.max(1,barlineX-xStart):barWidth;
+      layout.beatWidth=beatSpan;layout.xStart=xStart;layout.xEnd=xStart+beatSpan;
+      const pixelsPerBeat=beatSpan/metersPerBar;
       for(const slot of barSlots.get(bar)??[]){
         const tickContext=slot.getTickContext(),xShift=slot.getX()-tickContext.getX();
         const targetCenter=rowStartRelativeX+(bar-firstBar)*barWidth+(barSlotBeats.get(slot)-layout.startBeat)*pixelsPerBeat;
-        tickContext.setX(targetCenter-xShift-slot.getGlyphWidth()/2);
+        tickContext.setX(targetCenter-xShift-slot.getGlyphWidth()/2-stavePadding);
       }
     }
     voice.draw(context,staves[row]);
@@ -1137,7 +1172,7 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     const firstNote=firstNoteByRow[row],head=firstNote?.note.getSVGElement?.()?.querySelector('.vf-notehead > text');
     const bounds=head?.getBBox();
     if(!firstNote||!bounds)continue;
-    const layout=barLayouts[firstNote.bar],target=layout.xStart+(firstNote.notationBeat-layout.startBeat)*barWidth/metersPerBar;
+    const layout=barLayouts[firstNote.bar],target=layout.xStart+(firstNote.notationBeat-layout.startBeat)*layout.beatWidth/metersPerBar;
     const correction=bounds.x+bounds.width/2-target;
     for(let bar=row*barsPerLine;bar<Math.min(barCount,(row+1)*barsPerLine);bar++){
       barLayouts[bar].xStart+=correction;barLayouts[bar].xEnd+=correction;
@@ -1206,6 +1241,8 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
       group.dataset.tuplet=String(durationSpec(meta.durationBeats)[3]);
       group.dataset.grace=String(Boolean(meta.hit.grace));
       group.dataset.accent=String(Boolean(meta.hit.accent));
+      const accent=meta.note.rudimentAccent;
+      if(accent)for(const text of group.querySelectorAll('.vf-notehead > text')){if(text.textContent===accent.text){text.classList.add('score-accent');break;}}
       group.dataset.midiNotes=eventHits.map(candidate=>candidate.note??38).join(',');
       group.dataset.instruments=[...new Set(eventHits.map(instrumentForHit))].join(',');
       group.dataset.articulations=[...new Set(eventHits.map(articulationForHit))].join(',');
@@ -1275,13 +1312,17 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
   // repainted the whole notation SVG. The hidden line above keeps the
   // historical #playhead attributes/classes for tests and diagnostics.
   const overlay=document.createElement('div'); overlay.className='playhead-overlay'; overlay.setAttribute('aria-hidden','true'); element.appendChild(overlay);
+  // Subtle lead-in marker: during the final beat of a system it previews where
+  // the playhead will appear in the next system, so the system transition is
+  // visible before the next downbeat without moving the active playhead early.
+  const preview=document.createElement('div'); preview.className='playhead-preview'; preview.setAttribute('aria-hidden','true'); element.appendChild(preview);
   const noteByExpectedId=new Map(),noteByBeatInstrument=new Map(),notesByRow=Array.from({length:lineCount},()=>[]);
   for(const meta of notesMeta){
     if(meta.hit?.id)noteByExpectedId.set(meta.hit.id,meta);
     noteByBeatInstrument.set(`${Number(meta.beat).toFixed(6)}|${instrumentForHit(meta.hit)}`,meta);
     notesByRow[meta.row]?.push(meta);
   }
-  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),markerLayer:markers,paintedGroups:new Set(),svg,playhead:line,playheadOverlay:overlay,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[]};
+  scoreData={notes:notesMeta,notesByRow,noteByExpectedId,noteByBeatInstrument,headYCache:new WeakMap(),appliedExpectedJudgements:new Map(),markerLayer:markers,paintedGroups:new Set(),svg,playhead:line,playheadOverlay:overlay,playheadPreview:preview,totalBeats:barCount*metersPerBar,meter:metersPerBar,container:element,bars:barLayouts,viewportWidth:width,viewportHeight,rowHeight:scoreRowHeight,maxScroll:Math.max(0,height-viewportHeight),cameraY:element.scrollTop,preserveCameraBar:null,preserveViewportOnRewind:false,lastPlayheadRow:-1,lastPlayheadVisible:false,exercise,lastBeat:-Infinity,lastJudgements:[]};
   playheadDebug.attachContainer(element);
   if(scoreScrollContainer!==element){
     scoreScrollContainer?.removeEventListener('scroll',onScoreScroll);
@@ -1593,7 +1634,7 @@ function applyJudgements(judgements) {
   }
   performanceProfile.record('feedback_paint_work_ms',performance.now()-profileStart);
 }
-function updateScore(beat, judgements, loopAware=false) {
+function updateScore(beat, judgements, loopAware=false, leadInBeat=null) {
   const profileStart=performanceProfile.enabled?performance.now():0;
   const hasJudgements=Array.isArray(judgements);
   const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
@@ -1640,6 +1681,28 @@ function updateScore(beat, judgements, loopAware=false) {
       playhead.classList.toggle('visible',visible);
       overlay?.classList.toggle('visible',visible);
       scoreData.lastPlayheadVisible=visible;
+    }
+    // Lead-in preview: during the final beat of the current system, show where
+    // the playhead will appear at the next downbeat. The transport frame passes
+    // the next downbeat's score position so a bar selection or loop preview the
+    // bar actually played next; without one, the following engraved bar is the
+    // only honest target. The marker's geometry is written only when its target
+    // bar changes; per-frame work is a class toggle. It never moves the active
+    // playhead and disappears at the downbeat, when the playhead itself arrives.
+    const preview=scoreData.playheadPreview;
+    if(preview){
+      const barEndBeat=(position.bar+1)*scoreData.meter;
+      const show=leadInBeat!==null&&beat>=0&&beat>=barEndBeat-1&&beat<barEndBeat;
+      if(show){
+        const target=positionAtBeat(leadInBeat),targetBar=target.bar;
+        if(preview.dataset.targetBar!==String(targetBar)){
+          preview.dataset.targetBar=String(targetBar);
+          preview.style.top=`${target.y1}px`;
+          preview.style.height=`${Math.max(1,target.y2-target.y1)}px`;
+          preview.style.transform=`translate3d(${target.x}px,0,0)`;
+        }
+      }
+      if(show!==preview.classList.contains('visible'))preview.classList.toggle('visible',show);
     }
   }
   if(beat>=0){
@@ -1786,8 +1849,8 @@ function downloadJson(value,name){downloadText(value,name,'application/json');}
 window.rudiment={
   bindPresentationSnapshot:provider=>presentation.bind(provider),unbindPresentation:()=>{setHighwayMode(false);presentation.unbind();},presentationActive:()=>presentation.isActive(),mountPresentationRenderer:(renderer,lanes)=>presentation.mount(renderer,lanes),presentationExerciseChanged:highwayExerciseChanged,presentationConfiguration:value=>presentation.configure(value),presentationJudgements:value=>presentation.judgements(value),savedHighwayMode,saveHighwayMode,setHighwayMode,savedNotationTheme,saveNotationTheme,
   ensureAudio:()=>audio.ensure(),audioState:()=>audio.state,audioDiagnostics:()=>({state:audio.state,contextState:audio.raw?.state??'uninitialised',activeRun:Boolean(audio.activeRun),currentBeat:audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):audio.lastBeat,referenceNoteCount:audio.activeRun?.referenceNoteCount??0,runMetronome:audio.activeRun?.metronome??false,runTimbre:audio.activeRun?.timbre??null,activeVoices:audio.voices.size,scheduledVoices:audio.scheduledVoices.size,openHatVoices:audio.openHatVoices.size,snareGain:audio.snareGain?.gain.value??0,clickGain:audio.clickGain?.gain.value??0,sampleLayers:audio.buffers.filter(Boolean).length,drumSampleCount:Object.values(audio.drumBuffers).filter(Boolean).length,drumSampleErrors:{...audio.drumSampleErrors},drumStarts:{...audio.drumStarts},metronomeSampleCount:Object.values(audio.metronomeBuffers).filter(Boolean).length,metronomeSampleNames:Object.keys(audio.metronomeBuffers),metronomeSampleErrors:{...audio.metronomeSampleErrors},sampleErrors:[...audio.sampleErrors],snareStarts:audio.snareStarts,lastSnareError:audio.lastSnareError,lastMetronomeError:audio.lastMetronomeError,transportBpm:Tone.getTransport().bpm.value,transportTicks:Tone.getTransport().ticks,layerPeaks:[...audio.layerPeaks],layerGains:[...audio.layerGains],velocityGains:Array.from({length:127},(_,index)=>velocityGain(index+1)),velocityLayers:Array.from({length:127},(_,index)=>velocityLayers(index+1))}),identifyMetronomeBuffer:buffer=>Object.entries(audio.metronomeBuffers).find(([,sample])=>sample===buffer)?.[0]??null,playSnare:velocity=>audio.monitorSnare(velocity),playDrum:(instrument,articulation,velocity)=>audio.monitorDrum(instrument,articulation,velocity),previewClick:async(timbre,accent=true)=>{await audio.ensure();await audio.waitForMetronome(timbre);audio.click(audio.raw.currentTime+.03,accent,timbre);},
-  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):Number.NaN,stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
-  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,queueScoreFeedback,flushScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),playheadDebugSnapshot:()=>playheadDebug.snapshot(),resetPlayheadDebug:()=>playheadDebug.reset(),playheadDebugCsv:()=>playheadDebug.csv(),exportPlayheadDebugCsv:()=>playheadDebug.export(),diagnosticsSnapshot:()=>({...diagnostics}),setDiagnostic:(name,value)=>setDiagnostic(name,value),resetDiagnostics:()=>resetDiagnostics(),bridgeBuild:()=>BRIDGE_BUILD,playheadHudSnapshot:()=>playheadHud.snapshot(),
+  setVolumes:(snare,click)=>{if(audio.snareGain)audio.snareGain.gain.value=snare;if(audio.clickGain)audio.clickGain.gain.value=click*1.5;},startAudio:(options,frame,done)=>audio.start(options,frame,done),setAudioTempo:bpm=>audio.setTempo(bpm),currentAudioBeat:()=>audio.activeRun?Math.min(audio.activeRun.totalBeats,transportBeat(audio.activeRun)):Number.NaN,audioOutputRunning:()=>!!audio.raw&&audio.raw.state==='running',stopAudio:()=>audio.stop(),startCalibration:()=>audio.calibration(),
+  renderScore,setSelectedBars,bindScoreSelection,scrollScoreToBeat,updateScore,nextDownbeatScoreBeat,queueScoreFeedback,flushScoreFeedback,clearScoreFeedback,clearScoreFeedbackPreserveViewport,connectMidi,autoConnectMidi,selectMidi,chooseMidi,loadBundled,loadBundledFromLibrary,bindDrop,trapDialogTab,performanceDiagnostics:()=>performanceProfile.snapshot(),resetPerformanceDiagnostics:()=>performanceProfile.reset(),playheadDebugSnapshot:()=>playheadDebug.snapshot(),resetPlayheadDebug:()=>playheadDebug.reset(),playheadDebugCsv:()=>playheadDebug.csv(),exportPlayheadDebugCsv:()=>playheadDebug.export(),diagnosticsSnapshot:()=>({...diagnostics}),setDiagnostic:(name,value)=>setDiagnostic(name,value),resetDiagnostics:()=>resetDiagnostics(),bridgeBuild:()=>BRIDGE_BUILD,playheadHudSnapshot:()=>playheadHud.snapshot(),
   saveSession:record=>put('sessions',record),loadSessions:()=>all('sessions'),clearHistory:()=>practiceTime.clearHistory(),setPracticeActive:active=>active?practiceTime.start():practiceTime.stop(),loadPracticeTime:()=>practiceTime.read(),saveSettings:value=>put('settings',{key:'app',value}),loadSettings:async()=>(await (await dbPromise).get('settings','app'))?.value||{},saveProfile:profile=>put('profiles',profile),loadProfiles:()=>all('profiles'),resetLocalSetup:async()=>{await (await dbPromise).delete('settings','app');await clear('profiles');localStorage.removeItem(MIDI_INPUT_ID_KEY);localStorage.removeItem(MIDI_INPUT_IDENTITY_KEY);},
   saveImport:(hash,name,bytes,metadata)=>put('imports',{hash,name,bytes:Array.from(bytes),metadata,schemaVersion:1}),loadImports:()=>all('imports'),loadImport:hash=>(async()=>{const db=await dbPromise;return db.get('imports',hash);})(),loadSavedImport,deleteImport:hash=>(async()=>{const db=await dbPromise;return db.delete('imports',hash);})(),saveLastImport,exportHistory:async()=>downloadJson(JSON.stringify(await all('sessions'),null,2),'rudiment-history.json')
 };
