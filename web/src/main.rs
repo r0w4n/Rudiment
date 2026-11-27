@@ -546,6 +546,18 @@ struct MidiPort {
     connection: String,
 }
 
+/// A MIDI connection counts as established only when the selected port is
+/// physically present and open. This single predicate decides whether the
+/// startup modal may appear, whether it auto-dismisses, and whether a
+/// MIDI-dependent activity (like mapping) reopens it.
+fn midi_connection_ready(ports: &[MidiPort], selected: Option<&str>) -> bool {
+    selected.is_some_and(|id| {
+        ports
+            .iter()
+            .any(|port| port.id == id && port.state == "connected" && port.connection == "open")
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct MidiEnvelope {
@@ -1541,6 +1553,21 @@ fn focus_result_close() {
     }
 }
 
+fn focus_midi_modal_close() {
+    let callback = Closure::once_into_js(|| {
+        if let Some(button) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("midi-modal-close"))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = button.focus();
+        }
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = window.request_animation_frame(callback.unchecked_ref());
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContextPopup {
     Bars,
@@ -1584,6 +1611,55 @@ fn dismiss_result(
     } else {
         clear_score_feedback();
         restore_result_focus();
+    }
+}
+
+/// The one MIDI configuration surface, shared by the settings drawer and the
+/// MIDI connection modal so settings cannot drift apart. It renders the
+/// connection state, device selection, pad mapping and diagnostics, and can
+/// retry the connection. Attempting a MIDI-dependent activity (pad mapping)
+/// without a connected kit reopens the connection modal.
+#[component]
+fn MidiConfigSection(
+    midi_status: RwSignal<String>,
+    midi_ports: RwSignal<Vec<MidiPort>>,
+    selected_midi: RwSignal<Option<String>>,
+    midi_learn: RwSignal<Option<Instrument>>,
+    midi_bindings: RwSignal<Vec<MidiBinding>>,
+    diagnostics: RwSignal<Vec<String>>,
+    midi_modal_open: RwSignal<bool>,
+    connect: Rc<dyn Fn()>,
+) -> impl IntoView {
+    let connect_retry = connect.clone();
+    view! {
+      <div class="midi-config">
+        <p class="midi-state">{move || midi_status.get()}</p>
+        <button class="midi-retry" on:click=move |_|connect_retry()>"Retry connection"</button>
+        <label class=move || if midi_ports.get().is_empty(){"hidden"}else{""}>"Input device"<select prop:value=move || selected_midi.get().unwrap_or_default() on:change=move |event|select_midi(&event_target_value(&event))><option value="" disabled=true hidden=true>"Choose a MIDI input"</option>{move || midi_ports.get().into_iter().map(|port|view!{<option value=port.id.clone()>{format!("{} · {}",port.manufacturer,port.name)}</option>}).collect_view()}</select></label>
+        <div class="learn-card midi-mapping-card">
+          <strong>{move || midi_learn.get().map(|instrument|format!("Hit your {} now…",instrument_label(instrument))).unwrap_or_else(||"Quick MIDI Learn".into())}</strong>
+          <p class="help">"Map each pad independently. Unchanged General MIDI notes remain available as fallbacks."</p>
+          <For
+            each=move || vec![Instrument::Kick,Instrument::Snare,Instrument::ClosedHat,Instrument::OpenHat]
+            key=|instrument|*instrument as u8
+            children=move |instrument|{
+              view!{
+                <div class="midi-mapping-row">
+                  <span>{move || midi_bindings.get().iter().find(|binding|binding.instrument==instrument).map(|binding|format!("{} · note {}, channel {}",instrument_label(instrument),binding.note,binding.channel)).unwrap_or_else(||format!("{} · General MIDI",instrument_label(instrument)))}</span>
+                  <button aria-label=format!("Learn {}",instrument_label(instrument)) on:click=move |_|{
+                    midi_learn.set(Some(instrument));
+                    if !midi_connection_ready(&midi_ports.get_untracked(),selected_midi.get_untracked().as_deref()){
+                      midi_modal_open.set(true);
+                      focus_midi_modal_close();
+                    }
+                  }>{move || if midi_learn.get()==Some(instrument){"Listening…"}else{"Learn"}}</button>
+                </div>
+              }
+            }
+          />
+        </div>
+        <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
+      </div>
     }
 }
 
@@ -1810,6 +1886,15 @@ fn App() -> impl IntoView {
     let midi_learn = RwSignal::new(None::<Instrument>);
     let midi_bindings = RwSignal::new(default_midi_bindings());
     let midi_profiles = RwSignal::new(Vec::<SavedMidiProfile>::new());
+    // The startup MIDI connection modal. `midi_modal_auto` marks a modal that
+    // the three-second startup timer opened, so only that one is dismissed
+    // automatically when a connection succeeds; manually opened setup stays
+    // open. `midi_modal_dismissed` keeps the startup timer from reopening the
+    // modal again during the same application session.
+    let midi_modal_open = RwSignal::new(false);
+    let midi_modal_auto = RwSignal::new(false);
+    let midi_modal_dismissed = RwSignal::new(false);
+    let midi_permission = RwSignal::new(None::<String>);
     let settings_loaded = RwSignal::new(false);
     let snare_note = RwSignal::new(38u8);
     let snare_channel = RwSignal::new(10u8);
@@ -3099,6 +3184,17 @@ fn App() -> impl IntoView {
             if event.kind == "state" {
                 midi_ports.set(event.ports.clone());
                 selected_midi.set(event.selected_id.clone());
+                midi_permission.set(event.permission.clone());
+                // A successful connection dismisses only the automatically
+                // opened startup modal; the settings drawer and a modal the
+                // user opened themselves stay where they are.
+                if midi_connection_ready(&event.ports, event.selected_id.as_deref())
+                    && midi_modal_open.get_untracked()
+                    && midi_modal_auto.get_untracked()
+                {
+                    midi_modal_auto.set(false);
+                    midi_modal_open.set(false);
+                }
                 if let Some(error) = event.error {
                     midi_status.set(format!("MIDI error · {error}"));
                 } else {
@@ -3235,6 +3331,40 @@ fn App() -> impl IntoView {
             ))
             .await;
         });
+    }
+    // Startup fallback: if no MIDI connection is established within three
+    // seconds while a connection could still be made, surface the shared
+    // connection modal so the kit can be connected and configured in one
+    // place. It stays quiet when the browser has no Web MIDI, when the user
+    // denied the permission (a modal every session would only nag after an
+    // explicit refusal), or when permission was granted but no kit is even
+    // plugged in. This runs once; a manual dismissal keeps it closed for the
+    // rest of the session, and settings remain the manual entry point.
+    {
+        let open_modal = Closure::once_into_js(move || {
+            if midi_modal_dismissed.get_untracked()
+                || midi_connection_ready(
+                    &midi_ports.get_untracked(),
+                    selected_midi.get_untracked().as_deref(),
+                )
+            {
+                return;
+            }
+            match midi_permission.get_untracked().as_deref() {
+                Some("unsupported") | Some("denied") => return,
+                Some("granted") if midi_ports.get_untracked().is_empty() => return,
+                _ => {}
+            }
+            midi_modal_auto.set(true);
+            midi_modal_open.set(true);
+            focus_midi_modal_close();
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                open_modal.unchecked_ref::<Function>(),
+                3000,
+            );
+        }
     }
     {
         let callback = file_callback.clone();
@@ -3808,7 +3938,6 @@ fn App() -> impl IntoView {
           <a class="brand" href="#" aria-label="Rudiment"><span class="brand-mark" aria-hidden="true"></span><span>"Rudiment"</span></a>
           <div class="exercise-heading"><span class="eyebrow">"CURRENT EXERCISE"</span><strong>{move || exercise.get().title}</strong><small>"4/4 · sticking and accents"</small></div>
           <button id="settings-trigger" class="stats-trigger settings-trigger" aria-label="Open settings" title="Rudiment settings" aria-haspopup="dialog" aria-expanded=move || settings_open.get().to_string() on:click=move |_|{settings_open.set(true);focus_settings_close();}><SettingsIcon size=19/></button>
-          <button class=move || if selected_midi.get().is_some_and(|id|midi_ports.get().iter().any(|port|port.id==id&&port.state=="connected"&&port.connection=="open")){"status-pill connected"}else{"status-pill"} aria-label=move || format!("MIDI connection: {}",midi_status.get()) on:click={let connect=connect_action.clone();move |_|connect()}><span class="status-dot"></span>{move || midi_status.get()}</button>
         </header>
 
           <section class=move || if highway.get(){"workspace highway-workspace"}else{"workspace"}>
@@ -4148,25 +4277,9 @@ fn App() -> impl IntoView {
               <label class="toggle-row"><span>"Repeat until successful"<small>"A failed bar is tried again; every failed attempt still reduces the final performance score."</small></span><input aria-label="Repeat bar until Good" type="checkbox" disabled=move || adaptive_enabled.get() prop:checked=move || repeat_bar_until_good.get() on:change={let save=save_repeat_bar.clone();move |event|{repeat_bar_until_good.set(event_target_checked(&event));save();}}/></label>
               <label>"Required accuracy"<select aria-label="Repeat tolerance" prop:value=move || match repeat_tolerance.get(){RepeatTolerance::Relaxed=>"relaxed",RepeatTolerance::Standard=>"standard",RepeatTolerance::Strict=>"strict"} on:change=move |event|{repeat_tolerance.set(match event_target_value(&event).as_str(){"relaxed"=>RepeatTolerance::Relaxed,"strict"=>RepeatTolerance::Strict,_=>RepeatTolerance::Standard});save_repeat_tolerance();}><option value="relaxed">"Relaxed · no misses"</option><option value="standard">"Standard · Good or Perfect"</option><option value="strict">"Strict · Perfect only"</option></select><small class="help">"Extra hits and wrong drums always fail the current attempt. This setting does not change the timing windows."</small></label>
             </section>
-            <section><h3>"MIDI drums"</h3><p class="help">"Rudiment connects automatically. Use the MIDI status control to retry or rescan. Rudiment never uploads your events."</p><p class="midi-state">{move || midi_status.get()}</p>
-              <label class=move || if midi_ports.get().is_empty(){"hidden"}else{""}>"Input device"<select prop:value=move || selected_midi.get().unwrap_or_default() on:change=move |event|select_midi(&event_target_value(&event))><option value="" disabled=true hidden=true>"Choose a MIDI input"</option>{move || midi_ports.get().into_iter().map(|port|view!{<option value=port.id.clone()>{format!("{} · {}",port.manufacturer,port.name)}</option>}).collect_view()}</select></label>
-              <div class="learn-card midi-mapping-card">
-                <strong>{move || midi_learn.get().map(|instrument|format!("Hit your {} now…",instrument_label(instrument))).unwrap_or_else(||"Quick MIDI Learn".into())}</strong>
-                <p class="help">"Map each pad independently. Unchanged General MIDI notes remain available as fallbacks."</p>
-                <For
-                  each=move || vec![Instrument::Kick,Instrument::Snare,Instrument::ClosedHat,Instrument::OpenHat]
-                  key=|instrument|*instrument as u8
-                  children=move |instrument|{
-                    view!{
-                      <div class="midi-mapping-row">
-                        <span>{move || midi_bindings.get().iter().find(|binding|binding.instrument==instrument).map(|binding|format!("{} · note {}, channel {}",instrument_label(instrument),binding.note,binding.channel)).unwrap_or_else(||format!("{} · General MIDI",instrument_label(instrument)))}</span>
-                        <button aria-label=format!("Learn {}",instrument_label(instrument)) on:click=move |_|midi_learn.set(Some(instrument))>{move || if midi_learn.get()==Some(instrument){"Listening…"}else{"Learn"}}</button>
-                      </div>
-                    }
-                  }
-                />
-              </div>
-              <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
+            <section><h3>"MIDI drums"</h3><p class="help">"Rudiment connects automatically to your last-used kit. Rudiment never uploads your events."</p>
+              <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
+              <div class="button-row"><button aria-label="Open MIDI connection setup" on:click=move |_|{midi_modal_auto.set(false);midi_modal_open.set(true);focus_midi_modal_close();}>"MIDI connection setup…"</button></div>
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
@@ -4223,6 +4336,35 @@ fn App() -> impl IntoView {
                      </section>
                    </div>
                  })}</aside><button class=move || if settings_open.get(){"drawer-backdrop"}else{"drawer-backdrop hidden"} aria-label="Close settings" tabindex="-1" on:click=move |_|{settings_open.set(false);restore_settings_focus();}></button>
+                  <div class=move || if midi_modal_open.get(){"midi-modal-backdrop"}else{"midi-modal-backdrop hidden"}>
+                    <section
+                      id="midi-connection-modal"
+                      class="midi-modal"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-labelledby="midi-modal-title"
+                      aria-hidden=move || (!midi_modal_open.get()).to_string()
+                      inert=move || !midi_modal_open.get()
+                      on:click=|event|event.stop_propagation()
+                      on:keydown=move |event:web_sys::KeyboardEvent|{
+                        match event.key().as_str(){
+                          "Escape"=>{event.prevent_default();midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);},
+                          "Tab"=>trap_dialog_tab(&event,"#midi-connection-modal"),
+                          _=>{},
+                        }
+                      }
+                    >
+                      <div class="midi-modal-head">
+                        <div><span class="eyebrow">"MIDI DRUMS"</span><h2 id="midi-modal-title">"MIDI connection"</h2></div>
+                        <button id="midi-modal-close" aria-label="Close MIDI connection setup" on:click=move |_|{midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);}><X size=22/></button>
+                      </div>
+                      <p class="midi-modal-instructions">"Connect your drum module with a USB MIDI cable, or pair it over Bluetooth MIDI in your system settings, then choose it below. If your browser asks to use MIDI, allow it so Rudiment can see your kit."</p>
+                      <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
+                      <div class="midi-modal-actions">
+                        <button id="midi-modal-continue" on:click=move |_|{midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);}>"Continue without MIDI"</button>
+                      </div>
+                    </section>
+                  </div>
       </main>
     }
 }
@@ -4236,6 +4378,34 @@ fn main() {
 mod tests {
     use super::*;
     use rudiment_core::Hand;
+
+    fn port(id: &str, state: &str, connection: &str) -> MidiPort {
+        MidiPort {
+            id: id.into(),
+            name: id.into(),
+            manufacturer: "Test".into(),
+            state: state.into(),
+            connection: connection.into(),
+        }
+    }
+
+    #[test]
+    fn midi_connection_requires_a_connected_selected_port() {
+        let ports = vec![port("kit", "connected", "open")];
+        assert!(midi_connection_ready(&ports, Some("kit")));
+        // Nothing selected, a selection that disappeared, a pending port and
+        // a closed connection all mean MIDI is not ready yet.
+        assert!(!midi_connection_ready(&ports, None));
+        assert!(!midi_connection_ready(&ports, Some("other")));
+        assert!(!midi_connection_ready(
+            &[port("kit", "disconnected", "pending")],
+            Some("kit")
+        ));
+        assert!(!midi_connection_ready(
+            &[port("kit", "connected", "closed")],
+            Some("kit")
+        ));
+    }
 
     fn observed_at(timestamp_ms: f64) -> ObservedHit {
         ObservedHit {
