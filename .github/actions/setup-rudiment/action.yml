@@ -1,6 +1,20 @@
 name: Set up Rudiment toolchain
 description: Install the pinned Node, Rust/WASM, Trunk, and npm dependencies used by QA jobs.
+outputs:
+  npm-cache-hit:
+    description: Whether the exact npm download cache key was restored.
+    value: ${{ steps.npm-cache.outputs.cache-hit }}
+  rust-cache-hit:
+    description: Whether the exact Rust dependency cache key was restored.
+    value: ${{ steps.rust-cache.outputs.cache-hit }}
+  trunk-cache-hit:
+    description: Whether the exact Trunk binary cache key was restored.
+    value: ${{ steps.trunk-cache.outputs.cache-hit }}
 inputs:
+  save-cache:
+    description: Save updated caches. Disable for jobs that run untrusted code after setup.
+    required: false
+    default: 'true'
   trunk:
     description: Install Trunk and the wasm32 target for build/browser jobs.
     required: false
@@ -12,44 +26,127 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Start environment timing
+      id: timing
+      shell: bash
+      run: echo "started=$(date +%s)" >>"$GITHUB_OUTPUT"
+
     - uses: actions/setup-node@v4
       with:
         node-version: 22
-        cache: npm
-    - name: Cache Cargo registry and builds
-      uses: actions/cache@v4
+
+    - name: Restore npm download cache
+      id: npm-cache
+      uses: actions/cache/restore@v4
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('Cargo.lock') }}
+        path: ~/.npm
+        key: ${{ runner.os }}-${{ runner.arch }}-node-22-npm-${{ hashFiles('package-lock.json', 'package.json', '.npmrc') }}
         restore-keys: |
-          ${{ runner.os }}-${{ runner.arch }}-cargo-
-    - name: Add Rust WASM target
-      if: inputs.trunk == 'true'
+          ${{ runner.os }}-${{ runner.arch }}-node-22-npm-
+
+    - name: Install pinned Rust toolchain
       shell: bash
-      run: rustup target add wasm32-unknown-unknown
-    - name: Install pinned Trunk binary
+      run: |
+        rustup show active-toolchain
+        rustc --version
+        cargo --version
+        if [ "${{ inputs.trunk }}" = true ]; then
+          rustup target add wasm32-unknown-unknown
+        fi
+
+    - name: Restore Rust dependency cache
+      id: rust-cache
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        shared-key: rudiment
+        key: trunk-${{ inputs.trunk }}-wasm32-unknown-unknown-trunk-0.22.1
+        cache-targets: 'true'
+        cache-bin: 'true'
+        save-if: ${{ inputs.save-cache }}
+
+    - name: Restore pinned Trunk binary
+      id: trunk-cache
       if: inputs.trunk == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/rudiment/trunk/0.22.1
+        key: ${{ runner.os }}-${{ runner.arch }}-trunk-0.22.1-2ab8d548fd5ed9c
+
+    - name: Install pinned Trunk binary
+      if: inputs.trunk == 'true' && steps.trunk-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         TRUNK_VERSION: 0.22.1
         TRUNK_SHA256: 2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1
       run: |
         archive="$RUNNER_TEMP/trunk.tar.gz"
-        bin_dir="$RUNNER_TEMP/trunk-bin"
+        bin_dir="$HOME/.cache/rudiment/trunk/${TRUNK_VERSION}"
         curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
           "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
           --output "$archive"
         echo "${TRUNK_SHA256}  ${archive}" | sha256sum --check --status
         mkdir --parents "$bin_dir"
-        tar --extract --gzip --file "$archive" --directory "$bin_dir"
-        echo "$bin_dir" >> "$GITHUB_PATH"
-    - name: Install npm dependencies
+        tar --extract --gzip --file "$archive" --directory "$bin_dir" trunk
+
+    - name: Verify pinned Trunk binary
+      if: inputs.trunk == 'true'
       shell: bash
-      run: npm ci
+      run: |
+        bin_dir="$HOME/.cache/rudiment/trunk/0.22.1"
+        echo "$bin_dir" >>"$GITHUB_PATH"
+        test "$("$bin_dir/trunk" --version)" = "trunk 0.22.1"
+
+    - name: Save pinned Trunk binary
+      if: inputs.save-cache == 'true' && inputs.trunk == 'true' && steps.trunk-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/rudiment/trunk/0.22.1
+        key: ${{ runner.os }}-${{ runner.arch }}-trunk-0.22.1-2ab8d548fd5ed9c
+
+    - name: Install npm dependencies
+      id: npm-install
+      shell: bash
+      run: |
+        started=$(date +%s)
+        npm ci
+        echo "duration=$(( $(date +%s) - started ))" >>"$GITHUB_OUTPUT"
+
+    - name: Save npm download cache
+      if: inputs.save-cache == 'true' && steps.npm-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-${{ runner.arch }}-node-22-npm-${{ hashFiles('package-lock.json', 'package.json', '.npmrc') }}
+
     - name: Install cargo-audit
       if: inputs.cargo-audit == 'true'
       shell: bash
-      run: cargo install cargo-audit --locked
+      run: command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
+
+    - name: Report environment preparation
+      shell: bash
+      env:
+        STARTED: ${{ steps.timing.outputs.started }}
+        NPM_DURATION: ${{ steps.npm-install.outputs.duration }}
+        NPM_CACHE_HIT: ${{ steps.npm-cache.outputs.cache-hit }}
+        RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        TRUNK_CACHE_HIT: ${{ steps.trunk-cache.outputs.cache-hit }}
+      run: |
+        total=$(( $(date +%s) - STARTED ))
+        if [ "${{ inputs.trunk }}" = true ]; then
+          trunk_hit="${TRUNK_CACHE_HIT:-false}"
+        else
+          trunk_hit=not-requested
+        fi
+        {
+          echo "### Rudiment environment preparation"
+          echo
+          echo "| Metric | Result |"
+          echo "|---|---:|"
+          echo "| npm cache exact hit | ${NPM_CACHE_HIT:-false} |"
+          echo "| Rust cache exact hit | ${RUST_CACHE_HIT:-false} |"
+          echo "| Trunk cache exact hit | ${trunk_hit} |"
+          echo "| npm dependency installation | ${NPM_DURATION}s |"
+          echo "| Total environment preparation | ${total}s |"
+        } >>"$GITHUB_STEP_SUMMARY"
+        echo "::notice::Rudiment setup: npm-cache=${NPM_CACHE_HIT:-false}, rust-cache=${RUST_CACHE_HIT:-false}, trunk-cache=${trunk_hit}, npm=${NPM_DURATION}s, total=${total}s"

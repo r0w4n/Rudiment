@@ -4,7 +4,7 @@ Rudiment uses one set of repository commands for developers, Codex, Git hooks, a
 
 ## Prerequisites
 
-Use Node.js 22, current stable Rust, Chrome, the `wasm32-unknown-unknown` Rust target, Trunk 0.22.1, and locked npm dependencies. Dependency security also requires `cargo-audit`:
+Use Node.js 22, Rust 1.99.1 as pinned by `rust-toolchain.toml`, Chrome, the `wasm32-unknown-unknown` Rust target, Trunk 0.22.1, and locked npm dependencies. Dependency security also requires `cargo-audit`:
 
 ```bash
 rustup target add wasm32-unknown-unknown

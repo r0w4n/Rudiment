@@ -4,7 +4,7 @@ Rudiment is a client-side drum practice app. It opens directly on a four-bar sin
 
 ## Run locally
 
-Prerequisites: current stable Rust, the `wasm32-unknown-unknown` target, Trunk 0.22+, Node.js 20+ and npm.
+Prerequisites: Rust 1.99.1 (pinned in `rust-toolchain.toml`), the `wasm32-unknown-unknown` target, Trunk 0.22.1, Node.js 22 and npm.
 
 ```bash
 rustup target add wasm32-unknown-unknown

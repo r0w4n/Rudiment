@@ -1,0 +1,19 @@
+name: Set up the Rudiment AI task environment
+description: Prepare Rudiment dependencies and development tools without compiling the application.
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-rudiment
+      with:
+        # Restore reviewed dependency caches, but never let files modified by
+        # the later untrusted agent become a cache saved under the main ref.
+        save-cache: 'false'
+    - name: Verify AI task development tools
+      shell: bash
+      run: |
+        node --version | grep -E '^v22\.'
+        npm --version
+        rustc --version
+        cargo --version
+        trunk --version | grep -Fx 'trunk 0.22.1'
+        rustup target list --installed | grep -Fx 'wasm32-unknown-unknown'

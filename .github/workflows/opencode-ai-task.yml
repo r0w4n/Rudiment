@@ -1,8 +1,9 @@
 name: OpenCode AI task
 
 # The reusable workflow is pinned to the reviewed release commit of
-# r0w4n/central-ai-workflow main. Update the SHA only after a reviewed and
-# merged central pull request; see central-ai-workflow/docs/RELEASING.md.
+# r0w4n/central-ai-workflow. This provisional immutable pin is the head of
+# central PR #5; replace it with that PR's reviewed main commit before taking
+# this migration out of draft or merging it. See central docs/RELEASING.md.
 
 on:
   issues:
@@ -29,13 +30,13 @@ permissions:
 jobs:
   ai-task:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-task'
-    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@5df0a5c0ee06b398536bc4571a6da4b5cad379ab
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@cd0af4e3b5e9c8a0a66d3b27b17376c39762fc82
     with:
       issue_number: ${{ format('{0}', github.event.issue.number || inputs.issue_number) }}
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-      # Provision the pinned Rust/WASM/Trunk toolchain and verify the web
-      # build before the agent starts.
-      toolchain_profile: rudiment-web
+      # Run Rudiment's local setup action. It installs and verifies the
+      # development environment without redundantly compiling the application.
+      setup: true
       # AI pull requests are created ready for review; merging stays manual.
       draft: false
     secrets:

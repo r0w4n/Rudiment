@@ -38,7 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rudiment
-      - run: npm run build
+      - name: Build production assets
+        run: |
+          started=$(date +%s)
+          npm run build
+          duration=$(( $(date +%s) - started ))
+          echo "Production compilation: ${duration}s" >>"$GITHUB_STEP_SUMMARY"
       - run: node scripts/performance/run.mjs --tier full --trace --output performance-results/full.json
       - run: node scripts/performance/run.mjs --tier endurance --duration-ms 900000 --output performance-results/endurance.json
       - uses: actions/upload-artifact@v7
