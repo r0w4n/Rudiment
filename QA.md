@@ -28,7 +28,9 @@ npm ci
 
 Each command is unattended and returns non-zero when a mandatory check fails, a required metric is missing, a dependent check is skipped, or a required executable is unavailable. The runner continues independent checks so one invocation yields a useful consolidated report. `--skip-build` may be passed after `--` only when the caller has already produced the current `dist/` in the same job.
 
-Browser and accessibility tests start their own production-build server on an OS-assigned loopback port. They do not reuse an existing server, so a development server or stale process cannot cause a port conflict or make the checks exercise the wrong build.
+Browser and accessibility tests start their own production-build server on an OS-assigned loopback port. Direct Playwright runs build from current source. QA runs reuse a build only when the recorded source fingerprint and built output hashes still match; a source edit, stash, checkout, or altered compiled asset fails before the server starts. `npm run build` writes the fingerprint only after a successful Trunk build. The Pages job records it after its Pages-relative build.
+
+During implementation, select the tests that exercise the changed behavior and run them after meaningful edits. Do not repeatedly run the full Playwright suite or increase timeouts to hide a failure. PR CI remains the comprehensive regression gate. To compare a failure with `main`, use a separate clean worktree, install locked dependencies, build it fresh, then run the same test with the same browser and environment. Record the two results and classify a failure as a regression, reproduced on `main`, or environment-dependent; a stash without rebuilding does not establish a baseline.
 
 The QA runner keeps Playwright failure artifacts in `test-results/browser/` and `test-results/a11y/` respectively, so the accessibility run does not erase browser failure traces in a combined gate. A later run of the same suite replaces its previous artifacts.
 
