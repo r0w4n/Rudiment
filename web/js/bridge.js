@@ -1086,7 +1086,9 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
         const hands=[...new Set(group.hits.map(hit=>hit.hand).filter(hand=>hand==='R'||hand==='L'))];
         // Keep sticking below the staff so accents cannot displace individual hand labels.
         if(hands.length===1)note.addModifier(new Annotation(handText(hands[0])).setVerticalJustification(STICKING_PLACEMENT).setFont('Inter',11,'700'),0);
-        if(group.hits.some(hit=>hit.accent))note.addModifier(new Articulation('a>').setPosition(3),0);
+        // Tag the accent glyph so theme CSS can colour it without per-frame work;
+        // VexFlow renders articulations as plain text inside the notehead group.
+        if(group.hits.some(hit=>hit.accent)){note.rudimentAccent=new Articulation('a>').setPosition(3);note.addModifier(note.rudimentAccent,0);}
         barSlotBeats.set(note,group.position);slots.push(note);
         for(const hit of group.hits){const key=pitchForHit(hit),meta={note,beat:hit.beat,notationBeat:group.position,durationBeats:value,hit,key,headIndex:Math.max(0,keys.indexOf(key)),row,bar};notesMeta.push(meta);firstNoteByRow[row]??=meta;}
         const ornamentHits=group.graceHits;
@@ -1206,6 +1208,8 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
       group.dataset.tuplet=String(durationSpec(meta.durationBeats)[3]);
       group.dataset.grace=String(Boolean(meta.hit.grace));
       group.dataset.accent=String(Boolean(meta.hit.accent));
+      const accent=meta.note.rudimentAccent;
+      if(accent)for(const text of group.querySelectorAll('.vf-notehead > text')){if(text.textContent===accent.text){text.classList.add('score-accent');break;}}
       group.dataset.midiNotes=eventHits.map(candidate=>candidate.note??38).join(',');
       group.dataset.instruments=[...new Set(eventHits.map(instrumentForHit))].join(',');
       group.dataset.articulations=[...new Set(eventHits.map(articulationForHit))].join(',');
