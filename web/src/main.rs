@@ -1199,6 +1199,18 @@ fn rebase_hits_for_resume(hits: &mut [ObservedHit], previous_start_ms: f64, next
     }
 }
 
+/// Loop readout in the same current/total convention as the bar indicator.
+/// `iteration` is the zero-based visible loop index, so the first pass reads
+/// "LOOP 1 / N" and the final configured pass reads "LOOP N / N". A
+/// configured value of 0 is the endless loop, whose total is shown as "∞".
+fn loop_label(iteration: usize, configured_loops: u8) -> String {
+    if configured_loops == 0 {
+        format!("LOOP {} / \u{221e}", iteration + 1)
+    } else {
+        format!("LOOP {} / {}", iteration + 1, configured_loops)
+    }
+}
+
 fn session_start_ms_at_beat(
     start_ms: f64,
     offset: f64,
@@ -2002,6 +2014,11 @@ fn App() -> impl IntoView {
     let run_expected = RwSignal::new(Arc::new(Vec::<ExpectedHit>::new()));
     let active_segment_start = RwSignal::new(0.0);
     let visible_loop_index = RwSignal::new(0usize);
+    // The loop readout mirrors the bar label's memoisation: the view closure
+    // re-evaluates cheaply, but `visible_loop_index` only changes at launch
+    // and at actual loop boundaries, so the label notifies the view once per
+    // pass rather than on every bar transition or transport frame.
+    let displayed_loop = Memo::new(move |_| loop_label(visible_loop_index.get(), loops.get()));
     let observed = RwSignal::new(Vec::<ObservedHit>::new());
     let feedback_dirty = RwSignal::new(true);
     let accepted_observed = RwSignal::new(Vec::<ObservedHit>::new());
@@ -2789,6 +2806,7 @@ fn App() -> impl IntoView {
         accepted_observed.set(vec![]);
         practice_origin_ms.set(0.0);
         paused_run_start_ms.set(None);
+        visible_loop_index.set(0);
         bar_attempt.set(1);
         failed_repeat_attempts.set(vec![]);
         repeat_attempt_summaries.set(vec![]);
@@ -2825,6 +2843,7 @@ fn App() -> impl IntoView {
             practice_origin_ms.set(0.0);
             run_start_ms.set(0.0);
             paused_run_start_ms.set(None);
+            visible_loop_index.set(0);
             bar_attempt.set(1);
             failed_repeat_attempts.set(vec![]);
             repeat_attempt_summaries.set(vec![]);
@@ -4204,6 +4223,7 @@ fn App() -> impl IntoView {
                   </div>
                 </div>
                 <div class="timeline"><i style=move || {let sequence=bar_sequence.get();let fraction=(((timeline_beat.get().max(sequence.origin)-sequence.origin)/sequence.length()*100.0).rem_euclid(100.0).clamp(0.0,100.0))/100.0;format!("transform:scaleX({:.4})",fraction)}></i></div>
+                <span id="loop-progress" class="loop-progress">{move || displayed_loop.get()}</span>
                 <select class="loop-control" disabled=move || adaptive_session_active.get() aria-label=move || format!("Loops: {}", match loops.get(){2=>"2 LOOPS",4=>"4 LOOPS",0=>"∞ LOOP",_=>"1 / 1 LOOP"}) title="Choose how many times to play the selected bars" prop:value=move || loops.get().to_string() on:change={let save=save_loops.clone();move |event|{let value=event_target_value(&event).parse().unwrap_or(1);if phase.get_untracked()=="paused" && value!=loops.get_untracked(){selection_changed.set(true);}loops.set(value);save();}}><option value="1">"1 / 1 LOOP"</option><option value="2">"2 LOOPS"</option><option value="4">"4 LOOPS"</option><option value="0">"∞ LOOP"</option></select>
               </div>
               <div class=move || if result_modal_open.get(){"result-backdrop"}else{"result-backdrop hidden"} on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>
@@ -5230,6 +5250,16 @@ mod tests {
                 .iter()
                 .any(|hit| hit.id == "early-grace-loop1" && hit.beat == 7.99)
         );
+    }
+
+    #[test]
+    fn loop_label_follows_the_bar_indicator_current_total_convention() {
+        assert_eq!(loop_label(0, 1), "LOOP 1 / 1");
+        assert_eq!(loop_label(0, 4), "LOOP 1 / 4");
+        assert_eq!(loop_label(1, 4), "LOOP 2 / 4");
+        assert_eq!(loop_label(3, 4), "LOOP 4 / 4");
+        assert_eq!(loop_label(0, 0), "LOOP 1 / ∞");
+        assert_eq!(loop_label(2, 0), "LOOP 3 / ∞");
     }
 
     #[test]
