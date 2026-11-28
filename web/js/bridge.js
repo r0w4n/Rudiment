@@ -1146,8 +1146,15 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     const voice=new Voice({numBeats:(lastBar-firstBar)*metersPerBar,beatValue:4}).setStrict(false);
     voice.addTickables(rowTickables);
     new Formatter().joinVoices([voice]).format([voice],staves[row].getNoteEndX()-staves[row].getNoteStartX());
-    const firstSlot=barSlots.get(firstBar)?.[0],firstContext=firstSlot?.getTickContext();
-    const rowStartRelativeX=firstSlot&&firstContext?firstSlot.getX()+firstSlot.getGlyphWidth()/2:0;
+    const firstSlot=barSlots.get(firstBar)?.[0];
+    // The clef and time signature are a separate introductory layout area: the
+    // bar's linear beat map starts a fixed glyph clearance right of the stave's
+    // note start instead of the first notehead's formatter position. Formatter
+    // residue and header width then cannot consume the bar's rhythmic spacing
+    // budget, cannot crowd the first onset against the time signature, and
+    // every bar distributes onsets by the same beat-relative rule.
+    const stavePadding=Metrics.get('Stave.padding',0);
+    const rowStartRelativeX=(firstSlot?firstSlot.getGlyphWidth()/2:0)+stavePadding;
     const rowStartX=staves[row].getNoteStartX()+rowStartRelativeX;
     // The row's final bar must end at its drawn barline. Extrapolating a full
     // barWidth from the first engraved beat overshoots the system: the bar's
@@ -1162,7 +1169,6 @@ function renderScore(exercise, minimumRowHeightOverride=0, layoutPass=0, focusBa
     // so the padded origin must be removed here for the notehead centres to
     // land on the linear beat map anchored at the staff origin. Any residual
     // glyph-metrics offset is absorbed by the post-draw correction below.
-    const stavePadding=Metrics.get('Stave.padding',0);
     for(let bar=firstBar;bar<lastBar;bar++){
       const layout=barLayouts[bar],xStart=rowStartX+(bar-firstBar)*barWidth;
       const beatSpan=bar===lastBar-1?Math.max(1,barlineX-xStart):barWidth;
