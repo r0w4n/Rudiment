@@ -122,7 +122,7 @@ test('settings reopens onboarding and keeps manual MIDI configuration', async ({
   await page.goto('/');
   await expect(page.locator('#onboarding')).toBeHidden();
   await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByRole('button', { name: 'Reopen first-run setup' }).click();
+  await page.getByRole('button', { name: 'Reopen setup page' }).click();
   await expect(page.locator('#onboarding')).toBeVisible();
   await expect(page.locator('main.app')).toHaveAttribute('inert', '');
   await page.getByRole('button', { name: 'Enter practice workspace' }).click();

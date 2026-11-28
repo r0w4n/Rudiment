@@ -4245,7 +4245,7 @@ fn App() -> impl IntoView {
                 <button type="button" class=move || if !highway.get(){"active"}else{""} aria-pressed=move || (!highway.get()).to_string() on:click=move |_|{highway.set(false);save_highway_mode(false);}>"Notation"</button>
                 <button type="button" class=move || if highway.get(){"active"}else{""} aria-pressed=move || highway.get().to_string() on:click=move |_|{highway.set(true);save_highway_mode(true);}>"Highway"</button>
               </div>
-              <div class="button-row"><button aria-label="Reopen first-run setup" on:click=move |_|{settings_open.set(false);onboarding_open.set(true);}>"Reopen setup page…"</button></div>
+              <div class="button-row"><button on:click=move |_|{settings_open.set(false);onboarding_open.set(true);}>"Reopen setup page…"</button></div>
             </section>
             <section><h3>"Metronome"</h3>
               <MetronomeSettings bpm=bpm count_in=count_in subdivision=subdivision timbre=timbre metronome=metronome click_volume=click_volume snare_volume=snare_volume snare_muted=snare_muted error=metronome_preview_error change_tempo=change_tempo.clone() save=save_current_settings.clone()/>
