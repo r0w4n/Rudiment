@@ -558,6 +558,28 @@ fn midi_connection_ready(ports: &[MidiPort], selected: Option<&str>) -> bool {
     })
 }
 
+/// Decides whether the three-second startup fallback should surface the MIDI
+/// connection modal. It stays quiet when the user already dismissed the modal
+/// this session, when a connection is established, when the browser has no
+/// Web MIDI at all, when the permission was explicitly denied (a modal every
+/// session would only nag after an explicit refusal), and when permission is
+/// granted but no kit is even plugged in.
+fn startup_midi_modal_needed(
+    ports: &[MidiPort],
+    selected: Option<&str>,
+    permission: Option<&str>,
+    dismissed: bool,
+) -> bool {
+    if dismissed || midi_connection_ready(ports, selected) {
+        return false;
+    }
+    match permission {
+        Some("unsupported") | Some("denied") => false,
+        Some("granted") if ports.is_empty() => false,
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct MidiEnvelope {
@@ -3342,18 +3364,13 @@ fn App() -> impl IntoView {
     // rest of the session, and settings remain the manual entry point.
     {
         let open_modal = Closure::once_into_js(move || {
-            if midi_modal_dismissed.get_untracked()
-                || midi_connection_ready(
-                    &midi_ports.get_untracked(),
-                    selected_midi.get_untracked().as_deref(),
-                )
-            {
+            if !startup_midi_modal_needed(
+                &midi_ports.get_untracked(),
+                selected_midi.get_untracked().as_deref(),
+                midi_permission.get_untracked().as_deref(),
+                midi_modal_dismissed.get_untracked(),
+            ) {
                 return;
-            }
-            match midi_permission.get_untracked().as_deref() {
-                Some("unsupported") | Some("denied") => return,
-                Some("granted") if midi_ports.get_untracked().is_empty() => return,
-                _ => {}
             }
             midi_modal_auto.set(true);
             midi_modal_open.set(true);
@@ -4404,6 +4421,55 @@ mod tests {
         assert!(!midi_connection_ready(
             &[port("kit", "connected", "closed")],
             Some("kit")
+        ));
+    }
+
+    #[test]
+    fn startup_modal_appears_when_no_connection_is_established_in_time() {
+        // A pending permission request (still unresolved after three seconds)
+        // and a granted permission with devices that never connected both
+        // surface the modal so the kit can be configured in one place.
+        assert!(startup_midi_modal_needed(&[], None, None, false));
+        assert!(startup_midi_modal_needed(
+            &[port("kit", "connected", "pending")],
+            None,
+            Some("granted"),
+            false
+        ));
+    }
+
+    #[test]
+    fn startup_modal_stays_quiet_when_a_connection_already_exists() {
+        let ports = vec![port("kit", "connected", "open")];
+        assert!(!startup_midi_modal_needed(
+            &ports,
+            Some("kit"),
+            Some("granted"),
+            false
+        ));
+    }
+
+    #[test]
+    fn startup_modal_stays_quiet_after_a_manual_dismissal() {
+        assert!(!startup_midi_modal_needed(&[], None, None, true));
+    }
+
+    #[test]
+    fn startup_modal_respects_browser_permission_failures() {
+        // No Web MIDI support and an explicit refusal never nag again, and a
+        // granted permission without any plugged-in kit has nothing to show.
+        assert!(!startup_midi_modal_needed(
+            &[],
+            None,
+            Some("unsupported"),
+            false
+        ));
+        assert!(!startup_midi_modal_needed(&[], None, Some("denied"), false));
+        assert!(!startup_midi_modal_needed(
+            &[],
+            None,
+            Some("granted"),
+            false
         ));
     }
 
