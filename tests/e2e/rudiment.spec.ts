@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { test, expect } from './fixtures';
+import type { Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
 async function setTempo(page: Page, value: string) {

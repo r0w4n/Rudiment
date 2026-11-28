@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 // Regression tests for the visual metronome's beat-time correctness:
 // - the sweep needle must never fall back to its CSS centre during the

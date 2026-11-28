@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { test, expect } from './fixtures';
+import type { Page } from '@playwright/test';
 
 // Regression coverage for issue #29: backgrounding during playback could leave
 // a run that was nominally playing but silent and visually frozen after

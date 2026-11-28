@@ -74,6 +74,31 @@
 .midi-modal-actions button{min-width:160px;min-height:42px;padding:0 16px;border:1px solid #3a4741;border-radius:10px;background:#202722;color:#d5ddd9;font-size:12px;font-weight:800}
 .midi-modal-actions button:hover{background:#28302b}
 @media(max-width:480px){.midi-modal-backdrop{padding:12px}.midi-modal{padding:18px}.midi-modal-actions button{min-width:0;flex:1}}
+/* Dedicated first-run onboarding page (#34). A full-page setup screen shown
+   from the first paint; the practice workspace stays inert behind it. */
+.onboarding{position:fixed;z-index:60;inset:0;display:grid;place-items:center;padding:24px;background:var(--bg);overflow:auto}
+.onboarding-card{width:min(620px,100%);max-height:calc(100dvh - 48px);overflow:auto;padding:28px;border:1px solid #35443c;border-radius:18px;background:#151b18;box-shadow:0 30px 90px #0008}
+.onboarding-card h1{margin:6px 0 10px;font:700 30px Manrope,sans-serif;color:var(--ink)}
+.onboarding-intro{margin:0 0 18px;color:#aeb8b3;font-size:13px;line-height:1.6}
+.onboarding-display{margin:0 0 16px;padding:0;border:0}
+.onboarding-display legend{padding:0;margin-bottom:8px;font:700 13px var(--font-ui);color:#d7eae3}
+.onboarding-display-options{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.onboarding-display-options button{display:flex;flex-direction:column;align-items:flex-start;gap:6px;min-height:78px;padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:#161d1a;color:var(--muted);text-align:left}
+.onboarding-display-options button strong{font-size:14px;color:inherit}
+.onboarding-display-options button span{font-size:11px;line-height:1.4}
+.onboarding-display-options button:hover{color:var(--ink)}
+.onboarding-display-options button.active{border-color:var(--teal);background:var(--teal-dark);color:var(--ink)}
+.onboarding-display-options button:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
+.onboarding-midi{margin:0 0 14px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.onboarding-midi h2{margin:0 0 6px;font:700 16px Manrope,sans-serif}
+.onboarding-midi .midi-config{margin-top:8px}
+.onboarding-skip{margin-top:4px}
+.onboarding-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+.onboarding-actions button{min-height:44px;padding:0 18px;border:1px solid #3a4741;border-radius:10px;background:#202722;color:#d5ddd9;font-size:12px;font-weight:800}
+.onboarding-actions button:hover{background:#28302b}
+.onboarding-actions button.primary{border-color:var(--teal);background:var(--teal);color:#0c1512}
+.onboarding-actions button.primary:hover{background:#84dcc9}
+@media(max-width:560px){.onboarding{padding:14px}.onboarding-card{padding:20px}.onboarding-card h1{font-size:24px}.onboarding-display-options{grid-template-columns:1fr}}
 @media(max-width:480px){.delete-confirm-backdrop{padding:12px}.delete-confirm-dialog{padding:20px}.delete-confirm-actions{display:grid;grid-template-columns:1fr 1fr}.delete-confirm-actions button{min-width:0}}
 .library-empty-state{grid-column:1/-1;min-height:220px;display:grid;place-content:center;gap:7px;text-align:center;color:#94a19a}
 .library-empty-state strong{color:#dce5e0;font-size:15px}.library-empty-state span{max-width:360px;font-size:11px;line-height:1.5}
