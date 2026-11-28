@@ -38,7 +38,9 @@ for workflow in 'Quality assurance' 'Performance regression checks' 'CodeQL stat
 done
 grep -q 'types: \[completed\]' "$router"
 grep -qF 'AUTOMATION_PR_AUTHOR: central-ai-publisher[bot]' "$router"
-grep -qF 'task_mode=remediation' "$router"
+grep -qF 'task_mode: $mode' "$router"
+grep -qF 'remediation_event: $event' "$router"
+grep -qF 'actions/workflows/${AI_TASK_WORKFLOW}/dispatches' "$router"
 grep -qF 'remediation_event' "$router"
 # The router never runs PR code, pushes branches, or merges.
 ! grep -Eq 'git push|gh pr merge|gh pr (review|checkout)' "$router"
