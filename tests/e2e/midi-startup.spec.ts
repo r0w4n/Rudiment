@@ -22,8 +22,12 @@ test('unresolved automatic MIDI permission does not block the workspace', async 
 
   await page.goto('/');
   // Freeze the clock so the three-second fallback cannot fire while
-  // assertions run; virtual time only moves via fastForward below.
-  await page.clock.pauseAt(Date.now() + 50);
+  // assertions run; virtual time only moves via fastForward below. The
+  // pause point is taken from the page's own clock with a generous margin:
+  // virtual time advances while the page loads, so a small offset taken from
+  // the test process can already lie in the past and pauseAt would refuse it.
+  const pauseTarget = await page.evaluate(() => Date.now() + 500);
+  await page.clock.pauseAt(pauseTarget);
   await expect.poll(() => page.evaluate(() => (window as any).__midiRequests)).toBe(1);
   await expect(page.locator('#notation svg')).toBeVisible();
   await page.getByRole('button', { name: 'Open settings' }).click();
