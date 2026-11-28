@@ -16,7 +16,8 @@ js-sys = "0.3"
 console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", features = [
   "Window", "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlSelectElement",
-  "File", "FileList", "Event", "KeyboardEvent", "DragEvent", "DataTransfer", "VisibilityState", "Performance"
+  "File", "FileList", "Event", "KeyboardEvent", "DragEvent", "DataTransfer", "VisibilityState", "Performance",
+  "HtmlDetailsElement"
 ] }
 lucide-leptos = { version = "3.63.0", features = ["accessibility", "account", "arrows", "charts", "files", "math", "multimedia", "time"] }
 
