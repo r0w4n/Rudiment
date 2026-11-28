@@ -1,0 +1,41 @@
+name: Temporary token probe
+
+# TEMPORARY DIAGNOSTIC — probe which pull-request endpoints the
+# GITHUB_TOKEN may call under workflow_dispatch and workflow_run events.
+# Remove after the automatic CI-failure remediation investigation.
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Quality assurance]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Probe endpoints
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: 9059ee93b4297b3f2921858bc979da608160e492
+        run: |
+          echo "event: ${GITHUB_EVENT_NAME}"
+          call() {
+            echo "--- $1"
+            shift
+            if "$@" >/tmp/probe-out.txt 2>/tmp/probe-err.txt; then
+              echo "OK: $(head -c 200 /tmp/probe-out.txt)"
+            else
+              echo "FAILED rc=$?: $(head -c 200 /tmp/probe-err.txt)"
+            fi
+          }
+          call "list pulls with head filter" gh api "repos/${GITHUB_REPOSITORY}/pulls" -f state=open -f head="r0w4n:ai/issue-37" --jq '.[0].number // empty'
+          call "single pull request" gh api "repos/${GITHUB_REPOSITORY}/pulls/48" --jq '.number'
+          call "pulls associated with commit" gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/pulls" --jq '.[0].number // empty'
+          call "check runs of commit" gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?per_page=100" --jq '.check_runs | length'
+          call "pr comments" gh api "repos/${GITHUB_REPOSITORY}/issues/48/comments" --jq 'length'
