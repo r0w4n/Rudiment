@@ -39,26 +39,35 @@ only acts on same-repository branches named `ai/*`.
 ## Requesting an AI revision
 
 On an open PR created by `central-ai-publisher[bot]` from an `ai/issue-<n>`
-branch, `r0w4n` can add a comment beginning with:
+branch, `r0w4n` can request changes either with the explicit command:
 
 ```text
 /ai revise Describe the focused correction to make.
 ```
 
-The lightweight Rudiment caller forwards only explicit command comments to
-the generic Central AI workflow. Central revalidates the human, PR creator,
-same-repository head, `main` base, linked authorised issue, immutable comment
-ID, open state, and exact current head. OpenCode starts from the current PR
-implementation and commits only the requested correction to the existing
-branch; it does not create another issue or PR.
+or by writing an ordinary actionable comment describing the change. Commands
+no longer need to be remembered: the lightweight Rudiment caller forwards all
+PR comments on AI pull requests to the generic Central AI workflow, which
+classifies each comment locally. Explicit `/ai revise` commands work exactly
+as before; ordinary actionable feedback starts a revision the same way;
+malformed `/ai` commands (such as `/ai assist`) receive a public reply with
+the valid usage instead of being silently skipped; vague directives and bare
+questions receive an acknowledgement asking for a concrete change; bot
+comments, automation status updates, pleasantries and unauthorised feedback
+are ignored silently.
+
+Central revalidates the human, PR creator, same-repository head, `main` base,
+linked authorised issue, immutable comment ID, open state, and exact current
+head. OpenCode starts from the current PR implementation and commits only the
+requested correction to the existing branch; it does not create another issue
+or PR.
 
 Requests for the same PR are queued with cancellation disabled. Each feedback
 comment has one audit comment that moves from accepted to completed or failed
-and links the workflow run and resulting commit. Ordinary comments, bot
-comments, empty feedback, closed or merged PRs, forks, unexpected branches,
-and unauthorised users cannot start an agent. Feedback is untrusted task data
-and cannot change workflow files, secrets, protected paths, permissions, model
-selection, or publication rules.
+and links the workflow run and resulting commit. Closed or merged PRs, forks,
+unexpected branches, and unauthorised users cannot start an agent. Feedback is
+untrusted task data and cannot change workflow files, secrets, protected paths,
+permissions, model selection, or publication rules.
 
 The revision push uses the GitHub App, so GitHub emits the normal
 `pull_request/synchronize` event. `quality.yml`, `performance.yml`,
@@ -68,10 +77,44 @@ updates its sticky comment; it never touches production Pages.
 
 To retry a failed run, manually dispatch **OpenCode AI task**, select
 `revision`, and enter the existing PR number plus the numeric ID of the
-original `/ai revise` comment (visible in the comment permalink). Leave
-`dry_run` enabled to recheck policy without writing a status comment or running
+original feedback comment (visible in the comment permalink). Leave `dry_run`
+enabled to recheck policy without writing a status comment or running
 OpenCode; disable it for the actual retry. GitHub's **Re-run jobs** action is
 also supported. Never repost identical feedback merely to retry.
+
+## Automatic CI-failure remediation
+
+The `ai-ci-remediation.yml` router closes the CI loop without manual `/ai
+revise` comments. It listens for `workflow_run: completed` events of
+`quality.yml`, `performance.yml`, `codeql.yml` and `security.yml`, and:
+
+1. ignores human-created PRs, forks and non-`ai/issue-<n>` branches outright;
+2. waits (bounded) for concurrently running checks on the same head to
+   quiesce, so one remediation sees every failure of that commit —
+   path-filtered workflows that do not run simply never appear and are not
+   waited for;
+3. forwards the outcome to the pinned Central workflow in `remediation`
+   mode (failed checks, or all-green to close an episode and notify).
+
+Central owns all remediation behaviour: it revalidates the AI pull request
+from current API state, reads the failing checks of the current head, supplies
+their names and redacted log excerpts together with the original issue to
+OpenCode, and pushes the correction to the same branch under the same
+head-SHA lease as revisions. CI and previews then rerun automatically.
+
+A single persistent status comment per PR tracks the episode: current status,
+failing checks, attempt number and maximum (default three per failure
+episode), the corrective summary, workflow links and the final outcome. Failed
+attempts dispatch bounded automatic retries; manual revisions and automatic
+remediation share one per-PR queue, so competing agents are impossible. When
+the attempts are exhausted, Central escalates with actionable diagnostics and
+stops — human intervention is requested on the PR. Nothing is ever
+auto-approved or merged, and the owner is notified only when the PR is ready
+for review or needs intervention.
+
+AI pull requests that failed before this router existed are recovered with the
+router's manual dispatch: run **AI CI remediation router** with the PR number
+(`dry_run` first to preview the decision). The same authorisation applies.
 
 ## AI task environment ownership
 
