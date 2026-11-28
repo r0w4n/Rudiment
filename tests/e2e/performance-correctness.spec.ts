@@ -79,6 +79,44 @@ test('high-rate MIDI feedback paints by the next frame and Restart clears it',as
   await expect(page.locator('.unmatched-hit-marker')).toHaveCount(0);
 });
 
+test('feedback SVG paint runs as a task after the coalescing frame renders, not inside its rAF batch',async({page})=>{
+  await installMidiKit(page);
+  // Discriminate the event-loop turn a feedback mutation happens in: rAF
+  // callbacks are marked as an in-frame batch, and macrotasks (timers) clear
+  // the mark before running. A MutationObserver microtask fires in the same
+  // turn as the mutation, so the mark it reads is the turn the mutation
+  // happened in - no timing or sampling involved.
+  await page.addInitScript(()=>{
+    const turn=(window as any).__feedbackPaintTurn={inFrameBatch:false,frameBatch:0,taskBatch:0};
+    const raf=window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame=(callback:FrameRequestCallback)=>raf(now=>{turn.inFrameBatch=true;callback(now);});
+    const timer=window.setTimeout.bind(window) as (handler:()=>void)=>number;
+    window.setTimeout=((handler:()=>void)=>timer(()=>{turn.inFrameBatch=false;handler();})) as typeof window.setTimeout;
+    const observer=new MutationObserver(records=>{
+      const bucket=turn.inFrameBatch?'frameBatch':'taskBatch';
+      for(const record of records)if(record.attributeName==='data-judgement'&&record.target instanceof Element&&record.target.getAttribute('data-judgement'))turn[bucket]++;
+    });
+    window.addEventListener('DOMContentLoaded',()=>observer.observe(document.documentElement,{subtree:true,attributes:true,attributeFilter:['data-judgement']}));
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByLabel('Count-in').selectOption('0');
+  await page.getByRole('button',{name:'Close settings'}).first().click();
+  await page.getByRole('button',{name:/Start practice/}).click();
+  await expect(page.getByRole('button',{name:/Pause/})).toBeVisible();
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.currentAudioBeat())).toBeGreaterThan(0.05);
+  await page.evaluate(()=>{const input=(window as any).__performanceInput;for(let index=0;index<64;index++)input.dispatch([0x99,index%8===0?36:38,40+index%88],performance.now()+index*.1);});
+  // The paint still happens (no dropped or stale feedback), and every
+  // judgement mutation ran in a task after the coalescing frame's rendering
+  // steps rather than inside the frame's callback batch, where it would
+  // extend the same frame's critical path ahead of its paint.
+  await expect(page.locator('.score-note[data-judgement],.unmatched-hit-marker').first()).toBeVisible();
+  await expect.poll(()=>page.evaluate(()=>(window as any).__feedbackPaintTurn.taskBatch)).toBeGreaterThan(0);
+  const turn=await page.evaluate(()=>(window as any).__feedbackPaintTurn);
+  expect(turn.frameBatch).toBe(0);
+});
+
 test('live hit feedback never rewinds the playhead within a bar',async({page})=>{
   await page.goto('/');
   await page.locator('#visual-metronome').click();

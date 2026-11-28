@@ -2711,14 +2711,21 @@ test('adding live feedback preserves existing notehead feedback nodes',async({pa
   await page.goto('/');
   const preserved=await page.evaluate(async()=>{
     const app=(window as unknown as {rudiment:{updateScore(beat:number,items:unknown[]):void}}).rudiment;
-    const frame=()=>new Promise(resolve=>requestAnimationFrame(()=>resolve(null)));
+    // Coalesced feedback paints as a macrotask after the fence frame's
+    // rendering steps, so a following animation frame observes the painted
+    // DOM deterministically.
+    const haloPainted=()=>document.querySelectorAll('.judgement-halo').length;
+    const until=(condition:()=>boolean)=>new Promise<void>(resolve=>{
+      const step=()=>{if(condition())resolve();else requestAnimationFrame(step);};
+      requestAnimationFrame(step);
+    });
     const first={expected_beat:0,actual_beat:0,judgement:'good',error_ms:20,excellent:false,event_id:'first'};
     const second={expected_beat:.5,actual_beat:.5,judgement:'perfect',error_ms:2,excellent:true,event_id:'second'};
     app.updateScore(.25,[first]);
-    await frame();
+    await until(()=>haloPainted()>=1);
     const original=document.querySelector('.score-note[data-beat="0"] .judgement-halo');
     app.updateScore(.75,[first,second]);
-    await frame();
+    await until(()=>haloPainted()>=2);
     return Boolean(original)&&original===document.querySelector('.score-note[data-beat="0"] .judgement-halo');
   });
   expect(preserved).toBe(true);
