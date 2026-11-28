@@ -20,9 +20,10 @@ use rudiment_core::{HitResult, score_session_with_tempo_map};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     rc::Rc,
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
 };
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -608,6 +609,115 @@ struct SavedMidiProfile {
     id: String,
     #[serde(default)]
     bindings: Vec<MidiBinding>,
+}
+
+/// Bounded length of the recent-message ring that feeds the MIDI diagnostics
+/// list, matching the previously published list length.
+const DIAGNOSTICS_RING_LEN: usize = 12;
+/// Lowest rate at which the visible MIDI diagnostics list is republished
+/// while messages stream in, so a burst coalesces into few reactive sets.
+const DIAGNOSTICS_MIN_PUBLISH_INTERVAL_MS: f64 = 100.0;
+
+/// One raw MIDI message retained for the MIDI diagnostics list. The sample is
+/// stored structurally so a hidden diagnostics view can keep recent traffic in
+/// a bounded non-reactive ring without formatting strings, publishing
+/// reactively or mutating the DOM; lines are only formatted when a view
+/// actually observes.
+#[derive(Clone)]
+struct DiagnosticSample {
+    id: u64,
+    timestamp: f64,
+    message_type: String,
+    channel: u8,
+    note: u8,
+    velocity: u8,
+    raw: Vec<u8>,
+}
+
+impl DiagnosticSample {
+    fn line(&self) -> String {
+        format!(
+            "{:.3} ms · {} ch{} · note {} · velocity {} · raw {:?}",
+            self.timestamp, self.message_type, self.channel, self.note, self.velocity, self.raw
+        )
+    }
+}
+
+/// One rendered row of the visible diagnostics list, keyed by the stable
+/// sample id so keyed rows are inserted and removed instead of re-rendered.
+#[derive(Clone, PartialEq)]
+struct DiagnosticEntry {
+    id: u64,
+    line: String,
+}
+
+/// Append a sample to the bounded non-reactive ring, assigning it a stable,
+/// monotonically increasing key for the keyed visible list.
+fn push_diagnostic_sample(
+    ring: &mut VecDeque<DiagnosticSample>,
+    next_id: &Cell<u64>,
+    sample: DiagnosticSample,
+) {
+    let id = next_id.get();
+    next_id.set(id + 1);
+    ring.push_back(DiagnosticSample { id, ..sample });
+    while ring.len() > DIAGNOSTICS_RING_LEN {
+        ring.pop_front();
+    }
+}
+
+/// The reactive diagnostics list, newest first, keyed by the stable sample id.
+fn diagnostics_entries_from_ring(ring: &VecDeque<DiagnosticSample>) -> Vec<DiagnosticEntry> {
+    ring.iter()
+        .rev()
+        .map(|sample| DiagnosticEntry {
+            id: sample.id,
+            line: sample.line(),
+        })
+        .collect()
+}
+
+/// Publish the ring into the visible diagnostics list at a bounded rate: an
+/// immediate reactive set when the last publication is old enough, otherwise
+/// one coalesced trailing flush for the whole burst. While no diagnostics view
+/// observes, callers never reach this function, so no reactive publication
+/// happens for hidden views.
+fn publish_diagnostics(
+    diagnostics: &RwSignal<Vec<DiagnosticEntry>>,
+    ring: &RefCell<VecDeque<DiagnosticSample>>,
+    last_publish_ms: &Cell<f64>,
+    flush_pending: &Cell<bool>,
+    flush: &Closure<dyn Fn()>,
+) {
+    let now = performance_now_ms();
+    if now - last_publish_ms.get() >= DIAGNOSTICS_MIN_PUBLISH_INTERVAL_MS {
+        last_publish_ms.set(now);
+        diagnostics.set(diagnostics_entries_from_ring(&ring.borrow()));
+        return;
+    }
+    if flush_pending.get() {
+        return;
+    }
+    flush_pending.set(true);
+    let delay = (DIAGNOSTICS_MIN_PUBLISH_INTERVAL_MS - (now - last_publish_ms.get())).max(0.0);
+    if let Some(window) = web_sys::window() {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            flush.as_ref().unchecked_ref::<Function>(),
+            delay.round() as i32,
+        );
+    } else {
+        // No window available: publish synchronously rather than losing the
+        // burst. This path never runs in a browser.
+        flush_pending.set(false);
+        diagnostics.set(diagnostics_entries_from_ring(&ring.borrow()));
+    }
+}
+
+fn performance_now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map(|performance| performance.now())
+        .unwrap_or(0.0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1648,11 +1758,51 @@ fn MidiConfigSection(
     selected_midi: RwSignal<Option<String>>,
     midi_learn: RwSignal<Option<Instrument>>,
     midi_bindings: RwSignal<Vec<MidiBinding>>,
-    diagnostics: RwSignal<Vec<String>>,
+    diagnostics: RwSignal<Vec<DiagnosticEntry>>,
+    diagnostics_ring: Rc<RefCell<VecDeque<DiagnosticSample>>>,
+    diagnostics_observers: RwSignal<usize>,
+    surface_open: RwSignal<bool>,
     midi_modal_open: RwSignal<bool>,
     connect: Rc<dyn Fn()>,
 ) -> impl IntoView {
     let connect_retry = connect.clone();
+    // This section's diagnostics view only observes while its containing
+    // surface (settings drawer or MIDI modal) is open and the diagnostics
+    // disclosure is expanded. The shared observer count gates the reactive
+    // publication in the MIDI callback; when observation starts, the visible
+    // list is seeded from the bounded non-reactive ring so reopening shows the
+    // traffic received while every view was hidden.
+    let details_open = RwSignal::new(false);
+    let observing_view = RwSignal::new(false);
+    let observing = Arc::new(AtomicBool::new(false));
+    Effect::new({
+        let observing = observing.clone();
+        move |_| {
+            let shown = surface_open.get() && details_open.get();
+            if observing.load(Ordering::Relaxed) != shown {
+                observing.store(shown, Ordering::Relaxed);
+                observing_view.set(shown);
+                diagnostics_observers.update(|count| {
+                    if shown {
+                        *count += 1;
+                    } else {
+                        *count = count.saturating_sub(1);
+                    }
+                });
+                if shown {
+                    diagnostics.set(diagnostics_entries_from_ring(&diagnostics_ring.borrow()));
+                }
+            }
+        }
+    });
+    on_cleanup({
+        let observing = observing.clone();
+        move || {
+            if observing.swap(false, Ordering::Relaxed) {
+                diagnostics_observers.update(|count| *count = count.saturating_sub(1));
+            }
+        }
+    });
     view! {
       <div class="midi-config">
         <p class="midi-state">{move || midi_status.get()}</p>
@@ -1680,7 +1830,7 @@ fn MidiConfigSection(
             }
           />
         </div>
-        <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
+        <details class="midi-diagnostics" on:toggle=move |event|{let open=event.target().and_then(|target|target.dyn_into::<web_sys::HtmlDetailsElement>().ok()).map(|details|details.open()).unwrap_or(false);details_open.set(open);}><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if !observing_view.get()||diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{view!{<For each=move || diagnostics.get() key=|entry|entry.id children=move |entry|view!{<code>{entry.line.clone()}</code>}/>}.into_any()}}</div></details>
       </div>
     }
 }
@@ -1904,7 +2054,18 @@ fn App() -> impl IntoView {
     let midi_status = RwSignal::new("Checking for MIDI drums…".to_string());
     let midi_ports = RwSignal::new(Vec::<MidiPort>::new());
     let selected_midi = RwSignal::new(None::<String>);
-    let diagnostics = RwSignal::new(Vec::<String>::new());
+    // MIDI diagnostics publication state. The reactive list only publishes
+    // while some diagnostics view actually observes (its settings drawer or
+    // MIDI modal is open AND its "MIDI diagnostics" disclosure is expanded);
+    // otherwise raw messages are retained in a bounded non-reactive ring so
+    // hidden views cost no formatting, reactive publication or DOM mutation.
+    // A visible list is republished at a bounded rate with stable keys.
+    let diagnostics = RwSignal::new(Vec::<DiagnosticEntry>::new());
+    let diagnostics_ring = Rc::new(RefCell::new(VecDeque::<DiagnosticSample>::new()));
+    let diagnostics_next_id = Rc::new(Cell::new(0u64));
+    let diagnostics_observers = RwSignal::new(0usize);
+    let diagnostics_last_publish_ms = Rc::new(Cell::new(0.0f64));
+    let diagnostics_flush_pending = Rc::new(Cell::new(false));
     let midi_learn = RwSignal::new(None::<Instrument>);
     let midi_bindings = RwSignal::new(default_midi_bindings());
     let midi_profiles = RwSignal::new(Vec::<SavedMidiProfile>::new());
@@ -3198,6 +3359,28 @@ fn App() -> impl IntoView {
     let save_for_midi = save_current_settings.clone();
     let midi_hit = hit_input.clone();
     let midi_pause = pause_run.clone();
+    // Trailing edge of the bounded-rate diagnostics publication: coalesces a
+    // burst into one reactive set shortly after the last rate window. A flush
+    // that lands after the last view was hidden must not publish reactively;
+    // the next visible view re-seeds from the ring instead.
+    let diagnostics_flush: Rc<Closure<dyn Fn()>> = Rc::new(Closure::wrap(Box::new({
+        let ring = Rc::clone(&diagnostics_ring);
+        let pending = Rc::clone(&diagnostics_flush_pending);
+        move || {
+            pending.set(false);
+            if diagnostics_observers.get_untracked() == 0 {
+                return;
+            }
+            diagnostics.set(diagnostics_entries_from_ring(&ring.borrow()));
+        }
+    }) as Box<dyn Fn()>));
+    // The move closure below consumes the diagnostic publication state; the
+    // original bindings stay alive for the view further down.
+    let callback_diagnostics_ring = Rc::clone(&diagnostics_ring);
+    let callback_diagnostics_next_id = Rc::clone(&diagnostics_next_id);
+    let callback_diagnostics_last_publish_ms = Rc::clone(&diagnostics_last_publish_ms);
+    let callback_diagnostics_flush_pending = Rc::clone(&diagnostics_flush_pending);
+    let callback_diagnostics_flush = Rc::clone(&diagnostics_flush);
     let midi_callback: Rc<Closure<dyn FnMut(JsValue)>> = Rc::new(Closure::wrap(Box::new(
         move |value: JsValue| {
             let Ok(event) = serde_wasm_bindgen::from_value::<MidiEnvelope>(value) else {
@@ -3246,19 +3429,34 @@ fn App() -> impl IntoView {
                 }
                 return;
             }
-            let line = format!(
-                "{:.3} ms · {} ch{} · note {} · velocity {} · raw {:?}",
-                event.timestamp.unwrap_or(0.0),
-                event.message_type.clone().unwrap_or_default(),
-                event.channel.unwrap_or(0),
-                event.note.unwrap_or(0),
-                event.velocity.unwrap_or(0),
-                event.raw_bytes
+            // Diagnostics stay dormant while every diagnostics view is hidden:
+            // the raw message is retained in the bounded non-reactive ring so
+            // a freshly opened view still shows recent traffic, but nothing is
+            // formatted, published reactively or mutated in the DOM. Musical
+            // messages are never discarded: the note-on pipeline below always
+            // runs.
+            push_diagnostic_sample(
+                &mut callback_diagnostics_ring.borrow_mut(),
+                &callback_diagnostics_next_id,
+                DiagnosticSample {
+                    id: 0,
+                    timestamp: event.timestamp.unwrap_or(0.0),
+                    message_type: event.message_type.clone().unwrap_or_default(),
+                    channel: event.channel.unwrap_or(0),
+                    note: event.note.unwrap_or(0),
+                    velocity: event.velocity.unwrap_or(0),
+                    raw: event.raw_bytes.clone(),
+                },
             );
-            diagnostics.update(|items| {
-                items.insert(0, line);
-                items.truncate(12);
-            });
+            if diagnostics_observers.get_untracked() > 0 {
+                publish_diagnostics(
+                    &diagnostics,
+                    &callback_diagnostics_ring,
+                    &callback_diagnostics_last_publish_ms,
+                    &callback_diagnostics_flush_pending,
+                    &callback_diagnostics_flush,
+                );
+            }
             if event.message_type.as_deref() != Some("note_on") {
                 return;
             }
@@ -4295,7 +4493,7 @@ fn App() -> impl IntoView {
               <label>"Required accuracy"<select aria-label="Repeat tolerance" prop:value=move || match repeat_tolerance.get(){RepeatTolerance::Relaxed=>"relaxed",RepeatTolerance::Standard=>"standard",RepeatTolerance::Strict=>"strict"} on:change=move |event|{repeat_tolerance.set(match event_target_value(&event).as_str(){"relaxed"=>RepeatTolerance::Relaxed,"strict"=>RepeatTolerance::Strict,_=>RepeatTolerance::Standard});save_repeat_tolerance();}><option value="relaxed">"Relaxed · no misses"</option><option value="standard">"Standard · Good or Perfect"</option><option value="strict">"Strict · Perfect only"</option></select><small class="help">"Extra hits and wrong drums always fail the current attempt. This setting does not change the timing windows."</small></label>
             </section>
             <section><h3>"MIDI drums"</h3><p class="help">"Rudiment connects automatically to your last-used kit. Rudiment never uploads your events."</p>
-              <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
+              <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics diagnostics_ring=diagnostics_ring.clone() diagnostics_observers=diagnostics_observers surface_open=settings_open midi_modal_open=midi_modal_open connect=connect_action.clone()/>
               <div class="button-row"><button aria-label="Open MIDI connection setup" on:click=move |_|{midi_modal_auto.set(false);midi_modal_open.set(true);focus_midi_modal_close();}>"MIDI connection setup…"</button></div>
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
@@ -4376,7 +4574,7 @@ fn App() -> impl IntoView {
                         <button id="midi-modal-close" aria-label="Close MIDI connection setup" on:click=move |_|{midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);}><X size=22/></button>
                       </div>
                       <p class="midi-modal-instructions">"Connect your drum module with a USB MIDI cable, or pair it over Bluetooth MIDI in your system settings, then choose it below. If your browser asks to use MIDI, allow it so Rudiment can see your kit."</p>
-                      <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
+                      <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics diagnostics_ring=diagnostics_ring.clone() diagnostics_observers=diagnostics_observers surface_open=midi_modal_open midi_modal_open=midi_modal_open connect=connect_action.clone()/>
                       <div class="midi-modal-actions">
                         <button id="midi-modal-continue" on:click=move |_|{midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);}>"Continue without MIDI"</button>
                       </div>
@@ -5459,5 +5657,72 @@ mod tests {
             production_source.matches("IncrementalScorer::new(").count(),
             1
         );
+    }
+
+    fn diagnostic_sample(velocity: u8) -> DiagnosticSample {
+        DiagnosticSample {
+            id: 0,
+            timestamp: velocity as f64,
+            message_type: "note_on".into(),
+            channel: 10,
+            note: 38,
+            velocity,
+            raw: vec![0x99, 38, velocity],
+        }
+    }
+
+    #[test]
+    fn diagnostic_sample_line_preserves_message_details() {
+        let sample = DiagnosticSample {
+            id: 0,
+            timestamp: 1234.567,
+            message_type: "cc".into(),
+            channel: 10,
+            note: 4,
+            velocity: 90,
+            raw: vec![153, 38, 100],
+        };
+        assert_eq!(
+            sample.line(),
+            "1234.567 ms · cc ch10 · note 4 · velocity 90 · raw [153, 38, 100]"
+        );
+    }
+
+    #[test]
+    fn diagnostics_ring_is_bounded_and_keeps_the_newest_messages() {
+        let mut ring = VecDeque::new();
+        let next_id = Cell::new(0u64);
+        for velocity in 1..=15u8 {
+            push_diagnostic_sample(&mut ring, &next_id, diagnostic_sample(velocity));
+        }
+        assert_eq!(ring.len(), DIAGNOSTICS_RING_LEN);
+        // The newest sample is last in the ring and first in the visible list.
+        assert_eq!(ring.back().expect("newest sample").velocity, 15);
+        assert_eq!(ring.front().expect("oldest sample").velocity, 4);
+        let entries = diagnostics_entries_from_ring(&ring);
+        assert_eq!(entries.len(), DIAGNOSTICS_RING_LEN);
+        assert_eq!(entries[0].line, ring.back().expect("newest sample").line());
+        assert_eq!(
+            entries[DIAGNOSTICS_RING_LEN - 1].line,
+            ring.front().expect("oldest sample").line()
+        );
+        // Keys are unique and strictly decreasing, so a keyed list only
+        // inserts the newest row and removes the oldest one on each update.
+        assert!(entries.windows(2).all(|pair| pair[0].id > pair[1].id));
+        let unique_ids: HashSet<u64> = entries.iter().map(|entry| entry.id).collect();
+        assert_eq!(unique_ids.len(), DIAGNOSTICS_RING_LEN);
+    }
+
+    #[test]
+    fn diagnostics_ring_retains_hidden_traffic_for_a_reopening_view() {
+        // Messages that arrive while every diagnostics view is hidden are
+        // still retained in the ring, so a view that opens later shows them.
+        let mut ring = VecDeque::new();
+        let next_id = Cell::new(0u64);
+        push_diagnostic_sample(&mut ring, &next_id, diagnostic_sample(7));
+        push_diagnostic_sample(&mut ring, &next_id, diagnostic_sample(112));
+        let entries = diagnostics_entries_from_ring(&ring);
+        assert!(entries[0].line.contains("velocity 112"));
+        assert!(entries[1].line.contains("velocity 7"));
     }
 }
