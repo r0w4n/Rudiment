@@ -43,6 +43,8 @@ async function createContext(label){
   const context=await browser.newContext({viewport:{width:1440,height:900}});
   await context.addInitScript(() => {
     window.__RUDIMENT_PERF__=true;
+    // Measure the practice workspace directly: skip first-run onboarding (#34).
+    localStorage.setItem('rudiment-onboarding-skipped','true');
     const input={
       id:'perf-kit',name:'Performance Kit',manufacturer:'Rudiment',type:'input',state:'connected',connection:'open',onmidimessage:null,onstatechange:null,
       open:async()=>input,close:async()=>input,addEventListener:()=>{},removeEventListener:()=>{},
@@ -147,7 +149,11 @@ async function runInteractions(page,fixtureId){
   const noncontiguous={bars:[2,3,5],jumpResponseMs:Date.now()-selectionStart};
   await page.getByRole('button',{name:/Restart/}).click();
   // Measure the actual SVG renderer separately from notation and controller.
-  await page.getByRole('button',{name:'Highway',exact:true}).click();
+  // The display selector lives in the Settings drawer (#34); switching views
+  // mid-run pauses practice, so resume before measuring the renderer.
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByRole('button',{name:'Highway',exact:true}).click();
+  await page.getByRole('button',{name:'Close settings'}).first().click();
   await page.locator('#highway svg, #highway-error:not(.hidden)').first().waitFor();
   let highway;
   if(await page.locator('#highway-error').isVisible()){
