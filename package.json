@@ -37,17 +37,17 @@
   "dependencies": {
     "idb": "8.0.4",
     "tone": "15.1.22",
-    "vexflow": "5.0.0",
+    "vexflow": "5.10.1",
     "webmidi": "3.3.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",
     "@coderline/alphatab": "1.9.0",
     "@eslint/js": "10.0.1",
-    "@playwright/test": "1.65.0",
+    "@playwright/test": "1.65.1",
     "@types/node": "^26.6.6",
     "esbuild": "0.28.2",
-    "eslint": "10.14.0",
+    "eslint": "10.15.0",
     "globals": "^17.14.0",
     "prettier": "^3.10.1",
     "typescript": "^7.0.2"
