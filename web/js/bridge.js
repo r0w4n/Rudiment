@@ -13,7 +13,7 @@ const bridgeUrl = document.currentScript?.src || document.querySelector('script[
 const publicAsset = path => new URL(path, bridgeUrl).toString();
 // Build identity for the diagnostic drawer and HUD. Bump together with the
 // bridge cache-busting query in web/index.html.
-const BRIDGE_BUILD='20261125-1';
+const BRIDGE_BUILD='20261128-1';
 // Session-only diagnostic switches for the playhead-smoothness investigation.
 // URL parameters seed them so existing links and browser tests keep working;
 // the Settings drawer toggles them at runtime so iPad experiments do not
@@ -387,12 +387,18 @@ const visualMetronome = {
 };
 
 // Deferred scoring/UI tick: the transport frame decides when scoring work is
-// due, but the work itself runs as a post-commit task (setTimeout(0) from an
-// animation-frame callback fires after that frame's paint), so WASM scoring
-// and Leptos state updates never delay the playhead's commit. Scoring
-// watermarks are monotonic, so when ticks queue up faster than they run,
-// keeping only the newest pending tick cannot lose scoring state - the newer
-// tick's advance subsumes everything the older one would have confirmed.
+// due, but the work itself runs as a separate macrotask instead of inside the
+// animation-frame callback batch that the browser must follow with that
+// frame's style, layout and paint steps. A zero-delay timeout is NOT a
+// presentation fence: it typically lands after the dispatching frame's
+// rendering steps, but it can be clamped or run directly before the next
+// frame's callbacks, so scoring work still shares the interval between two
+// rendering opportunities and can delay the next playhead commit. The
+// deferral removes the tick from the same-frame callback batch; it does not
+// and cannot guarantee an isolated budget. Scoring watermarks are monotonic,
+// so when ticks queue up faster than they run, keeping only the newest
+// pending tick cannot lose scoring state - the newer tick's advance subsumes
+// everything the older one would have confirmed.
 let pendingTick=null,pendingTickTimer=0;
 function deferTick(fn){
   pendingTick=fn;
@@ -912,12 +918,18 @@ const audio = {
         const tickBeat=beat,tickNow=now,tickStart=this.activeRun?.runPerformance??runPerformance;
         // iPadOS evidence: running the WASM scoring/UI tick inside this
         // animation-frame callback was the largest remaining cause of
-        // playhead stutter, because its cost delayed every frame's commit.
-        // Dispatch it as a post-commit task instead: the playhead transform
-        // and scroll commit first, scoring work runs in the gap before the
-        // next frame. This is not a second clock - the transport frame alone
-        // decides when scoring work is due, and flushPendingTick keeps
-        // pause/stop/completion ordered with any dispatched tick.
+        // playhead stutter, because its cost extended the same frame's
+        // callback batch ahead of that frame's rendering steps. Dispatch it
+        // as a separate macrotask instead, so the playhead writes are
+        // followed directly by the rendering steps rather than by scoring
+        // work; the tick then runs in the interval before the next frame,
+        // where it can still contend with (but no longer sits inside) the
+        // playhead commit's critical path. This is not a second clock - the
+        // transport frame alone decides when scoring work is due, and
+        // flushPendingTick keeps pause/stop/completion ordered with any
+        // dispatched tick. Neither timeout completion nor rAF completion is
+        // itself a presentation fence: the compositor presents
+        // asynchronously.
         deferTick(()=>{ if(generation!==this.generation)return; const started=performance.now(); onFrame(tickBeat,tickNow,tickStart); recordTickDuration(performance.now()-started); });
       }
       if (elapsedBeats >= countBeats+remaining+scoringTailBeats) {
@@ -950,7 +962,7 @@ catch(error) { audio.state='unavailable';audio.lastSnareError=audioErrorMessage(
 
 const SCORE_TOP_MARGIN=30,SCORE_ROW_HEIGHT=132,SCORE_BOTTOM_MARGIN=10;
 let scoreData = { notes:[], svg:null, playhead:null, playheadOverlay:null, markerLayer:null, paintedGroups:new Set(), totalBeats:16, meter:4, container:null, bars:[], viewportWidth:0, viewportHeight:0, rowHeight:SCORE_ROW_HEIGHT, maxScroll:0, cameraY:0, preserveCameraBar:null, preserveViewportOnRewind:false, lastPlayheadRow:-1, lastPlayheadVisible:false, lastBeat:-Infinity, lastJudgements:[] };
-let pendingScoreFeedback=null,pendingScoreFeedbackFrame=0;
+let pendingScoreFeedback=null,pendingScoreFeedbackFrame=0,pendingScoreFeedbackTask=0;
 let selectedBars=new Set();
 let scoreSelectionCallback=null;
 function applySelectedBarRange(){
@@ -1643,8 +1655,11 @@ function updateScore(beat, judgements, loopAware=false, leadInBeat=null) {
   const profileStart=performanceProfile.enabled?performance.now():0;
   const hasJudgements=Array.isArray(judgements);
   const {notes,svg,container}=scoreData; if(!svg||!notes.length)return;
-  // Keep playhead/scroll work on the transport frame; coalesce feedback paint
-  // to the next animation frame so SVG mutations never block the playhead.
+  // Keep playhead/scroll work on the transport frame. Feedback painting is
+  // coalesced to a frame-aligned fence and applied in a task after that
+  // frame's rendering steps, so its SVG mutations and layout reads do not
+  // extend the animation-frame callback batch that must be followed by
+  // rendering steps (see queueScoreFeedback).
   if(hasJudgements)queueScoreFeedback(judgements);
   const previousBeat=scoreData.lastBeat;
   const position=positionAtBeat(beat),playhead=scoreData.playhead;
@@ -1726,10 +1741,17 @@ function updateScore(beat, judgements, loopAware=false, leadInBeat=null) {
 }
 function cancelQueuedScoreFeedback(){
   if(pendingScoreFeedbackFrame)cancelAnimationFrame(pendingScoreFeedbackFrame);
-  pendingScoreFeedbackFrame=0;pendingScoreFeedback=null;
+  pendingScoreFeedbackFrame=0;
+  if(pendingScoreFeedbackTask){clearTimeout(pendingScoreFeedbackTask);pendingScoreFeedbackTask=0;}
+  pendingScoreFeedback=null;
 }
 function flushScoreFeedback(){
-  if(pendingScoreFeedbackFrame){cancelAnimationFrame(pendingScoreFeedbackFrame);pendingScoreFeedbackFrame=0;}
+  cancelQueuedScoreFeedback();
+  const pending=pendingScoreFeedback;pendingScoreFeedback=null;
+  if(pending&&scoreData.svg&&scoreData.notes.length)applyJudgements(pending);
+}
+function applyPendingScoreFeedback(){
+  pendingScoreFeedbackTask=0;
   const pending=pendingScoreFeedback;pendingScoreFeedback=null;
   if(pending&&scoreData.svg&&scoreData.notes.length)applyJudgements(pending);
 }
@@ -1743,10 +1765,23 @@ function queueScoreFeedback(judgements){
   if(pendingScoreFeedbackFrame)return;
   pendingScoreFeedbackFrame=requestAnimationFrame(()=>{
     pendingScoreFeedbackFrame=0;
-    const pending=pendingScoreFeedback;pendingScoreFeedback=null;
-    // Feedback may arrive between transport frames with an older Rust UI
-    // progress value. Paint it without moving the transport-owned playhead.
-    if(pending&&scoreData.svg&&scoreData.notes.length)applyJudgements(pending);
+    // Two-stage fence: the rAF only coalesces to the frame boundary and
+    // verifies a frame is imminent; the paint itself is re-scheduled as a
+    // macrotask so it runs after THIS rendering opportunity's style, layout
+    // and paint steps complete. A feedback rAF callback would otherwise run
+    // inside the same callback batch as the transport frame, ahead of that
+    // batch's rendering steps, and its SVG mutations plus getBBox/getCTM
+    // layout reads would extend the same frame's critical path - delaying
+    // the very paint the playhead commit was written for. Painting from the
+    // task instead lands the work in the interval after that opportunity's
+    // rendering steps and before the next frame. The mutation is presented
+    // on the following frame at the earliest; neither the rAF nor the
+    // timeout is a presentation fence, and the compositor may lag both.
+    // Newest-projection coalescing is preserved: a projection that arrives
+    // between the fence and the task replaces the pending one before the
+    // task drains it, so no intermediate feedback can go stale on screen.
+    if(!pendingScoreFeedback)return;
+    pendingScoreFeedbackTask=setTimeout(applyPendingScoreFeedback,0);
   });
 }
 function clearScoreFeedback(preserveViewport=false) {

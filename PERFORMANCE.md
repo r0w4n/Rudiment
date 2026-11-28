@@ -43,7 +43,7 @@ Directly observed values include callback work, import-to-render, notation rende
 
 The baseline identified notation layout as the dominant long task. The 10,000-note fixture repeatedly queried the complete SVG once for every one of 625 notation systems while calculating inter-system mark clearance. A single indexed DOM traversal removed that quadratic pass without changing engraving. Live input matching was already below the 2 ms p95 target and was not refactored.
 
-Input processing was fast but note colour feedback waited for a 32 ms application-state tick. Feedback is now coalesced onto the next animation frame; UI counters remain throttled and Tone.Transport remains independent of rendering.
+Input processing was fast but note colour feedback waited for a 32 ms application-state tick. Feedback is now coalesced onto a frame-aligned fence and painted after that frame's rendering steps (see the frame-budget section below); UI counters remain throttled and Tone.Transport remains independent of rendering.
 
 A Chrome regression test also exposed backward playhead jumps during hits: the feedback frame reused the slower UI progress value. Feedback now paints without repositioning the playhead, leaving position and scrolling to the transport-driven frame. The test observes SVG position mutations during repeated keyboard hits; it does not measure subjective smoothness or physical MIDI latency.
 
@@ -57,6 +57,50 @@ output time (`getOutputTimestamp()` where available and valid, raw
 `AudioContext.currentTime` otherwise). This is a position read, not a new
 clock, extrapolator or audio scheduler. Frames delayed by scoring or browser
 work render the current transport beat on the next opportunity.
+
+## Main-thread frame budget and callback/task ordering (issue 35)
+
+Measured production frame budget (fast tier, Chrome 158 on Linux x64, coincident
+metronome beat, MIDI/keyboard hits, scrolling and pause/resume traffic):
+transport-frame intervals p50 ≈ 16.7 ms with p95 ≈ 18.9 ms; the notation
+playhead writes cost ≈ 0.1 ms p95 (`score_update_ms`) and the coalesced
+feedback projection ≈ 2.1 ms p95 (`feedback_paint_work_ms`); end-to-end
+input-to-painted-feedback p95 ≈ 17 ms. Tail distribution beyond the 60 Hz
+vsync budget is recorded per run as `animation_frame_interval_ms` and
+estimated dropped frames; these are desktop-Chromium observations only, not
+physical-device (iPad) telemetry.
+
+Ordering between rendering opportunities, as implemented and verified by the
+focused regression test:
+
+1. Web MIDI messages are captured synchronously in their own event turns and
+   cross into the Rust scorer without waiting for a frame.
+2. The single transport rAF callback writes the playhead, scrolling and
+   metronome bookkeeping, then decides when scoring is due. All rAF callbacks
+   of one rendering opportunity — including the transport frame — run
+   ahead of that opportunity's style, layout and paint steps, so any work in
+   that batch is on the same frame's critical path.
+3. The scoring/UI tick runs as a zero-delay macrotask instead of inside the
+   callback batch. A timeout is not a presentation fence: it typically lands
+   after the dispatching frame's rendering steps but can be clamped or run
+   directly before the next frame, so scoring still shares the inter-frame
+   interval and can delay the next commit. Newest-tick coalescing keeps
+   scoring state monotonic when ticks back up.
+4. The feedback projection is applied in a macrotask scheduled from a
+   frame-aligned rAF fence, so its SVG mutations and layout reads run after
+   that opportunity's rendering steps rather than extending the callback
+   batch the playhead commit depends on. Newest-projection coalescing means
+   a projection arriving between fence and task replaces the pending one;
+   nothing goes stale and no event is dropped. The mutation is presented on
+   a following frame at the earliest; neither rAF nor timeout completion is
+   presentation, and the compositor presents asynchronously.
+
+This ordering is asserted by
+`tests/e2e/performance-correctness.spec.ts` ("feedback SVG paint runs as a
+task…"), which observes the event-loop turn of each `data-judgement`
+mutation. The audit's iPad symptom remains attributed but unproven: no
+physical-device frame measurements were taken, and desktop Chrome/WebKit
+pacing cannot establish presented-frame smoothness on real kit.
 
 An iPadOS field report (2022 iPad Air, 60 Hz) described both the notation
 playhead and the opt-in wall-clock reference overlay lurching together, with

@@ -1,0 +1,199 @@
+name: AI CI remediation router
+
+# Closed-loop CI remediation for AI-generated pull requests. This workflow is
+# a thin, Rudiment-owned event router: it forwards completed check outcomes of
+# the app's PR checks to the pinned Central AI workflow, which owns all
+# remediation policy, state, agent execution and publication.
+#
+# - On a failed check of an AI PR, it waits for concurrently running checks to
+#   quiesce, then dispatches the AI task workflow in remediation mode so one
+#   agent sees every failure of that head.
+# - On a green completion it closes an open remediation episode and marks the
+#   PR ready for human review (Central decides; no-op without an episode).
+# - Manual dispatch recovers AI PRs that failed before this router existed,
+#   using the same authorisation as automatic triggers.
+#
+# Human-created PRs, forks, and non-AI branches exit immediately. Nothing here
+# approves, merges or pushes to main, and the router never runs PR code: it
+# only calls GitHub APIs and dispatches the pinned, reviewed AI task workflow.
+
+on:
+  workflow_run:
+    workflows:
+      - Quality assurance
+      - Performance regression checks
+      - CodeQL static security analysis
+      - Dependency security
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Recover an existing AI pull request by evaluating its current head
+        required: true
+        type: string
+      dry_run:
+        description: Evaluate and report without dispatching remediation
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: read
+  # actions: write dispatches the pinned AI task workflow; the same scope
+  # covers reading check runs of the evaluated head commit.
+  actions: write
+
+concurrency:
+  # One evaluation per PR branch; completions arrive per workflow, so runs
+  # queue briefly and re-verify state before dispatching.
+  group: ai-ci-remediation-${{ github.event.workflow_run.head_branch || inputs.pr_number }}
+  cancel-in-progress: false
+
+env:
+  AUTOMATION_PR_AUTHOR: central-ai-publisher[bot]
+  APPROVED_BASE_BRANCH: main
+  AI_TASK_WORKFLOW: opencode-ai-task.yml
+  REMEDIATION_MAX_ATTEMPTS: '3'
+  # Failing-check retrieval and episode accounting happen in Central; this
+  # router only forwards the event and its head identity.
+  QUIESCE_TIMEOUT_SECONDS: '1080'
+  QUIESCE_POLL_SECONDS: '60'
+
+jobs:
+  evaluate:
+    name: Evaluate completed checks and dispatch remediation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success' ||
+      github.event.workflow_run.conclusion == 'failure'
+    steps:
+      - name: Evaluate checks and dispatch the AI task workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TRIGGER_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TRIGGER_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          auth_pr_for_branch() {
+            # Resolve the open AI PR owning a head branch; verifies author,
+            # base and same-repository head. Prints the PR JSON or fails.
+            local branch="$1"
+            local pr_json
+            pr_json="$(gh api "repos/${REPOSITORY}/pulls?head=${REPOSITORY}:${branch}&state=open" --jq '.[0] // empty')" || return 1
+            [ -n "${pr_json}" ] || return 1
+            jq -e --arg author "${AUTOMATION_PR_AUTHOR}" --arg base "${APPROVED_BASE_BRANCH}" \
+              '.user.login == $author and .base.ref == $base
+               and .head.repo.full_name == $repository
+               and (.head.ref | test("^ai/issue-[0-9]+$"))' \
+              --arg repository "${REPOSITORY}" <<<"${pr_json}" >/dev/null || return 1
+            printf '%s' "${pr_json}"
+          }
+
+          quiesce_checks() {
+            # Wait until no check run of the head is pending, re-verifying the
+            # PR head so a superseded commit never dispatches remediation.
+            local sha="$1" pr_number="$2" elapsed=0 pending
+            while :; do
+              local current_head
+              current_head="$(gh api "repos/${REPOSITORY}/pulls/${pr_number}" --jq '.head.sha')"
+              [ "${current_head}" = "${sha}" ] || {
+                echo "::notice::PR #${pr_number} head moved during evaluation; dropping stale event."
+                exit 0
+              }
+              pending="$(gh api --paginate "repos/${REPOSITORY}/commits/${sha}/check-runs?per_page=100" \
+                --jq '[.check_runs[] | select(.status != "completed")] | length')" || pending=0
+              [ "${pending}" -eq 0 ] && return 0
+              [ "${elapsed}" -lt "${QUIESCE_TIMEOUT_SECONDS}" ] || {
+                # Path-filtered or stuck workflows: proceed with what exists.
+                echo "::warning::Checks did not quiesce within ${QUIESCE_TIMEOUT_SECONDS}s; evaluating current results."
+                return 0
+              }
+              sleep "${QUIESCE_POLL_SECONDS}"
+              elapsed=$((elapsed + QUIESCE_POLL_SECONDS))
+            done
+          }
+
+          dispatch_remediation() {
+            local pr_number="$1" event="$2"
+            if [ "${DRY_RUN}" = true ]; then
+              echo "::notice::Dry run: would dispatch ${AI_TASK_WORKFLOW} (task_mode=remediation, pr_number=${pr_number}, remediation_event=${event})."
+              return 0
+            fi
+            # REST dispatch instead of 'gh workflow run': the latter probes
+            # the local Git repository to resolve the workflow file, and this
+            # job deliberately has no checkout (it never runs PR code).
+            jq -n --arg ref "${APPROVED_BASE_BRANCH}" \
+              --arg mode remediation \
+              --arg pr "${pr_number}" \
+              --arg event "${event}" \
+              --arg max "${REMEDIATION_MAX_ATTEMPTS}" \
+              '{ref: $ref, inputs: {task_mode: $mode, pr_number: $pr, remediation_event: $event, remediation_max_attempts: $max, dry_run: "false"}}' |
+              gh api "repos/${REPOSITORY}/actions/workflows/${AI_TASK_WORKFLOW}/dispatches" --input -
+            echo "::notice::Dispatched ${event} remediation for PR #${pr_number}."
+          }
+
+          if [ "${EVENT_NAME}" = workflow_dispatch ]; then
+            PR_NUMBER="${INPUT_PR_NUMBER}"
+            [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]] || { echo "::error::pr_number must be numeric"; exit 1; }
+            PR_JSON="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
+            HEAD_SHA="$(jq -r '.head.sha' <<<"${PR_JSON}")"
+            HEAD_BRANCH="$(jq -r '.head.ref' <<<"${PR_JSON}")"
+            jq -e --arg author "${AUTOMATION_PR_AUTHOR}" --arg base "${APPROVED_BASE_BRANCH}" \
+              '.state == "open" and .user.login == $author and .base.ref == $base
+               and .head.repo.full_name == $repository
+               and (.head.ref | test("^ai/issue-[0-9]+$"))' \
+              --arg repository "${REPOSITORY}" <<<"${PR_JSON}" >/dev/null || {
+              echo "::notice::PR #${PR_NUMBER} is not an open AI pull request; nothing to recover."
+              exit 0
+            }
+            echo "Recovering AI PR #${PR_NUMBER} from head ${HEAD_SHA:0:12} (router run: ${RUN_URL})."
+          else
+            [[ "${TRIGGER_HEAD_BRANCH}" =~ ^ai/issue-[0-9]+$ ]] || {
+              echo "::notice::Head branch is not an AI task branch; nothing to do."
+              exit 0
+            }
+            HEAD_BRANCH="${TRIGGER_HEAD_BRANCH}"
+            HEAD_SHA="${TRIGGER_HEAD_SHA}"
+            PR_JSON="$(auth_pr_for_branch "${HEAD_BRANCH}")" || {
+              echo "::notice::No open authorised AI PR for ${HEAD_BRANCH}; nothing to do."
+              exit 0
+            }
+            PR_NUMBER="$(jq -r '.number' <<<"${PR_JSON}")"
+            [ "$(jq -r '.head.sha' <<<"${PR_JSON}")" = "${HEAD_SHA}" ] || {
+              echo "::notice::Event head is not the PR head; dropping stale event."
+              exit 0
+            }
+          fi
+
+          quiesce_checks "${HEAD_SHA}" "${PR_NUMBER}"
+
+          FAILED_CHECKS="$(gh api --paginate "repos/${REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+            --jq '[.check_runs[] | select(.status == "completed")]
+                  | map(select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure" or .conclusion == "action_required"))
+                  | map(.name) | unique')" || FAILED_CHECKS='[]'
+          FAILED_COUNT="$(jq 'length' <<<"${FAILED_CHECKS}")"
+
+          if [ "${FAILED_COUNT}" -gt 0 ]; then
+            echo "Failing checks on ${HEAD_SHA:0:12}: $(jq -r 'join(", ")' <<<"${FAILED_CHECKS}")"
+            dispatch_remediation "${PR_NUMBER}" checks-failed
+            exit 0
+          fi
+
+          if [ "${EVENT_NAME}" = workflow_dispatch ] || [ "${TRIGGER_CONCLUSION}" != success ]; then
+            echo "::notice::No failing checks found for ${HEAD_SHA:0:12}; nothing to dispatch."
+            exit 0
+          fi
+
+          # All checks green on an AI PR: let Central close any open
+          # remediation episode and post the ready-for-review notification.
+          dispatch_remediation "${PR_NUMBER}" checks-passed
