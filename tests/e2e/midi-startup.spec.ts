@@ -33,8 +33,12 @@ test('unresolved automatic MIDI permission does not block the workspace', async 
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByRole('button', { name: 'Close settings' }).first().click();
   // Just before the three-second fallback the workspace stays modal-free.
+  // The virtual clock tracks real time while the page loads, so a slow first
+  // load can already sit inside the final 500 ms window when the clock is
+  // paused. Clamp the offset at zero so the virtual clock is never asked to
+  // move backwards; every assertion is unchanged.
   const sinceAppStart = await page.evaluate(() => Date.now() - (window as any).__appStart);
-  await page.clock.fastForward(3_000 - sinceAppStart - 500);
+  await page.clock.fastForward(Math.max(0, 3_000 - sinceAppStart - 500));
   await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
   // Past three seconds the shared MIDI connection modal appears.
   await page.clock.fastForward(6_000);
