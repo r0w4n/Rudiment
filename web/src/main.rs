@@ -1637,6 +1637,131 @@ fn dismiss_result(
 }
 
 /// The one MIDI configuration surface, shared by the settings drawer and the
+const MIDI_DIAGNOSTICS_LINES: usize = 12;
+/// The reactive visible list refreshes at most this often while a diagnostics
+/// view is open; the non-reactive ring keeps every line in between.
+const MIDI_DIAGNOSTICS_PUBLISH_INTERVAL_MS: f64 = 250.0;
+
+/// Pushes one formatted diagnostics line into the bounded non-reactive ring,
+/// newest first, keyed by a monotonic sequence so duplicate lines stay distinct
+/// in the keyed visible list.
+fn push_diagnostics_line(
+    ring: &mut Vec<(u64, String)>,
+    next_key: &Cell<u64>,
+    line: String,
+) {
+    let key = next_key.get() + 1;
+    next_key.set(key);
+    ring.insert(0, (key, line));
+    ring.truncate(MIDI_DIAGNOSTICS_LINES);
+}
+
+/// Shared state for the MIDI raw-message diagnostics list, consumed by the
+/// drawer and the connection modal. Recording is gated on explicit
+/// diagnostics observation: while every view is hidden, messages cost no
+/// formatting and no reactive publication at all. While a view is open,
+/// formatting feeds a bounded non-reactive ring and the reactive visible list
+/// refreshes at a low rate with keyed rows. Musical messages always reach
+/// scoring and learning regardless of diagnostics visibility.
+#[derive(Clone)]
+struct MidiDiagnosticsState {
+    /// Number of diagnostics views currently presented (details expanded on a
+    /// visible drawer or modal surface).
+    open_views: Rc<Cell<u32>>,
+    /// True while at least one view is presented; gates recording entirely.
+    visible: RwSignal<bool>,
+    /// Bounded non-reactive ring of the most recent lines, newest first.
+    ring: Rc<RefCell<Vec<(u64, String)>>>,
+    /// Monotonic key source so the keyed visible list stays unique.
+    next_key: Rc<Cell<u64>>,
+    /// Low-rate keyed list observed by the presented diagnostics views.
+    published: RwSignal<Vec<(u64, String)>>,
+    last_publish_ms: Rc<Cell<f64>>,
+    /// True while a trailing publish timer is scheduled, so a burst that ends
+    /// inside the publish interval still reaches the visible list promptly.
+    pending_publish: Rc<Cell<bool>>,
+}
+
+impl MidiDiagnosticsState {
+    fn new() -> Self {
+        Self {
+            open_views: Rc::new(Cell::new(0)),
+            visible: RwSignal::new(false),
+            ring: Rc::new(RefCell::new(Vec::new())),
+            next_key: Rc::new(Cell::new(0)),
+            published: RwSignal::new(Vec::new()),
+            last_publish_ms: Rc::new(Cell::new(0.0)),
+            pending_publish: Rc::new(Cell::new(false)),
+        }
+    }
+
+    /// Records one raw message. The line is only formatted when a diagnostics
+    /// view is presented; otherwise this is a no-op.
+    fn record(&self, line: impl FnOnce() -> String) {
+        if !self.visible.get_untracked() {
+            return;
+        }
+        let line = line();
+        push_diagnostics_line(&mut self.ring.borrow_mut(), &self.next_key, line);
+        let now = Date::now();
+        if now - self.last_publish_ms.get() >= MIDI_DIAGNOSTICS_PUBLISH_INTERVAL_MS {
+            self.publish(now);
+        } else {
+            self.schedule_trailing_publish();
+        }
+    }
+
+    /// Schedules one trailing publish so a burst that ends inside the publish
+    /// interval is still shown promptly. This is a one-shot UI timer for the
+    /// diagnostics text only; Tone.Transport remains the musical clock.
+    fn schedule_trailing_publish(&self) {
+        if self.pending_publish.get() {
+            return;
+        }
+        self.pending_publish.set(true);
+        let Some(window) = web_sys::window() else {
+            self.pending_publish.set(false);
+            return;
+        };
+        let this = self.clone();
+        let commit = Closure::once_into_js(move || {
+            this.pending_publish.set(false);
+            if this.visible.get_untracked() {
+                this.publish(Date::now());
+            }
+        });
+        window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            commit.unchecked_ref(),
+            MIDI_DIAGNOSTICS_PUBLISH_INTERVAL_MS as i32,
+        )
+        .ok();
+    }
+
+    /// Replaces the reactive visible list with the current ring contents.
+    fn publish(&self, now: f64) {
+        let items = self.ring.borrow().clone();
+        self.last_publish_ms.set(now);
+        self.published.set(items);
+    }
+
+    /// A diagnostics view became presented: show the ring immediately.
+    fn view_opened(&self) {
+        self.open_views.set(self.open_views.get() + 1);
+        self.visible.set(true);
+        self.publish(Date::now());
+    }
+
+    /// A diagnostics view stopped being presented: once none remain, stop
+    /// recording. The retained visible list stays inert until a view presents
+    /// again, when it is refreshed from the ring.
+    fn view_closed(&self) {
+        self.open_views.set(self.open_views.get().saturating_sub(1));
+        if self.open_views.get() == 0 {
+            self.visible.set(false);
+        }
+    }
+}
+
 /// MIDI connection modal so settings cannot drift apart. It renders the
 /// connection state, device selection, pad mapping and diagnostics, and can
 /// retry the connection. Attempting a MIDI-dependent activity (pad mapping)
@@ -1648,11 +1773,54 @@ fn MidiConfigSection(
     selected_midi: RwSignal<Option<String>>,
     midi_learn: RwSignal<Option<Instrument>>,
     midi_bindings: RwSignal<Vec<MidiBinding>>,
-    diagnostics: RwSignal<Vec<String>>,
+    diagnostics: MidiDiagnosticsState,
+    /// Signal that is true while this instance's hosting surface (settings
+    /// drawer or MIDI connection modal) is itself presented.
+    surface_open: RwSignal<bool>,
     midi_modal_open: RwSignal<bool>,
     connect: Rc<dyn Fn()>,
 ) -> impl IntoView {
     let connect_retry = connect.clone();
+    // A diagnostics view only counts as presented while its `<details>` is
+    // expanded AND its surface is visible; otherwise recording stays off so
+    // hidden diagnostics never format or publish anything.
+    let details_open = RwSignal::new(false);
+    let diagnostics_for_view = diagnostics.clone();
+    let details_open_for_effect = details_open;
+    let presentation_active = Rc::new(Cell::new(false));
+    Effect::new(move |_| {
+        let active = details_open_for_effect.get() && surface_open.get();
+        if active == presentation_active.get() {
+            return;
+        }
+        presentation_active.set(active);
+        if active {
+            diagnostics_for_view.view_opened();
+        } else {
+            diagnostics_for_view.view_closed();
+        }
+    });
+    let on_diagnostics_toggle = move |event: web_sys::Event| {
+        let open = event
+            .target()
+            .and_then(|target| {
+                js_sys::Reflect::get(&target, &JsValue::from_str("open")).ok()
+            })
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        details_open.set(open);
+    };
+    let empty_state = {
+        let diagnostics = diagnostics.clone();
+        move || {
+            if diagnostics.published.get().is_empty() {
+                view! { <p>"No MIDI messages received yet."</p> }.into_any()
+            } else {
+                ().into_any()
+            }
+        }
+    };
+    let list_items = move || diagnostics.published.get();
     view! {
       <div class="midi-config">
         <p class="midi-state">{move || midi_status.get()}</p>
@@ -1680,7 +1848,7 @@ fn MidiConfigSection(
             }
           />
         </div>
-        <details><summary>"MIDI diagnostics"</summary><div class="diagnostics">{move || if diagnostics.get().is_empty(){view!{<p>"No MIDI messages received yet."</p>}.into_any()}else{diagnostics.get().into_iter().map(|line|view!{<code>{line}</code>}).collect_view().into_any()}}</div></details>
+        <details on:toggle=on_diagnostics_toggle><summary>"MIDI diagnostics"</summary><div class="diagnostics">{empty_state}<For each=list_items key=|item| item.0 children=move |item| view!{<code>{item.1}</code>}/></div></details>
       </div>
     }
 }
@@ -1904,7 +2072,7 @@ fn App() -> impl IntoView {
     let midi_status = RwSignal::new("Checking for MIDI drums…".to_string());
     let midi_ports = RwSignal::new(Vec::<MidiPort>::new());
     let selected_midi = RwSignal::new(None::<String>);
-    let diagnostics = RwSignal::new(Vec::<String>::new());
+    let midi_diagnostics = MidiDiagnosticsState::new();
     let midi_learn = RwSignal::new(None::<Instrument>);
     let midi_bindings = RwSignal::new(default_midi_bindings());
     let midi_profiles = RwSignal::new(Vec::<SavedMidiProfile>::new());
@@ -3198,6 +3366,7 @@ fn App() -> impl IntoView {
     let save_for_midi = save_current_settings.clone();
     let midi_hit = hit_input.clone();
     let midi_pause = pause_run.clone();
+    let midi_diagnostics_callback = midi_diagnostics.clone();
     let midi_callback: Rc<Closure<dyn FnMut(JsValue)>> = Rc::new(Closure::wrap(Box::new(
         move |value: JsValue| {
             let Ok(event) = serde_wasm_bindgen::from_value::<MidiEnvelope>(value) else {
@@ -3246,18 +3415,19 @@ fn App() -> impl IntoView {
                 }
                 return;
             }
-            let line = format!(
-                "{:.3} ms · {} ch{} · note {} · velocity {} · raw {:?}",
-                event.timestamp.unwrap_or(0.0),
-                event.message_type.clone().unwrap_or_default(),
-                event.channel.unwrap_or(0),
-                event.note.unwrap_or(0),
-                event.velocity.unwrap_or(0),
-                event.raw_bytes
-            );
-            diagnostics.update(|items| {
-                items.insert(0, line);
-                items.truncate(12);
+            // Diagnostics formatting and publication are gated on explicit
+            // observation: hidden views record nothing. Scoring, learning and
+            // calibration below always see every message.
+            midi_diagnostics_callback.record(|| {
+                format!(
+                    "{:.3} ms · {} ch{} · note {} · velocity {} · raw {:?}",
+                    event.timestamp.unwrap_or(0.0),
+                    event.message_type.clone().unwrap_or_default(),
+                    event.channel.unwrap_or(0),
+                    event.note.unwrap_or(0),
+                    event.velocity.unwrap_or(0),
+                    event.raw_bytes
+                )
             });
             if event.message_type.as_deref() != Some("note_on") {
                 return;
@@ -4295,7 +4465,7 @@ fn App() -> impl IntoView {
               <label>"Required accuracy"<select aria-label="Repeat tolerance" prop:value=move || match repeat_tolerance.get(){RepeatTolerance::Relaxed=>"relaxed",RepeatTolerance::Standard=>"standard",RepeatTolerance::Strict=>"strict"} on:change=move |event|{repeat_tolerance.set(match event_target_value(&event).as_str(){"relaxed"=>RepeatTolerance::Relaxed,"strict"=>RepeatTolerance::Strict,_=>RepeatTolerance::Standard});save_repeat_tolerance();}><option value="relaxed">"Relaxed · no misses"</option><option value="standard">"Standard · Good or Perfect"</option><option value="strict">"Strict · Perfect only"</option></select><small class="help">"Extra hits and wrong drums always fail the current attempt. This setting does not change the timing windows."</small></label>
             </section>
             <section><h3>"MIDI drums"</h3><p class="help">"Rudiment connects automatically to your last-used kit. Rudiment never uploads your events."</p>
-              <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
+              <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=midi_diagnostics.clone() surface_open=settings_open midi_modal_open=midi_modal_open connect=connect_action.clone()/>
               <div class="button-row"><button aria-label="Open MIDI connection setup" on:click=move |_|{midi_modal_auto.set(false);midi_modal_open.set(true);focus_midi_modal_close();}>"MIDI connection setup…"</button></div>
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
@@ -4376,7 +4546,7 @@ fn App() -> impl IntoView {
                         <button id="midi-modal-close" aria-label="Close MIDI connection setup" on:click=move |_|{midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);}><X size=22/></button>
                       </div>
                       <p class="midi-modal-instructions">"Connect your drum module with a USB MIDI cable, or pair it over Bluetooth MIDI in your system settings, then choose it below. If your browser asks to use MIDI, allow it so Rudiment can see your kit."</p>
-                      <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
+                      <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=midi_diagnostics.clone() surface_open=midi_modal_open midi_modal_open=midi_modal_open connect=connect_action.clone()/>
                       <div class="midi-modal-actions">
                         <button id="midi-modal-continue" on:click=move |_|{midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);}>"Continue without MIDI"</button>
                       </div>
@@ -4404,6 +4574,30 @@ mod tests {
             state: state.into(),
             connection: connection.into(),
         }
+    }
+
+    #[test]
+    fn diagnostics_ring_keeps_recent_lines_keyed_and_bounded() {
+        let ring = RefCell::new(Vec::new());
+        let next_key = Cell::new(0);
+        for velocity in 0..15u8 {
+            push_diagnostics_line(
+                &mut ring.borrow_mut(),
+                &next_key,
+                format!("note_on velocity {velocity}"),
+            );
+        }
+        let ring = ring.into_inner();
+        // Bounded to the newest lines, newest first, all keys unique so the
+        // keyed visible list can never collide on repeated messages.
+        assert_eq!(ring.len(), 12);
+        assert_eq!(ring[0].1, "note_on velocity 14");
+        assert_eq!(ring[11].1, "note_on velocity 3");
+        let keys: HashSet<_> = ring.iter().map(|(key, _)| *key).collect();
+        assert_eq!(keys.len(), 12);
+        let mut sorted = ring.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+        sorted.sort_unstable();
+        assert!(sorted.windows(2).all(|pair| pair[1] == pair[0] + 1));
     }
 
     #[test]

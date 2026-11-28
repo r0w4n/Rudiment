@@ -1907,6 +1907,78 @@ test('multiple MIDI inputs remain silent until one device is selected', async ({
   await expect(page.locator('#settings-dialog .diagnostics')).not.toContainText('velocity 91');
 });
 
+test('hidden MIDI diagnostics record nothing and the visible list stays bounded', async ({ page }) => {
+  await page.addInitScript(() => {
+    const input = {
+      id:'diagnostics-kit',name:'Diagnostics Kit',manufacturer:'Rudiment Test',type:'input',state:'connected',connection:'open',
+      onmidimessage:null as null | ((event:unknown)=>void),onstatechange:null,
+      open:async()=>input,close:async()=>input,addEventListener:()=>{},removeEventListener:()=>{},
+      dispatch:(data:number[])=>input.onmidimessage?.({data:new Uint8Array(data),timeStamp:performance.now()})
+    };
+    const access={inputs:new Map([[input.id,input]]),outputs:new Map(),sysexEnabled:false,onstatechange:null,addEventListener:()=>{},removeEventListener:()=>{}};
+    Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
+    Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
+    Object.assign(window,{__rudimentFakeInput:input});
+  });
+  await page.goto('/');
+  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Diagnostics Kit · connected');
+  // Both the drawer and the (hidden) modal mount the diagnostics section; a
+  // MutationObserver watches every `.diagnostics` container for any childList
+  // or character change, including those inside the collapsed surfaces.
+  expect(await page.locator('.diagnostics').count()).toBe(2);
+  await page.evaluate(() => {
+    const w=window as any;
+    w.__diagnosticsMutations=0;
+    document.querySelectorAll('.diagnostics').forEach(el=>{
+      new MutationObserver(()=>{w.__diagnosticsMutations++;}).observe(el,{subtree:true,childList:true,characterData:true});
+    });
+  });
+  const dispatchTraffic = (count:number) => page.evaluate((n:number) => {
+    const input=(window as any).__rudimentFakeInput;
+    for(let i=0;i<n;i++){
+      input.dispatch([0x99,38,i%128]);   // note-on
+      input.dispatch([0x89,38,0]);       // note-off
+      input.dispatch([0xb9,4,i%128]);    // CC
+      input.dispatch([0xfe]);            // active sensing
+    }
+  }, count);
+  // Mixed traffic with every diagnostics view hidden must not mutate the
+  // diagnostics DOM at all (no formatting, no reactive publication).
+  await dispatchTraffic(32);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(()=>(window as any).__diagnosticsMutations)).toBe(0);
+  // Opening a view shows the empty state, then records live traffic.
+  await page.getByRole('button',{name:'Open settings'}).click();
+  await page.locator('#settings-dialog').getByText('MIDI diagnostics').click();
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('No MIDI messages received yet.');
+  const mutationsWhenOpened=await page.evaluate(()=>(window as any).__diagnosticsMutations);
+  await dispatchTraffic(6);
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('velocity 5');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('cc');
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('raw [254]');
+  // Newest first, and lines older than the 12-line bound are gone: burst
+  // indices 0–2 (their distinct velocities) no longer appear.
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('velocity 5');
+  await expect(page.locator('#settings-dialog .diagnostics')).not.toContainText('velocity 1');
+  const mutationsWhileVisible=await page.evaluate(()=>(window as any).__diagnosticsMutations);
+  expect(mutationsWhileVisible).toBeGreaterThan(mutationsWhenOpened);
+  // The visible list stays bounded to the 12 newest keyed lines.
+  await expect(page.locator('#settings-dialog .diagnostics code')).toHaveCount(12);
+  // Collapsing hides the view again; further traffic must not mutate anything.
+  await page.locator('#settings-dialog').getByText('MIDI diagnostics').click();
+  const mutationsWhenHidden=await page.evaluate(()=>(window as any).__diagnosticsMutations);
+  await dispatchTraffic(8);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(()=>(window as any).__diagnosticsMutations)).toBe(mutationsWhenHidden);
+  // Reopening publishes the retained ring immediately and keeps accepting
+  // new traffic at the low rate.
+  await page.locator('#settings-dialog').getByText('MIDI diagnostics').click();
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('velocity 5');
+  await expect(page.locator('#settings-dialog .diagnostics code')).toHaveCount(12);
+  await page.evaluate(() => (window as any).__rudimentFakeInput.dispatch([0x99, 38, 64]));
+  await expect(page.locator('#settings-dialog .diagnostics')).toContainText('velocity 64');
+});
+
 test('previously authorised sole MIDI input reconnects automatically', async ({ page }) => {
   await page.addInitScript(() => {
     const input = { id:'returning-kit',name:'Returning Kit',manufacturer:'Test',type:'input',state:'connected',connection:'open',onmidimessage:null,onstatechange:null,open:async()=>input,close:async()=>input };
