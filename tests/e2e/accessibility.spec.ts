@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
+import { test, expect } from './fixtures';
+import type { Page } from '@playwright/test';
 
 const wcagTags = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
 
@@ -37,10 +38,12 @@ async function expectNoWcagViolations(page: Page, context: string, disabledRules
 
 test('Highway selector and musical feedback are accessible', async ({ page }) => {
   await page.goto('/');
-  const highway = page.getByRole('button', { name: 'Highway', exact: true });
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  const highway = page.locator('#settings-dialog').getByRole('button', { name: 'Highway', exact: true });
   await highway.focus();
   await page.keyboard.press('Enter');
   await expect(highway).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'Close settings' }).first().click();
   await expect(page.locator('.highway-note').first()).toHaveAttribute('aria-label', /snare.*expected/);
   await expectNoWcagViolations(page, 'Highway');
 });

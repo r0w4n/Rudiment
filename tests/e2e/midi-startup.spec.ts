@@ -1,12 +1,12 @@
 import { expect, test } from '@playwright/test';
 
-test('unresolved automatic MIDI permission does not block the workspace', async ({ page }) => {
+// Issue #34: first-run setup moved to a dedicated onboarding page shown from
+// the first paint, and the delayed three-second startup MIDI modal is retired.
+
+test('fresh profile shows onboarding immediately without waiting for MIDI', async ({ page }) => {
   await page.clock.install();
   await page.addInitScript(() => {
     (window as any).__midiRequests = 0;
-    // The fallback timer is armed during app start-up; record that moment so
-    // the fast-forward offsets below can be computed against it.
-    (window as any).__appStart = Date.now();
     Object.defineProperty(navigator, 'requestMIDIAccess', {
       configurable: true,
       value: () => {
@@ -14,36 +14,27 @@ test('unresolved automatic MIDI permission does not block the workspace', async 
         return new Promise(() => {});
       },
     });
-    Object.defineProperty(navigator, 'permissions', {
-      configurable: true,
-      value: { query: async () => ({ state: 'granted', onchange: null }) },
-    });
   });
 
   await page.goto('/');
-  // Freeze the clock so the three-second fallback cannot fire while
-  // assertions run; virtual time only moves via fastForward below. The
-  // pause point is taken from the page's own clock with a generous margin:
-  // virtual time advances while the page loads, so a small offset taken from
-  // the test process can already lie in the past and pauseAt would refuse it.
-  const pauseTarget = await page.evaluate(() => Date.now() + 500);
-  await page.clock.pauseAt(pauseTarget);
+  // Onboarding is the first page: the heading is there before MIDI discovery
+  // resolves and the workspace stays inert behind it.
+  await expect(page.locator('#onboarding')).toBeVisible();
+  await expect(page.locator('#onboarding-title')).toHaveText("Let's get you set up.");
+  await expect(page.locator('main.app')).toHaveAttribute('inert', '');
+  await expect(page.locator('.onboarding .midi-state')).toContainText('Checking for MIDI drums');
   await expect.poll(() => page.evaluate(() => (window as any).__midiRequests)).toBe(1);
-  await expect(page.locator('#notation svg')).toBeVisible();
-  await page.getByRole('button', { name: 'Open settings' }).click();
-  await page.getByRole('button', { name: 'Close settings' }).first().click();
-  // Just before the three-second fallback the workspace stays modal-free.
-  const sinceAppStart = await page.evaluate(() => Date.now() - (window as any).__appStart);
-  await page.clock.fastForward(3_000 - sinceAppStart - 500);
+  // The startup modal timer is retired: no MIDI connection dialog surfaces.
+  await page.clock.fastForward(10_000);
   await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
-  // Past three seconds the shared MIDI connection modal appears.
-  await page.clock.fastForward(6_000);
-  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toBeVisible();
-  // The workspace remains usable around it.
-  await expect(page.getByRole('button', { name: /Start practice/ })).toBeAttached();
+  // Practice remains reachable without MIDI.
+  await page.getByRole('button', { name: 'Enter practice workspace' }).click();
+  await expect(page.locator('main.app')).not.toHaveAttribute('inert', '');
+  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
+  await expect(page.locator('#onboarding')).toBeHidden();
 });
 
-test('automatic MIDI connection remains connected after the modal delay', async ({ page }) => {
+test('a connected kit appears on onboarding without dismissing it or opening a modal', async ({ page }) => {
   await page.clock.install();
   await page.addInitScript(() => {
     const input = {
@@ -72,126 +63,76 @@ test('automatic MIDI connection remains connected after the modal delay', async 
   });
 
   await page.goto('/');
-  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Auto Kit · connected');
-  await page.clock.fastForward(3_100);
+  await expect(page.locator('#onboarding')).toBeVisible();
+  await expect(page.locator('.onboarding .midi-state')).toContainText('Auto Kit · connected');
+  await page.clock.fastForward(10_000);
   await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
-  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Auto Kit · connected');
+  await expect(page.locator('#onboarding')).toBeVisible();
 });
 
-test('dismissed startup modal stays dismissed but reopens through the settings control', async ({ page }) => {
-  await page.clock.install();
+test('display choice applies to the workspace and opting out persists', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#onboarding')).toBeVisible();
+  await page
+    .locator('#onboarding')
+    .getByRole('button', { name: /Highway/ })
+    .click();
+  await expect(page.locator('#onboarding').getByRole('button', { name: /Highway/ })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await page.locator('.onboarding-skip input').check();
+  await page.getByRole('button', { name: 'Enter practice workspace' }).click();
+  await expect(page.locator('#highway svg')).toBeVisible();
+  await expect(page.locator('#notation')).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem('rudiment-onboarding-skipped'))).toBe('true');
+  expect(await page.evaluate(() => localStorage.getItem('rudiment-visualisation'))).toBe('highway');
+
+  // Opted-out returning users never see onboarding again.
+  await page.reload();
+  await expect(page.locator('#onboarding')).toBeHidden();
+  await expect(page.locator('#highway svg')).toBeVisible();
+});
+
+test('without opting out, dismissal is session-only and preferences persist', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#onboarding')).toBeVisible();
+  await page
+    .locator('#onboarding')
+    .getByRole('button', { name: /Notation/ })
+    .click();
+  await page.getByRole('button', { name: 'Enter practice workspace' }).click();
+  await expect(page.locator('#notation svg')).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('rudiment-onboarding-skipped'))).toBeNull();
+
+  // The display choice persists, but onboarding is offered again next session.
+  await page.reload();
+  await expect(page.locator('#onboarding')).toBeVisible();
+  await expect(page.locator('#notation svg')).toBeVisible();
+});
+
+test('settings reopens onboarding and keeps manual MIDI configuration', async ({ page }) => {
   await page.addInitScript(() => {
+    localStorage.setItem('rudiment-onboarding-skipped', 'true');
     Object.defineProperty(navigator, 'requestMIDIAccess', {
       configurable: true,
       value: () => new Promise(() => {}),
     });
   });
-
   await page.goto('/');
-  await page.clock.fastForward(3_100);
-  const dialog = page.getByRole('dialog', { name: /MIDI connection/i });
-  await expect(dialog).toBeVisible();
-  // Dismiss with the real accessible close control.
-  await page.getByRole('button', { name: 'Close MIDI connection setup' }).click();
-  await expect(dialog).toHaveCount(0);
-  // Practice stays usable and the modal is not shown again this session.
-  await page.clock.fastForward(10_000);
-  await expect(dialog).toHaveCount(0);
-  await expect(page.getByRole('button', { name: /Start practice/ })).toBeVisible();
-  // The settings "MIDI connection setup" control reopens it on demand.
+  await expect(page.locator('#onboarding')).toBeHidden();
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await page.getByRole('button', { name: 'Reopen setup page' }).click();
+  await expect(page.locator('#onboarding')).toBeVisible();
+  await expect(page.locator('main.app')).toHaveAttribute('inert', '');
+  await page.getByRole('button', { name: 'Enter practice workspace' }).click();
+  await expect(page.locator('#onboarding')).toBeHidden();
+
+  // Manual MIDI configuration stays reachable from Settings.
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.getByRole('button', { name: 'Open MIDI connection setup' }).click();
+  const dialog = page.getByRole('dialog', { name: /MIDI connection/i });
   await expect(dialog).toBeVisible();
-  // "Continue without MIDI" also dismisses it.
   await page.getByRole('button', { name: 'Continue without MIDI' }).click();
   await expect(dialog).toHaveCount(0);
-});
-
-test('a connection resolving after the modal appears dismisses it automatically', async ({ page }) => {
-  await page.clock.install();
-  await page.addInitScript(() => {
-    const input = {
-      id: 'late-resolve-kit',
-      name: 'Late Resolve Kit',
-      manufacturer: 'Test',
-      type: 'input',
-      state: 'connected',
-      connection: 'open',
-      onmidimessage: null,
-      onstatechange: null,
-      open: async () => input,
-      close: async () => input,
-    };
-    let resolveAccess: (value: unknown) => void = () => {};
-    const accessPromise = new Promise((resolve) => {
-      resolveAccess = resolve;
-    });
-    (window as any).__resolveMidiAccess = () =>
-      resolveAccess({
-        inputs: new Map([[input.id, input]]),
-        outputs: new Map(),
-        sysexEnabled: false,
-        onstatechange: null,
-      });
-    Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: () => accessPromise });
-  });
-
-  await page.goto('/');
-  await page.clock.fastForward(3_100);
-  const dialog = page.getByRole('dialog', { name: /MIDI connection/i });
-  await expect(dialog).toBeVisible();
-  // The user grants permission while the modal is open; the app connects on
-  // its own and the startup modal disappears without further interaction.
-  await page.evaluate(() => (window as any).__resolveMidiAccess());
-  await expect(dialog).toHaveCount(0);
-  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Late Resolve Kit · connected');
-  await page.clock.fastForward(5_000);
-  await expect(dialog).toHaveCount(0);
-});
-
-test('the startup modal selects one of several devices and closes on connection', async ({ page }) => {
-  await page.clock.install();
-  await page.addInitScript(() => {
-    const makeInput = (id: string, name: string) => {
-      const input = {
-        id,
-        name,
-        manufacturer: 'Rudiment Test',
-        type: 'input',
-        state: 'connected',
-        connection: 'open',
-        onmidimessage: null as null | ((event: unknown) => void),
-        onstatechange: null,
-        open: async () => input,
-        close: async () => input,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-      };
-      return input;
-    };
-    const first = makeInput('kit-a', 'Kit A'),
-      second = makeInput('kit-b', 'Kit B');
-    const access = {
-      inputs: new Map([
-        [first.id, first],
-        [second.id, second],
-      ]),
-      outputs: new Map(),
-      sysexEnabled: false,
-      onstatechange: null,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    };
-    Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
-  });
-
-  await page.goto('/');
-  await page.clock.fastForward(3_100);
-  const dialog = page.getByRole('dialog', { name: /MIDI connection/i });
-  await expect(dialog).toBeVisible();
-  // Device selection happens inside the modal itself.
-  await dialog.getByLabel('Input device').selectOption('kit-b');
-  await expect(dialog).toHaveCount(0);
-  await expect(page.locator('#settings-dialog .midi-state')).toContainText('Kit B · connected');
-  expect(await page.evaluate(() => localStorage.getItem('rudiment-midi-input'))).toBe('kit-b');
 });

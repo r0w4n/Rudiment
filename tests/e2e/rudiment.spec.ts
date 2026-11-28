@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { test, expect } from './fixtures';
+import type { Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
 async function setTempo(page: Page, value: string) {
@@ -1884,13 +1885,8 @@ test('multiple MIDI inputs remain silent until one device is selected', async ({
     Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
     Object.assign(window, { __rudimentMidiInputs: { first, second } });
   });
-  await page.clock.install();
   await page.goto('/');
   await expect(page.locator('#settings-dialog .midi-state')).toContainText('Choose a MIDI input');
-  await page.clock.fastForward(3_100);
-  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toBeVisible();
-  await page.getByRole('button', { name: 'Continue without MIDI' }).click();
-  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
   await page.getByRole('button', { name: 'Open settings' }).click();
   await page.locator('#settings-dialog').getByText('MIDI diagnostics').click();
   await page.evaluate(() => {
@@ -1932,12 +1928,8 @@ test('last selected MIDI input reconnects automatically when several inputs are 
     Object.defineProperty(navigator,'requestMIDIAccess',{configurable:true,value:async()=>access});
     Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
   });
-  await page.clock.install();
   await page.goto('/');
   await expect(page.locator('#settings-dialog .midi-state')).toContainText('Choose a MIDI input');
-  await page.clock.fastForward(3_100);
-  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toBeVisible();
-  await page.getByRole('button', { name: 'Continue without MIDI' }).click();
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.locator('#settings-dialog').getByLabel('Input device').selectOption('kit-b');
   await expect(page.locator('#settings-dialog .midi-state')).toContainText('Kit B · connected');
@@ -2038,12 +2030,7 @@ test('MIDI hotplug selects the remaining input and pauses only when the selected
     Object.defineProperty(navigator,'permissions',{configurable:true,value:{query:async()=>({state:'granted',onchange:null})}});
     Object.assign(window,{__hotplug:{first,second,access}});
   });
-  await page.clock.install();
   await page.goto('/');
-  await page.clock.fastForward(3_100);
-  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toBeVisible();
-  await page.getByRole('button', { name: 'Continue without MIDI' }).click();
-  await expect(page.getByRole('dialog', { name: /MIDI connection/i })).toHaveCount(0);
   await page.getByRole('button',{name:'Open settings'}).click();
   await page.locator('#settings-dialog').getByLabel('Input device').selectOption('kit-b');
   await page.getByRole('button',{name:'Close settings'}).first().click();

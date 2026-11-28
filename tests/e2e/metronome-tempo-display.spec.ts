@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, selectDisplayMode } from './fixtures';
 
 // Issue #18: the BPM value shown above the metronome tempo slider must follow
 // the thumb live, wherever the main-app metronome popover appears, and always
@@ -93,7 +93,7 @@ test('selected tempo stays applied after reopening the popover', async ({ page }
 
 test('Highway view popover keeps the BPM display in sync while dragging', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('group', { name: 'Musical visualisation' }).getByRole('button', { name: 'Highway' }).click();
+  await selectDisplayMode(page, 'Highway');
   const { slider, bpmInput } = await openMetronomePopover(page);
   const samples = await dragSlider(page, slider, bpmInput, 0.2, 0.7);
   for (const [sliderValue, displayValue] of samples) {

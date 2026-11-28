@@ -248,6 +248,10 @@ extern "C" {
     fn saved_notation_theme() -> bool;
     #[wasm_bindgen(js_namespace = rudiment, js_name = saveNotationTheme)]
     fn save_notation_theme(dark: bool);
+    #[wasm_bindgen(js_namespace = rudiment, js_name = savedOnboardingSkip)]
+    fn saved_onboarding_skip() -> bool;
+    #[wasm_bindgen(js_namespace = rudiment, js_name = saveOnboardingSkip)]
+    fn save_onboarding_skip(skip: bool);
     #[wasm_bindgen(js_namespace = rudiment, js_name = startCalibration)]
     fn start_calibration() -> Promise;
     #[wasm_bindgen(js_namespace = rudiment, js_name = renderScore)]
@@ -547,37 +551,14 @@ struct MidiPort {
 }
 
 /// A MIDI connection counts as established only when the selected port is
-/// physically present and open. This single predicate decides whether the
-/// startup modal may appear, whether it auto-dismisses, and whether a
-/// MIDI-dependent activity (like mapping) reopens it.
+/// physically present and open. This single predicate decides whether a
+/// MIDI-dependent activity (like mapping) reopens the connection modal.
 fn midi_connection_ready(ports: &[MidiPort], selected: Option<&str>) -> bool {
     selected.is_some_and(|id| {
         ports
             .iter()
             .any(|port| port.id == id && port.state == "connected" && port.connection == "open")
     })
-}
-
-/// Decides whether the three-second startup fallback should surface the MIDI
-/// connection modal. It stays quiet when the user already dismissed the modal
-/// this session, when a connection is established, when the browser has no
-/// Web MIDI at all, when the permission was explicitly denied (a modal every
-/// session would only nag after an explicit refusal), and when permission is
-/// granted but no kit is even plugged in.
-fn startup_midi_modal_needed(
-    ports: &[MidiPort],
-    selected: Option<&str>,
-    permission: Option<&str>,
-    dismissed: bool,
-) -> bool {
-    if dismissed || midi_connection_ready(ports, selected) {
-        return false;
-    }
-    match permission {
-        Some("unsupported") | Some("denied") => false,
-        Some("granted") if ports.is_empty() => false,
-        _ => true,
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1899,6 +1880,13 @@ fn App() -> impl IntoView {
     let result_dismiss_after_ms = RwSignal::new(f64::INFINITY);
     let auto_show_statistics = RwSignal::new(true);
     let welcome = RwSignal::new(true);
+    // Dedicated first-run onboarding page. It is open from the first paint
+    // (seeded synchronously from local preference storage), so returning users
+    // who opted out never see it and fresh users never see the workspace
+    // flash first. The skip choice only persists when "Don't show me this
+    // again" is checked; otherwise the dismissal is session-only.
+    let onboarding_open = RwSignal::new(!saved_onboarding_skip());
+    let onboarding_skip = RwSignal::new(saved_onboarding_skip());
     let import_error = RwSignal::new(None::<String>);
     let metronome_preview_error = RwSignal::new(None::<String>);
     let midi_status = RwSignal::new("Checking for MIDI drums…".to_string());
@@ -1908,14 +1896,12 @@ fn App() -> impl IntoView {
     let midi_learn = RwSignal::new(None::<Instrument>);
     let midi_bindings = RwSignal::new(default_midi_bindings());
     let midi_profiles = RwSignal::new(Vec::<SavedMidiProfile>::new());
-    // The startup MIDI connection modal. `midi_modal_auto` marks a modal that
-    // the three-second startup timer opened, so only that one is dismissed
-    // automatically when a connection succeeds; manually opened setup stays
-    // open. `midi_modal_dismissed` keeps the startup timer from reopening the
-    // modal again during the same application session.
+    // Manual MIDI connection modal. It only opens on demand: from the settings
+    // drawer's "MIDI connection setup…" control or when a MIDI-dependent
+    // activity (pad mapping) needs a connected kit. The automatic three-second
+    // startup modal is retired; first-run setup now lives on the onboarding
+    // page.
     let midi_modal_open = RwSignal::new(false);
-    let midi_modal_auto = RwSignal::new(false);
-    let midi_modal_dismissed = RwSignal::new(false);
     let midi_permission = RwSignal::new(None::<String>);
     let settings_loaded = RwSignal::new(false);
     let snare_note = RwSignal::new(38u8);
@@ -3207,16 +3193,6 @@ fn App() -> impl IntoView {
                 midi_ports.set(event.ports.clone());
                 selected_midi.set(event.selected_id.clone());
                 midi_permission.set(event.permission.clone());
-                // A successful connection dismisses only the automatically
-                // opened startup modal; the settings drawer and a modal the
-                // user opened themselves stay where they are.
-                if midi_connection_ready(&event.ports, event.selected_id.as_deref())
-                    && midi_modal_open.get_untracked()
-                    && midi_modal_auto.get_untracked()
-                {
-                    midi_modal_auto.set(false);
-                    midi_modal_open.set(false);
-                }
                 if let Some(error) = event.error {
                     midi_status.set(format!("MIDI error · {error}"));
                 } else {
@@ -3354,35 +3330,9 @@ fn App() -> impl IntoView {
             .await;
         });
     }
-    // Startup fallback: if no MIDI connection is established within three
-    // seconds while a connection could still be made, surface the shared
-    // connection modal so the kit can be connected and configured in one
-    // place. It stays quiet when the browser has no Web MIDI, when the user
-    // denied the permission (a modal every session would only nag after an
-    // explicit refusal), or when permission was granted but no kit is even
-    // plugged in. This runs once; a manual dismissal keeps it closed for the
-    // rest of the session, and settings remain the manual entry point.
-    {
-        let open_modal = Closure::once_into_js(move || {
-            if !startup_midi_modal_needed(
-                &midi_ports.get_untracked(),
-                selected_midi.get_untracked().as_deref(),
-                midi_permission.get_untracked().as_deref(),
-                midi_modal_dismissed.get_untracked(),
-            ) {
-                return;
-            }
-            midi_modal_auto.set(true);
-            midi_modal_open.set(true);
-            focus_midi_modal_close();
-        });
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                open_modal.unchecked_ref::<Function>(),
-                3000,
-            );
-        }
-    }
+    // Startup MIDI setup moved to the dedicated onboarding page: it renders
+    // immediately on arrival and is not driven by a delayed timer. Manual MIDI
+    // configuration remains available from the settings drawer.
     {
         let callback = file_callback.clone();
         spawn_local(async move {
@@ -3639,9 +3589,7 @@ fn App() -> impl IntoView {
             });
         if let Some(control) = control
             && control
-                .closest(
-                    ".start-button, .restart-button, .visualisation-selector, .notation-theme-toggle",
-                )
+                .closest(".start-button, .restart-button, .notation-theme-toggle")
                 .ok()
                 .flatten()
                 .is_none()
@@ -3941,8 +3889,48 @@ fn App() -> impl IntoView {
     let save_on_time = save_current_settings.clone();
     let save_excellent = save_current_settings.clone();
     let save_auto_statistics = save_current_settings.clone();
+    // Entering the practice workspace closes onboarding for this session. The
+    // opt-out is persisted only when "Don't show me this again" is checked.
+    let enter_practice: Rc<dyn Fn()> = Rc::new(move || {
+        if onboarding_skip.get_untracked() {
+            save_onboarding_skip(true);
+        }
+        onboarding_open.set(false);
+    });
+    let enter_practice_action = enter_practice.clone();
+    let enter_without_midi = enter_practice.clone();
     view! {
-      <main class="app">
+      <section id="onboarding" class=move || if onboarding_open.get(){"onboarding"}else{"onboarding hidden"} aria-labelledby="onboarding-title">
+        <div class="onboarding-card">
+          <span class="eyebrow">"WELCOME TO RUDIMENT"</span>
+          <h1 id="onboarding-title">"Let's get you set up."</h1>
+          <p class="onboarding-intro">"Pick how you want the music displayed and connect your drum kit if you have one. You can always change these settings in the Settings drawer."</p>
+          <fieldset class="onboarding-display">
+            <legend>"Practice display"</legend>
+            <div class="onboarding-display-options">
+              <button type="button" class=move || if !highway.get(){"active"}else{""} aria-pressed=move || (!highway.get()).to_string() on:click=move |_|{highway.set(false);save_highway_mode(false);}>
+                <strong>"Notation"</strong>
+                <span>"A written drum score, like sheet music"</span>
+              </button>
+              <button type="button" class=move || if highway.get(){"active"}else{""} aria-pressed=move || highway.get().to_string() on:click=move |_|{highway.set(true);save_highway_mode(true);}>
+                <strong>"Highway"</strong>
+                <span>"Scrolling lanes, like a rhythm game"</span>
+              </button>
+            </div>
+          </fieldset>
+          <section class="onboarding-midi">
+            <h2>"MIDI drums"</h2>
+            <p class="help">"Optional. Connect your kit now, or continue without MIDI and use keyboard or demo input. If your browser asks to use MIDI, allow it so Rudiment can see your drums."</p>
+            <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
+          </section>
+          <label class="toggle-row onboarding-skip"><input type="checkbox" prop:checked=move || onboarding_skip.get() on:change=move |event|onboarding_skip.set(event_target_checked(&event))/><span>"Don't show me this again"</span></label>
+          <div class="onboarding-actions">
+            <button id="onboarding-enter" class="primary" on:click=move |_|enter_practice_action()>"Enter practice workspace"</button>
+            <button id="onboarding-without-midi" on:click=move |_|enter_without_midi()>"Continue without MIDI"</button>
+          </div>
+        </div>
+      </section>
+      <main class="app" inert=move || onboarding_open.get()>
         <header class="topbar">
           <button id="midi-library-trigger" class="stats-trigger library-topbar-trigger" aria-label=move || format!("MIDI library · {} exercises",saved_imports.get().len()+BUILTIN_RUDIMENTS.len()) title=move || format!("MIDI library · {} exercises",saved_imports.get().len()+BUILTIN_RUDIMENTS.len()) aria-haspopup="dialog" aria-expanded=move || library_open.get().to_string() on:click=move |_|{
             pending_import_delete.set(None);
@@ -3963,10 +3951,6 @@ fn App() -> impl IntoView {
               <div class="score-meta">
                 <div class="score-view-controls">
                   <button type="button" class=move || if highway.get(){"notation-theme-toggle hidden"}else{"notation-theme-toggle"} aria-label=move || if notation_dark.get(){"Notation theme: Dark. Switch to Light"}else{"Notation theme: Light. Switch to Dark"} aria-pressed=move || notation_dark.get().to_string() title=move || if notation_dark.get(){"Switch to light notation"}else{"Switch to dark notation"} on:click=move |_|{let dark=!notation_dark.get_untracked();notation_dark.set(dark);save_notation_theme(dark);}>{move || if notation_dark.get(){view!{<Moon size=18/>}.into_any()}else{view!{<Sun size=18/>}.into_any()}}</button>
-                  <div class="visualisation-selector" role="group" aria-label="Musical visualisation">
-                    <button type="button" class=move || if !highway.get(){"active"}else{""} aria-pressed=move || (!highway.get()).to_string() on:click=move |_|{highway.set(false);save_highway_mode(false);}>"Notation"</button>
-                    <button type="button" class=move || if highway.get(){"active"}else{""} aria-pressed=move || highway.get().to_string() on:click=move |_|{highway.set(true);save_highway_mode(true);}>"Highway"</button>
-                  </div>
                 </div>
                 <div class="metronome-context">
                   <button id="visual-metronome" class="visual-metronome" type="button" aria-label=move || format!("Metronome settings, {:.0} BPM", bpm.get()) aria-haspopup="dialog" aria-controls="metronome-popover" aria-expanded=move || (context_popup.get()==Some(ContextPopup::Metronome)).to_string() on:click=move |_|context_popup.update(|popup|*popup=if *popup==Some(ContextPopup::Metronome){None}else{Some(ContextPopup::Metronome)})>
@@ -4255,6 +4239,14 @@ fn App() -> impl IntoView {
         }>
           <div class="drawer-head"><div><span class="eyebrow">"RUDIMENT SETUP"</span><h2 id="settings-title">"Sound & drums"</h2></div><button id="settings-close" aria-label="Close settings" on:click=move |_|{settings_open.set(false);restore_settings_focus();}><X size=22/></button></div>
           <div class="drawer-scroll">
+            <section><h3>"Practice display"</h3>
+              <p class="help">"Choose how the exercise is shown: the written drum notation or a scrolling drum highway."</p>
+              <div class="visualisation-selector" role="group" aria-label="Musical visualisation">
+                <button type="button" class=move || if !highway.get(){"active"}else{""} aria-pressed=move || (!highway.get()).to_string() on:click=move |_|{highway.set(false);save_highway_mode(false);}>"Notation"</button>
+                <button type="button" class=move || if highway.get(){"active"}else{""} aria-pressed=move || highway.get().to_string() on:click=move |_|{highway.set(true);save_highway_mode(true);}>"Highway"</button>
+              </div>
+              <div class="button-row"><button on:click=move |_|{settings_open.set(false);onboarding_open.set(true);}>"Reopen setup page…"</button></div>
+            </section>
             <section><h3>"Metronome"</h3>
               <MetronomeSettings bpm=bpm count_in=count_in subdivision=subdivision timbre=timbre metronome=metronome click_volume=click_volume snare_volume=snare_volume snare_muted=snare_muted error=metronome_preview_error change_tempo=change_tempo.clone() save=save_current_settings.clone()/>
             </section>
@@ -4296,7 +4288,7 @@ fn App() -> impl IntoView {
             </section>
             <section><h3>"MIDI drums"</h3><p class="help">"Rudiment connects automatically to your last-used kit. Rudiment never uploads your events."</p>
               <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
-              <div class="button-row"><button aria-label="Open MIDI connection setup" on:click=move |_|{midi_modal_auto.set(false);midi_modal_open.set(true);focus_midi_modal_close();}>"MIDI connection setup…"</button></div>
+              <div class="button-row"><button aria-label="Open MIDI connection setup" on:click=move |_|{midi_modal_open.set(true);focus_midi_modal_close();}>"MIDI connection setup…"</button></div>
             </section>
             <section><h3>"Latency calibration"</h3><p class="help">"Tap your snare or J with each of eight clicks. This estimates input offset; it cannot remove all external hardware latency."</p><strong class="cal-value">{move || format!("{:+.0} ms",latency_ms.get())}</strong><div class="button-row"><button on:click=move |_|{calibration_errors.set(vec![]);let promise=start_calibration();spawn_local(async move{if let Ok(value)=JsFuture::from(promise).await{let array=Array::from(&value);calibration_targets.set(array.iter().filter_map(|item|item.as_f64()).collect());}});}>"Start 8-tap calibration"</button><button on:click=move |_|{latency_ms.set(0.0);calibration_targets.set(vec![]);save_cal_reset();}>"Reset"</button></div><label>"Manual offset"<input type="range" min="-200" max="200" step="1" prop:value=move || latency_ms.get() on:input=move |event|{latency_ms.set(event_target_value(&event).parse().unwrap_or(0.0));save_cal_manual();}/></label></section>
             <section><h3>"Timing feedback"</h3><p class="help">{format!("Perfect hits are green (±{DEFAULT_PERFECT_MS:.0} ms by default), Good hits light green, Early hits orange and Late hits purple. Unplayed notes remain neutral. Matching closes outside ±{DEFAULT_MATCH_MS:.0} ms.")}</p><label>{move || format!("Perfect window · ±{:.0} ms",excellent_ms.get())}<input type="range" min="5" max="40" step="1" prop:value=move || excellent_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_PERFECT_MS).min(on_time_ms.get_untracked());excellent_ms.set(value);save_excellent();}/></label><label>{move || format!("Good window · ±{:.0} ms",on_time_ms.get())}<input type="range" min="20" max="60" step="1" prop:value=move || on_time_ms.get() on:input=move |event|{let value=event_target_value(&event).parse::<f64>().unwrap_or(DEFAULT_GOOD_MS);on_time_ms.set(value);if excellent_ms.get_untracked()>value{excellent_ms.set(value);}save_on_time();}/></label></section>
@@ -4365,7 +4357,7 @@ fn App() -> impl IntoView {
                       on:click=|event|event.stop_propagation()
                       on:keydown=move |event:web_sys::KeyboardEvent|{
                         match event.key().as_str(){
-                          "Escape"=>{event.prevent_default();midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);},
+                          "Escape"=>{event.prevent_default();midi_modal_open.set(false);},
                           "Tab"=>trap_dialog_tab(&event,"#midi-connection-modal"),
                           _=>{},
                         }
@@ -4373,12 +4365,12 @@ fn App() -> impl IntoView {
                     >
                       <div class="midi-modal-head">
                         <div><span class="eyebrow">"MIDI DRUMS"</span><h2 id="midi-modal-title">"MIDI connection"</h2></div>
-                        <button id="midi-modal-close" aria-label="Close MIDI connection setup" on:click=move |_|{midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);}><X size=22/></button>
+                        <button id="midi-modal-close" aria-label="Close MIDI connection setup" on:click=move |_|{midi_modal_open.set(false);}><X size=22/></button>
                       </div>
                       <p class="midi-modal-instructions">"Connect your drum module with a USB MIDI cable, or pair it over Bluetooth MIDI in your system settings, then choose it below. If your browser asks to use MIDI, allow it so Rudiment can see your kit."</p>
                       <MidiConfigSection midi_status=midi_status midi_ports=midi_ports selected_midi=selected_midi midi_learn=midi_learn midi_bindings=midi_bindings diagnostics=diagnostics midi_modal_open=midi_modal_open connect=connect_action.clone()/>
                       <div class="midi-modal-actions">
-                        <button id="midi-modal-continue" on:click=move |_|{midi_modal_dismissed.set(true);midi_modal_auto.set(false);midi_modal_open.set(false);}>"Continue without MIDI"</button>
+                        <button id="midi-modal-continue" on:click=move |_|{midi_modal_open.set(false);}>"Continue without MIDI"</button>
                       </div>
                     </section>
                   </div>
@@ -4421,55 +4413,6 @@ mod tests {
         assert!(!midi_connection_ready(
             &[port("kit", "connected", "closed")],
             Some("kit")
-        ));
-    }
-
-    #[test]
-    fn startup_modal_appears_when_no_connection_is_established_in_time() {
-        // A pending permission request (still unresolved after three seconds)
-        // and a granted permission with devices that never connected both
-        // surface the modal so the kit can be configured in one place.
-        assert!(startup_midi_modal_needed(&[], None, None, false));
-        assert!(startup_midi_modal_needed(
-            &[port("kit", "connected", "pending")],
-            None,
-            Some("granted"),
-            false
-        ));
-    }
-
-    #[test]
-    fn startup_modal_stays_quiet_when_a_connection_already_exists() {
-        let ports = vec![port("kit", "connected", "open")];
-        assert!(!startup_midi_modal_needed(
-            &ports,
-            Some("kit"),
-            Some("granted"),
-            false
-        ));
-    }
-
-    #[test]
-    fn startup_modal_stays_quiet_after_a_manual_dismissal() {
-        assert!(!startup_midi_modal_needed(&[], None, None, true));
-    }
-
-    #[test]
-    fn startup_modal_respects_browser_permission_failures() {
-        // No Web MIDI support and an explicit refusal never nag again, and a
-        // granted permission without any plugged-in kit has nothing to show.
-        assert!(!startup_midi_modal_needed(
-            &[],
-            None,
-            Some("unsupported"),
-            false
-        ));
-        assert!(!startup_midi_modal_needed(&[], None, Some("denied"), false));
-        assert!(!startup_midi_modal_needed(
-            &[],
-            None,
-            Some("granted"),
-            false
         ));
     }
 

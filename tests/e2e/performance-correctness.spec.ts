@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { test, expect, selectDisplayMode } from './fixtures';
+import type { Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 
 const manifest=JSON.parse(readFileSync('web/public/exercises/performance/manifest.json','utf8')) as {fixtures:Record<string,{name:string,bars:number,subdivision:number,noteCount:number}>};
@@ -162,7 +163,7 @@ test('dense MIDI traffic and a delayed frame recover both views to the audio tim
   await page.getByRole('button',{name:/Start practice/}).click();
   await expect.poll(()=>page.evaluate(()=>(window as any).rudiment.currentAudioBeat())).toBeGreaterThan(0.05);
   for(const view of ['notation','highway'] as const){
-    if(view==='highway')await page.getByRole('button',{name:'Highway',exact:true}).click();
+    if(view==='highway'){await selectDisplayMode(page,'Highway');await page.getByRole('button',{name:/Resume/}).click();}
     const result=await page.evaluate(async currentView=>{
       const app=(window as any).rudiment;
       const samples:{error:number;interval:number}[]=[];

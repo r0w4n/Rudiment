@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { test, expect } from './fixtures';
+import type { Page } from '@playwright/test';
 
 async function setTempo(page: Page, value: string) {
   await page.locator('#visual-metronome').click();
