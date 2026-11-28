@@ -1645,11 +1645,7 @@ const MIDI_DIAGNOSTICS_PUBLISH_INTERVAL_MS: f64 = 250.0;
 /// Pushes one formatted diagnostics line into the bounded non-reactive ring,
 /// newest first, keyed by a monotonic sequence so duplicate lines stay distinct
 /// in the keyed visible list.
-fn push_diagnostics_line(
-    ring: &mut Vec<(u64, String)>,
-    next_key: &Cell<u64>,
-    line: String,
-) {
+fn push_diagnostics_line(ring: &mut Vec<(u64, String)>, next_key: &Cell<u64>, line: String) {
     let key = next_key.get() + 1;
     next_key.set(key);
     ring.insert(0, (key, line));
@@ -1730,11 +1726,12 @@ impl MidiDiagnosticsState {
                 this.publish(Date::now());
             }
         });
-        window.set_timeout_with_callback_and_timeout_and_arguments_0(
-            commit.unchecked_ref(),
-            MIDI_DIAGNOSTICS_PUBLISH_INTERVAL_MS as i32,
-        )
-        .ok();
+        window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                commit.unchecked_ref(),
+                MIDI_DIAGNOSTICS_PUBLISH_INTERVAL_MS as i32,
+            )
+            .ok();
     }
 
     /// Replaces the reactive visible list with the current ring contents.
@@ -1744,11 +1741,14 @@ impl MidiDiagnosticsState {
         self.published.set(items);
     }
 
-    /// A diagnostics view became presented: show the ring immediately.
+    /// A diagnostics view became presented: show the ring immediately and
+    /// backdate the rate limit so the next message publishes at once, keeping
+    /// diagnostics responsive right after opening even when the test or
+    /// browser clock is frozen.
     fn view_opened(&self) {
         self.open_views.set(self.open_views.get() + 1);
         self.visible.set(true);
-        self.publish(Date::now());
+        self.publish(Date::now() - MIDI_DIAGNOSTICS_PUBLISH_INTERVAL_MS);
     }
 
     /// A diagnostics view stopped being presented: once none remain, stop
@@ -1803,12 +1803,18 @@ fn MidiConfigSection(
     let on_diagnostics_toggle = move |event: web_sys::Event| {
         let open = event
             .target()
-            .and_then(|target| {
-                js_sys::Reflect::get(&target, &JsValue::from_str("open")).ok()
-            })
+            .and_then(|target| js_sys::Reflect::get(&target, &JsValue::from_str("open")).ok())
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         details_open.set(open);
+    };
+    // The `toggle` event is dispatched asynchronously, so messages arriving
+    // immediately after the user expands the list would be silently skipped
+    // if visibility waited for it. Clicking the summary toggles presentation
+    // optimistically and synchronously; the authoritative `toggle` event then
+    // reconciles the actual state.
+    let summary_click = move |_| {
+        details_open.set(!details_open.get_untracked());
     };
     let empty_state = {
         let diagnostics = diagnostics.clone();
@@ -1848,7 +1854,7 @@ fn MidiConfigSection(
             }
           />
         </div>
-        <details on:toggle=on_diagnostics_toggle><summary>"MIDI diagnostics"</summary><div class="diagnostics">{empty_state}<For each=list_items key=|item| item.0 children=move |item| view!{<code>{item.1}</code>}/></div></details>
+        <details on:toggle=on_diagnostics_toggle><summary on:click=summary_click>"MIDI diagnostics"</summary><div class="diagnostics">{empty_state}<For each=list_items key=|item| item.0 children=move |item| view!{<code>{item.1}</code>}/></div></details>
       </div>
     }
 }
