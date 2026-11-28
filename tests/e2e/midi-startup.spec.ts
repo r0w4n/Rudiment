@@ -73,8 +73,8 @@ test('a connected kit appears on onboarding without dismissing it or opening a m
 test('display choice applies to the workspace and opting out persists', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('#onboarding')).toBeVisible();
-  await page.locator('#onboarding').getByRole('button', { name: 'Highway', exact: true }).click();
-  await expect(page.locator('#onboarding').getByRole('button', { name: 'Highway', exact: true })).toHaveAttribute(
+  await page.locator('#onboarding').getByRole('button', { name: /Highway/ }).click();
+  await expect(page.locator('#onboarding').getByRole('button', { name: /Highway/ })).toHaveAttribute(
     'aria-pressed',
     'true',
   );
@@ -94,7 +94,7 @@ test('display choice applies to the workspace and opting out persists', async ({
 test('without opting out, dismissal is session-only and preferences persist', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('#onboarding')).toBeVisible();
-  await page.locator('#onboarding').getByRole('button', { name: 'Notation', exact: true }).click();
+  await page.locator('#onboarding').getByRole('button', { name: /Notation/ }).click();
   await page.getByRole('button', { name: 'Enter practice workspace' }).click();
   await expect(page.locator('#notation svg')).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem('rudiment-onboarding-skipped'))).toBeNull();
