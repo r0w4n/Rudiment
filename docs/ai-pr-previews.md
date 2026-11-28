@@ -102,6 +102,14 @@ their names and redacted log excerpts together with the original issue to
 OpenCode, and pushes the correction to the same branch under the same
 head-SHA lease as revisions. CI and previews then rerun automatically.
 
+Router and caller permissions: the router and the reusable-workflow caller
+must grant `checks: read` (Checks API verification), `actions: read` (job-log
+excerpts) and `actions: write` (dispatch and bounded retries). API failures
+are reported as explicit workflow errors — they are never converted into
+empty check results or silent no-ops, and a ready-for-review notification is
+only published when Central independently verifies a green, fully completed
+check-run state on the current head.
+
 A single persistent status comment per PR tracks the episode: current status,
 failing checks, attempt number and maximum (default three per failure
 episode), the corrective summary, workflow links and the final outcome. Failed

@@ -40,9 +40,11 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  # actions: write dispatches the pinned AI task workflow; the same scope
-  # covers reading check runs of the evaluated head commit.
+  # actions: write dispatches the pinned AI task workflow.
   actions: write
+  # Listing check runs of the evaluated head commit goes through the Checks
+  # API, which requires the separate 'checks: read' GITHUB_TOKEN scope.
+  checks: read
 
 concurrency:
   # One evaluation per PR branch; completions arrive per workflow, so runs
@@ -59,16 +61,22 @@ env:
   # router only forwards the event and its head identity.
   QUIESCE_TIMEOUT_SECONDS: '1080'
   QUIESCE_POLL_SECONDS: '60'
+  # Forwarded to Central through the remediation_run_id input for diagnostics.
+  REMEDIATION_RUN_ID: ${{ github.event.workflow_run.id }}
 
 jobs:
   evaluate:
     name: Evaluate completed checks and dispatch remediation
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    # timed_out and startup_failure are actionable workflow conclusions too;
+    # per-check conclusions (including these) are evaluated in the script.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success' ||
-      github.event.workflow_run.conclusion == 'failure'
+      github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'timed_out' ||
+      github.event.workflow_run.conclusion == 'startup_failure'
     steps:
       - name: Evaluate checks and dispatch the AI task workflow
         env:
@@ -86,17 +94,50 @@ jobs:
           set -euo pipefail
           auth_pr_for_branch() {
             # Resolve the open AI PR owning a head branch; verifies author,
-            # base and same-repository head. Prints the PR JSON or fails.
-            local branch="$1"
-            local pr_json
-            pr_json="$(gh api "repos/${REPOSITORY}/pulls?head=${REPOSITORY}:${branch}&state=open" --jq '.[0] // empty')" || return 1
+            # base and same-repository head. Prints the PR JSON, returns 1
+            # when no authorised PR matches, and returns 2 when the API
+            # request itself failed (never treated as "no PR").
+            local branch="$1" owner="${REPOSITORY%%/*}" pr_json
+            # The pulls-list 'head' filter expects '<owner>:<branch>' — the
+            # owner only, not the full repository name. gh encodes the query
+            # parameters safely.
+            if ! pr_json="$(gh api "repos/${REPOSITORY}/pulls" \
+                -f state=open -f head="${owner}:${branch}" --jq '.[0] // empty')"; then
+              echo "::error::PR lookup for ${owner}:${branch} failed (GET /repos/${REPOSITORY}/pulls?head=${owner}:${branch}&state=open); no remediation decision can be made from a failed API request." >&2
+              return 2
+            fi
             [ -n "${pr_json}" ] || return 1
-            jq -e --arg author "${AUTOMATION_PR_AUTHOR}" --arg base "${APPROVED_BASE_BRANCH}" \
-              '.user.login == $author and .base.ref == $base
-               and .head.repo.full_name == $repository
-               and (.head.ref | test("^ai/issue-[0-9]+$"))' \
-              --arg repository "${REPOSITORY}" <<<"${pr_json}" >/dev/null || return 1
+            if ! jq -e --arg author "${AUTOMATION_PR_AUTHOR}" --arg base "${APPROVED_BASE_BRANCH}" \
+                --arg repository "${REPOSITORY}" \
+                '.user.login == $author and .base.ref == $base
+                 and .head.repo.full_name == $repository
+                 and (.head.ref | test("^ai/issue-[0-9]+$"))' \
+                <<<"${pr_json}" >/dev/null; then
+              echo "::notice::PR on ${branch} is not an authorised AI pull request (author, base, fork or branch mismatch); nothing to do." >&2
+              return 1
+            fi
             printf '%s' "${pr_json}"
+          }
+
+          head_of_pr() {
+            local pr_number="$1" head
+            if ! head="$(gh api "repos/${REPOSITORY}/pulls/${pr_number}" --jq '.head.sha')"; then
+              echo "::error::Could not read PR #${pr_number} (GET /repos/${REPOSITORY}/pulls/${pr_number})." >&2
+              exit 1
+            fi
+            printf '%s' "${head}"
+          }
+
+          list_check_runs() {
+            # One TSV row per check run of the head; fails loudly so an API
+            # error can never be mistaken for "no pending" or "no failing"
+            # checks. Job needs 'checks: read' for this endpoint.
+            local sha="$1"
+            gh api --paginate "repos/${REPOSITORY}/commits/${sha}/check-runs?per_page=100" \
+              --jq '.check_runs[] | [.status, (.conclusion // ""), (.name // "")] | @tsv' || {
+              echo "::error::Could not list check runs for ${sha:0:12} (GET /repos/${REPOSITORY}/commits/<sha>/check-runs); the router needs 'checks: read'." >&2
+              return 2
+            }
           }
 
           quiesce_checks() {
@@ -105,13 +146,15 @@ jobs:
             local sha="$1" pr_number="$2" elapsed=0 pending
             while :; do
               local current_head
-              current_head="$(gh api "repos/${REPOSITORY}/pulls/${pr_number}" --jq '.head.sha')"
+              current_head="$(head_of_pr "${pr_number}")"
               [ "${current_head}" = "${sha}" ] || {
                 echo "::notice::PR #${pr_number} head moved during evaluation; dropping stale event."
                 exit 0
               }
-              pending="$(gh api --paginate "repos/${REPOSITORY}/commits/${sha}/check-runs?per_page=100" \
-                --jq '[.check_runs[] | select(.status != "completed")] | length')" || pending=0
+              # Count across pages: one line per pending check run.
+              if ! pending="$(list_check_runs "${sha}" | awk -F'\t' '$1 != "completed"' | wc -l | tr -d '[:space:]')"; then
+                exit 1
+              fi
               [ "${pending}" -eq 0 ] && return 0
               [ "${elapsed}" -lt "${QUIESCE_TIMEOUT_SECONDS}" ] || {
                 # Path-filtered or stuck workflows: proceed with what exists.
@@ -125,38 +168,46 @@ jobs:
 
           dispatch_remediation() {
             local pr_number="$1" event="$2"
-            if [ "${DRY_RUN}" = true ]; then
-              echo "::notice::Dry run: would dispatch ${AI_TASK_WORKFLOW} (task_mode=remediation, pr_number=${pr_number}, remediation_event=${event})."
+            if [ "${DRY_RUN:-}" = true ]; then
+              echo "::notice::Dry run: would dispatch ${AI_TASK_WORKFLOW} (task_mode=remediation, pr_number=${pr_number}, remediation_event=${event}, remediation_run_id=${REMEDIATION_RUN_ID:-none})."
               return 0
             fi
             # REST dispatch instead of 'gh workflow run': the latter probes
             # the local Git repository to resolve the workflow file, and this
             # job deliberately has no checkout (it never runs PR code).
-            jq -n --arg ref "${APPROVED_BASE_BRANCH}" \
-              --arg mode remediation \
-              --arg pr "${pr_number}" \
-              --arg event "${event}" \
-              --arg max "${REMEDIATION_MAX_ATTEMPTS}" \
-              '{ref: $ref, inputs: {task_mode: $mode, pr_number: $pr, remediation_event: $event, remediation_max_attempts: $max, dry_run: "false"}}' |
-              gh api "repos/${REPOSITORY}/actions/workflows/${AI_TASK_WORKFLOW}/dispatches" --input -
-            echo "::notice::Dispatched ${event} remediation for PR #${pr_number}."
+            if ! jq -n --arg ref "${APPROVED_BASE_BRANCH}" \
+                --arg mode remediation \
+                --arg pr "${pr_number}" \
+                --arg event "${event}" \
+                --arg max "${REMEDIATION_MAX_ATTEMPTS}" \
+                --arg run_id "${REMEDIATION_RUN_ID:-}" \
+                '{ref: $ref, inputs: {task_mode: $mode, pr_number: $pr, remediation_event: $event, remediation_max_attempts: $max, remediation_run_id: $run_id, dry_run: "false"}}' |
+                gh api "repos/${REPOSITORY}/actions/workflows/${AI_TASK_WORKFLOW}/dispatches" --input -; then
+              echo "::error::Dispatching ${AI_TASK_WORKFLOW} failed (POST /repos/${REPOSITORY}/actions/workflows/${AI_TASK_WORKFLOW}/dispatches); the router needs 'actions: write'." >&2
+              exit 1
+            fi
+            echo "::notice::Dispatched ${event} remediation for PR #${pr_number} (trigger run ${REMEDIATION_RUN_ID:-n/a})."
           }
 
           if [ "${EVENT_NAME}" = workflow_dispatch ]; then
             PR_NUMBER="${INPUT_PR_NUMBER}"
             [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]] || { echo "::error::pr_number must be numeric"; exit 1; }
-            PR_JSON="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
+            if ! PR_JSON="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"; then
+              echo "::error::Could not read PR #${PR_NUMBER} (GET /repos/${REPOSITORY}/pulls/${PR_NUMBER})." >&2
+              exit 1
+            fi
             HEAD_SHA="$(jq -r '.head.sha' <<<"${PR_JSON}")"
             HEAD_BRANCH="$(jq -r '.head.ref' <<<"${PR_JSON}")"
-            jq -e --arg author "${AUTOMATION_PR_AUTHOR}" --arg base "${APPROVED_BASE_BRANCH}" \
-              '.state == "open" and .user.login == $author and .base.ref == $base
-               and .head.repo.full_name == $repository
-               and (.head.ref | test("^ai/issue-[0-9]+$"))' \
-              --arg repository "${REPOSITORY}" <<<"${PR_JSON}" >/dev/null || {
+            if ! jq -e --arg author "${AUTOMATION_PR_AUTHOR}" --arg base "${APPROVED_BASE_BRANCH}" \
+                --arg repository "${REPOSITORY}" \
+                '.state == "open" and .user.login == $author and .base.ref == $base
+                 and .head.repo.full_name == $repository
+                 and (.head.ref | test("^ai/issue-[0-9]+$"))' \
+                <<<"${PR_JSON}" >/dev/null; then
               echo "::notice::PR #${PR_NUMBER} is not an open AI pull request; nothing to recover."
               exit 0
-            }
-            echo "Recovering AI PR #${PR_NUMBER} from head ${HEAD_SHA:0:12} (router run: ${RUN_URL})."
+            fi
+            echo "::notice::Recovering AI PR #${PR_NUMBER} from head ${HEAD_SHA:0:12} (router run: ${RUN_URL:-})."
           else
             [[ "${TRIGGER_HEAD_BRANCH}" =~ ^ai/issue-[0-9]+$ ]] || {
               echo "::notice::Head branch is not an AI task branch; nothing to do."
@@ -164,10 +215,14 @@ jobs:
             }
             HEAD_BRANCH="${TRIGGER_HEAD_BRANCH}"
             HEAD_SHA="${TRIGGER_HEAD_SHA}"
-            PR_JSON="$(auth_pr_for_branch "${HEAD_BRANCH}")" || {
+            PR_JSON=""
+            RC=0
+            PR_JSON="$(auth_pr_for_branch "${HEAD_BRANCH}")" || RC=$?
+            if [ "${RC}" -ne 0 ]; then
+              [ "${RC}" -eq 1 ] || exit "${RC}"
               echo "::notice::No open authorised AI PR for ${HEAD_BRANCH}; nothing to do."
               exit 0
-            }
+            fi
             PR_NUMBER="$(jq -r '.number' <<<"${PR_JSON}")"
             [ "$(jq -r '.head.sha' <<<"${PR_JSON}")" = "${HEAD_SHA}" ] || {
               echo "::notice::Event head is not the PR head; dropping stale event."
@@ -177,23 +232,30 @@ jobs:
 
           quiesce_checks "${HEAD_SHA}" "${PR_NUMBER}"
 
-          FAILED_CHECKS="$(gh api --paginate "repos/${REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-            --jq '[.check_runs[] | select(.status == "completed")]
-                  | map(select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure" or .conclusion == "action_required"))
-                  | map(.name) | unique')" || FAILED_CHECKS='[]'
-          FAILED_COUNT="$(jq 'length' <<<"${FAILED_CHECKS}")"
+          # Re-verify the head after quiescing: a push that lands between the
+          # last poll and this check must not receive remediation for an old
+          # head. Central revalidates the head authoritatively as well.
+          [ "$(head_of_pr "${PR_NUMBER}")" = "${HEAD_SHA}" ] || {
+            echo "::notice::PR #${PR_NUMBER} head moved after quiesce; dropping stale event."
+            exit 0
+          }
+
+          CHECK_ROWS="$(list_check_runs "${HEAD_SHA}")" || exit 1
+          FAILED_CHECKS="$(awk -F'\t' '$1 == "completed" && ($2 == "failure" || $2 == "timed_out" || $2 == "startup_failure" || $2 == "action_required") {print $3}' <<<"${CHECK_ROWS}" | sort -u)"
+          FAILED_COUNT="$(printf '%s\n' "${FAILED_CHECKS}" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
 
           if [ "${FAILED_COUNT}" -gt 0 ]; then
-            echo "Failing checks on ${HEAD_SHA:0:12}: $(jq -r 'join(", ")' <<<"${FAILED_CHECKS}")"
+            echo "::notice::Failing checks on ${HEAD_SHA:0:12}: $(printf '%s\n' "${FAILED_CHECKS}" | sed '/^$/d' | paste -sd', ' -); dispatching remediation."
             dispatch_remediation "${PR_NUMBER}" checks-failed
             exit 0
           fi
 
-          if [ "${EVENT_NAME}" = workflow_dispatch ] || [ "${TRIGGER_CONCLUSION}" != success ]; then
+          if [ "${EVENT_NAME}" = workflow_dispatch ] || [ "${TRIGGER_CONCLUSION:-}" != success ]; then
             echo "::notice::No failing checks found for ${HEAD_SHA:0:12}; nothing to dispatch."
             exit 0
           fi
 
           # All checks green on an AI PR: let Central close any open
           # remediation episode and post the ready-for-review notification.
+          echo "::notice::All checks green on ${HEAD_SHA:0:12}; closing any open remediation episode."
           dispatch_remediation "${PR_NUMBER}" checks-passed

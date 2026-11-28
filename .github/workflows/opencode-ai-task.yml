@@ -1,7 +1,7 @@
 name: OpenCode AI task
 
 # Immutable pin to the reviewed Central AI remediation and plain-comment
-# feedback capability (central-ai-workflow PR #10). Update the SHA only after
+# feedback capability (central-ai-workflow d18a4bb). Update the SHA only after
 # that implementation has been reviewed and merged; see docs/ai-pr-previews.md.
 
 on:
@@ -55,12 +55,15 @@ on:
 # permit a called workflow to elevate beyond its caller. actions: write is
 # required: the Central notify job dispatches bounded remediation retries
 # through this workflow, and a called job may never request more than its
-# caller grants (write also covers the failed-check log reads).
+# caller grants (write also covers the failed-check log reads). checks: read
+# is required for failing-check verification through the Checks API, which
+# is a separate GITHUB_TOKEN scope.
 permissions:
   contents: write
   issues: write
   pull-requests: write
   actions: write
+  checks: read
 
 jobs:
   ai-task:
@@ -71,7 +74,9 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'issues' && github.event.label.name == 'ai-task') ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request)
-    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@9bb180501496d3e0b59a201ae644b6862cc7e079
+    # Immutable pin to the reviewed Central AI remediation and plain-comment
+    # feedback capability (central-ai-workflow d18a4bb).
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@d18a4bb4e04303190dd26cbf8ec577ff18e768cd
     with:
       task_mode: ${{ github.event_name == 'issue_comment' && 'revision' || inputs.task_mode || 'implementation' }}
       issue_number: ${{ format('{0}', github.event_name == 'issues' && github.event.issue.number || inputs.issue_number) }}

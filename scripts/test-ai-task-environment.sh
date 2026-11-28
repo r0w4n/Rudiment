@@ -24,6 +24,9 @@ grep -q 'remediation_event:' "$caller"
 grep -q 'remediation_max_attempts:' "$caller"
 grep -q 'caller_workflow: opencode-ai-task\.yml' "$caller"
 grep -Eq 'actions: write' "$caller"
+# Failing-check verification goes through the Checks API ('checks: read' is a
+# separate GITHUB_TOKEN scope; a called workflow can never elevate).
+grep -Eq 'checks: read' "$caller"
 grep -q 'automation_pr_author: central-ai-publisher\[bot\]' "$caller"
 grep -q 'approved_base_branch: main' "$caller"
 grep -q 'APP_ID: \${{ secrets.APP_ID }}' "$caller"
@@ -37,14 +40,28 @@ for workflow in 'Quality assurance' 'Performance regression checks' 'CodeQL stat
   grep -qF -- "- $workflow" "$router"
 done
 grep -q 'types: \[completed\]' "$router"
+# timed_out and startup_failure are actionable conclusions too; per-check
+# conclusions are filtered in the evaluate script.
+grep -q "conclusion == 'timed_out'" "$router"
+grep -q "conclusion == 'startup_failure'" "$router"
 grep -qF 'AUTOMATION_PR_AUTHOR: central-ai-publisher[bot]' "$router"
+# The pulls-list 'head' filter expects '<owner>:<branch>' (owner only), and
+# gh encodes the query parameters.
+grep -qF '${REPOSITORY%%/*}' "$router"
+grep -qF 'head="${owner}:${branch}"' "$router"
 grep -qF 'task_mode: $mode' "$router"
 grep -qF 'remediation_event: $event' "$router"
+grep -qF 'remediation_run_id: $run_id' "$router"
 grep -qF 'actions/workflows/${AI_TASK_WORKFLOW}/dispatches' "$router"
 grep -qF 'remediation_event' "$router"
+grep -Eq 'checks: read' "$router"
 # The router never runs PR code, pushes branches, or merges.
 ! grep -Eq 'git push|gh pr merge|gh pr (review|checkout)' "$router"
 ! grep -Eq 'runs-on.*\$\{|uses: [^.]' "$router"
+
+# Behavioural router tests run the extracted evaluate script against
+# realistic GitHub event payloads and API responses.
+bash "$root/scripts/test-ai-ci-remediation-router.sh"
 
 grep -q "save-cache: 'false'" "$ai_setup"
 grep -q 'uses: \./\.github/actions/setup-rudiment' "$ai_setup"
