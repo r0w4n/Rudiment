@@ -3081,6 +3081,50 @@ test('bar retries stay on tempo and pause/resume preserves position without scor
   expect((await diagnostics()).scheduledVoices).toBe(0);
 });
 
+test('the loop indicator counts passes through a repeated two-bar selection', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/');
+  await setTempo(page, '240');
+  await page.locator('.score-note[data-score-bar="0"]').first().click();
+  await page.locator('.score-note[data-score-bar="1"]').first().click();
+  await expect(page.locator('.score-bar-highlight.selected')).toHaveCount(2);
+  const loopProgress = page.locator('#loop-progress');
+  const barLabel = page.locator('#bar-selection-current');
+  await page.locator('.loop-control').selectOption('4');
+  // A fresh session with four configured repetitions starts at 1 / 4 while
+  // the bar readout keeps its own bars convention.
+  await expect(loopProgress).toHaveText('LOOP 1 / 4');
+  await expect(barLabel).toHaveText('BAR 1 / 4');
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect(page.getByRole('button', { name: /Pause/ })).toBeVisible();
+  await expect(loopProgress).toHaveText('LOOP 1 / 4');
+  // The readout advances at the loop boundary, not on bar transitions: wait
+  // for the second pass, then pause early inside it (beats 8-16 are pass 2).
+  await expect(loopProgress).toHaveText('LOOP 2 / 4', { timeout: 15_000 });
+  await page.waitForFunction(() => {
+    const beat = (window as any).rudiment.audioDiagnostics().currentBeat;
+    return typeof beat === 'number' && beat >= 8.5 && beat < 14;
+  }, null, { timeout: 15_000 });
+  await page.getByRole('button', { name: /Pause/ }).click();
+  await expect.poll(() => page.evaluate(() => !(window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  // The iteration is preserved while paused and across resume, while the bar
+  // readout independently counts bars inside the pass.
+  await expect(loopProgress).toHaveText('LOOP 2 / 4');
+  await expect(barLabel).toHaveText(/BAR [12] \/ 4/);
+  await page.waitForTimeout(1_200);
+  await expect(loopProgress).toHaveText('LOOP 2 / 4');
+  await page.getByRole('button', { name: /Resume/ }).click();
+  await expect(loopProgress).toHaveText('LOOP 2 / 4', { timeout: 7_000 });
+  // The final configured pass reads 4 / 4.
+  await expect(loopProgress).toHaveText('LOOP 4 / 4', { timeout: 15_000 });
+  await expect.poll(() => page.evaluate(() => !(window as any).rudiment.audioDiagnostics().activeRun)).toBe(true);
+  // Restart clears the run and a fresh session starts again at 1 / 4.
+  await page.getByRole('button', { name: /Restart/ }).click();
+  await expect(loopProgress).toHaveText('LOOP 1 / 4');
+  await page.getByRole('button', { name: /Start practice/ }).click();
+  await expect(loopProgress).toHaveText('LOOP 1 / 4');
+});
+
 test('top toolbar fits and preserves control order at mobile and desktop widths', async ({ page }) => {
   const widths=[320,360,375,390,430,520,1440];
   await page.goto('/');

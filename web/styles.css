@@ -466,14 +466,14 @@ html,body{height:100%;overflow:hidden}.app{height:100dvh;min-height:0;overflow:h
 .notation-dark .score-measure-number.selected-bar-number{fill:var(--teal)!important}
 .notation-dark .score-bar-highlight.selected{fill:var(--teal);fill-opacity:.13}
 .notation-dark .score-bar-highlight:focus-visible{stroke:var(--teal)}
-.notation-dark .score-file-info summary,.notation-dark .metronome-context>.visual-metronome,.notation-dark .visual-metronome-label,.notation-dark .bar-selection-trigger,.notation-dark .loop-control{color:var(--muted)}
+.notation-dark .score-file-info summary,.notation-dark .metronome-context>.visual-metronome,.notation-dark .visual-metronome-label,.notation-dark .bar-selection-trigger,.notation-dark .loop-progress,.notation-dark .loop-control{color:var(--muted)}
 .notation-dark .timeline{background:var(--line)}
 .notation-dark .timeline i{background:var(--teal)}
 .notation-dark .bar-selection-trigger:focus-visible,.notation-dark .loop-control:focus-visible,.notation-dark .visual-metronome:focus-visible{outline-color:var(--teal)}
 .score-card.highway-active{background:var(--panel);border-color:var(--line);color:var(--ink);box-shadow:none}
 .highway-active .score-meta,.highway-active .position-row{border-color:var(--line)}
 .highway-active .notation{visibility:hidden;pointer-events:none}
-.highway-active .score-file-info summary,.highway-active .metronome-context>.visual-metronome,.highway-active .visual-metronome-label,.highway-active .bar-selection-trigger,.highway-active .loop-control{color:var(--muted)}
+.highway-active .score-file-info summary,.highway-active .metronome-context>.visual-metronome,.highway-active .visual-metronome-label,.highway-active .bar-selection-trigger,.highway-active .loop-progress,.highway-active .loop-control{color:var(--muted)}
 .highway-active .timeline{background:var(--line)}
 .highway-active .timeline i{background:var(--teal)}
 .highway-active .bar-selection-trigger:focus-visible,.highway-active .loop-control:focus-visible,.highway-active .visual-metronome:focus-visible{outline-color:var(--teal)}
