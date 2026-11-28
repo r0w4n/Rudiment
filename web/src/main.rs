@@ -1362,7 +1362,11 @@ fn live_feedback_from_scoring(
         .collect()
 }
 
-fn merge_live_feedback(current: &mut Vec<LiveJudgement>, update: Vec<LiveJudgement>) {
+/// Merge a scoring update into the authoritative projection in place and
+/// report whether the projection changed. The update is keyed: expected
+/// judgements by (expected id, iteration) and unmatched strikes by event id,
+/// so a hit only rewrites the entries it produced.
+fn merge_live_feedback(current: &mut Vec<LiveJudgement>, update: Vec<LiveJudgement>) -> bool {
     // Every update carries the complete current provisional projection. Keep
     // only its final value for each key, then replace matching confirmed
     // values in one pass. Repeated retain calls made a burst of provisional
@@ -1383,15 +1387,23 @@ fn merge_live_feedback(current: &mut Vec<LiveJudgement>, update: Vec<LiveJudgeme
         })
         .collect::<Vec<_>>();
     replacement.reverse();
+    // Content changes whenever entries are replaced, removed or appended.
+    // Track that while the keyed sets are already built instead of
+    // re-comparing whole projections afterwards.
+    let mut changed = !replacement.is_empty();
     current.retain(|judgement| {
-        judgement.confirmed
+        let keep = judgement.confirmed
             && if let Some(expected_id) = &judgement.expected_id {
                 !expected_keys.contains(&(expected_id.clone(), judgement.iteration))
             } else if let Some(event_id) = &judgement.event_id {
                 !event_keys.contains(event_id)
             } else {
                 true
-            }
+            };
+        if !keep {
+            changed = true;
+        }
+        keep
     });
     current.extend(replacement);
     // The scorer retains every confirmed invalid hit for the authoritative
@@ -1403,6 +1415,7 @@ fn merge_live_feedback(current: &mut Vec<LiveJudgement>, update: Vec<LiveJudgeme
         .filter(|judgement| judgement.expected_id.is_none())
         .count();
     let mut discard = unmatched.saturating_sub(LIVE_UNMATCHED_FEEDBACK_LIMIT);
+    changed |= discard > 0;
     current.retain(|judgement| {
         if judgement.expected_id.is_none() && discard > 0 {
             discard -= 1;
@@ -1411,6 +1424,88 @@ fn merge_live_feedback(current: &mut Vec<LiveJudgement>, update: Vec<LiveJudgeme
             true
         }
     });
+    changed
+}
+
+/// Keyed, revisioned presentation state for the live feedback projection.
+///
+/// The authoritative projection stays in the `live` signal and is merged in
+/// place: a scored hit never clones the current-loop vector, never re-compares
+/// whole projections and never serializes it. Every mutation marks the state
+/// dirty, and the serialized notation projection is produced at most once per
+/// visual commit - by the transport frame's feedback turn or by an explicit
+/// flush on pause - instead of once per hit. Confirmation ticks and hits
+/// therefore share the same single commit in a frame.
+struct FeedbackPresenter {
+    live: RwSignal<Vec<LiveJudgement>>,
+    /// Monotonic counter bumped whenever the projection content changes.
+    revision: Cell<u64>,
+    /// Whether the projection changed since the last visual commit.
+    dirty: Cell<bool>,
+}
+
+impl FeedbackPresenter {
+    fn new(live: RwSignal<Vec<LiveJudgement>>) -> Self {
+        Self {
+            live,
+            revision: Cell::new(0),
+            dirty: true.into(),
+        }
+    }
+
+    /// Replace the projection wholesale (loop, attempt and run resets keep
+    /// the existing clear semantics of the previous behaviour).
+    fn replace(&self, entries: Vec<LiveJudgement>) {
+        self.live.set(entries);
+        self.bump();
+    }
+
+    /// Merge one scoring update in place. `post` applies the caller's
+    /// loop-iteration filter after the keyed merge and reports whether it
+    /// removed anything. No presentation work happens here.
+    fn merge(
+        &self,
+        update: Vec<LiveJudgement>,
+        post: impl FnOnce(&mut Vec<LiveJudgement>) -> bool,
+    ) -> bool {
+        if update.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        self.live.update(|visible| {
+            changed = merge_live_feedback(visible, update);
+            changed |= post(visible);
+        });
+        if changed {
+            self.bump();
+        }
+        changed
+    }
+
+    /// Serialize the projection once per visual commit, or report that
+    /// nothing changed since the previous one. Unchanged feedback is neither
+    /// cloned nor serialized again, whatever the hit rate.
+    fn take_commit(&self) -> Option<JsValue> {
+        if !self.dirty.get() {
+            return None;
+        }
+        self.dirty.set(false);
+        let projection = self.live.read_untracked();
+        Some(serde_wasm_bindgen::to_value(&*projection).unwrap_or(JsValue::NULL))
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.set(true);
+    }
+
+    fn mark_clean(&self) {
+        self.dirty.set(false);
+    }
+
+    fn bump(&self) {
+        self.revision.set(self.revision.get() + 1);
+        self.dirty.set(true);
+    }
 }
 
 fn combined_summaries(summaries: &[SessionSummary]) -> SessionSummary {
@@ -2003,13 +2098,14 @@ fn App() -> impl IntoView {
     let active_segment_start = RwSignal::new(0.0);
     let visible_loop_index = RwSignal::new(0usize);
     let observed = RwSignal::new(Vec::<ObservedHit>::new());
-    let feedback_dirty = RwSignal::new(true);
     let accepted_observed = RwSignal::new(Vec::<ObservedHit>::new());
     let practice_origin_ms = RwSignal::new(0.0);
     let bar_attempt = RwSignal::new(1usize);
     let failed_repeat_attempts = RwSignal::new(Vec::<(usize, Vec<LiveJudgement>)>::new());
     let repeat_attempt_summaries = RwSignal::new(Vec::<SessionSummary>::new());
     let live = RwSignal::new(Vec::<LiveJudgement>::new());
+    // Keyed, revisioned presentation state over `live`: see FeedbackPresenter.
+    let presenter = Rc::new(FeedbackPresenter::new(live));
     let live_matched_expected = RwSignal::new(HashSet::<String>::new());
     let input_mode = RwSignal::new(InputSource::Demo);
     let result = RwSignal::new(None::<SessionRecord>);
@@ -2358,6 +2454,7 @@ fn App() -> impl IntoView {
         let done_holder = done_holder.clone();
         let launch_holder = launch_holder.clone();
         let scoring_for_launch = scoring_engine.clone();
+        let presenter_frame = presenter.clone();
         Rc::new(move |offset, count_beats, immediate| {
             phase.set(if count_beats > 0.0 {
                 "count_in".into()
@@ -2448,6 +2545,10 @@ fn App() -> impl IntoView {
             let frame_sequence = sequence.clone();
             let last_scoring_revision = Cell::new(u64::MAX);
             let timeline_last_ms = Cell::new(f64::NEG_INFINITY);
+            // One presenter clone per run: the frame and done closures own it
+            // for the lifetime of the run.
+            let presenter_frame = presenter_frame.clone();
+            let presenter_done = presenter_frame.clone();
             let frame = Closure::wrap(Box::new(move |beat: f64, now: f64, start: f64| {
                 let score_tempo_map = runtime_tempo_map.get_untracked();
                 let scoring_bpm = score_tempo_map
@@ -2515,8 +2616,8 @@ fn App() -> impl IntoView {
                         // The scorer continues across iterations; only reset
                         // the renderer projection so a previous loop cannot
                         // leave stale notation colours or unbounded markers.
-                        live.set(vec![]);
-                        feedback_dirty.set(false);
+                        presenter_frame.replace(vec![]);
+                        presenter_frame.mark_clean();
                         clear_score_feedback_preserve_viewport();
                     }
                 }
@@ -2555,18 +2656,21 @@ fn App() -> impl IntoView {
                                     judgement.iteration.is_none_or(|value| value >= iteration)
                                 });
                             }
-                            let mut visible = live.get_untracked();
-                            merge_live_feedback(&mut visible, update);
-                            if !repeat_enabled {
-                                let iteration = visible_loop_index.get_untracked();
-                                visible.retain(|judgement| {
-                                    judgement.iteration.is_none_or(|value| value == iteration)
-                                });
-                            }
-                            if live.get_untracked() != visible {
-                                live.set(visible);
-                                feedback_dirty.set(true);
-                            }
+                            // Keyed merge into the authoritative projection;
+                            // the serialized commit below is the only
+                            // presentation work for this frame.
+                            presenter_frame.merge(update, |visible| {
+                                if !repeat_enabled {
+                                    let iteration = visible_loop_index.get_untracked();
+                                    let before = visible.len();
+                                    visible.retain(|judgement| {
+                                        judgement.iteration.is_none_or(|value| value == iteration)
+                                    });
+                                    before != visible.len()
+                                } else {
+                                    false
+                                }
+                            });
                         }
                         Ok(None) => {}
                         Err(error) => {
@@ -2580,11 +2684,13 @@ fn App() -> impl IntoView {
                         }
                     }
                 }
-                if beat >= offset - 0.000_001 && feedback_dirty.get_untracked() {
-                    feedback_dirty.set(false);
-                    let visible = live.get_untracked();
-                    let judgement_values =
-                        serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
+                // One visual commit per frame: confirmation ticks and any
+                // hits scored since the previous frame share this single
+                // serialization instead of cloning and serializing the whole
+                // projection per hit.
+                if beat >= offset - 0.000_001
+                    && let Some(judgement_values) = presenter_frame.take_commit()
+                {
                     // Feedback only: the deferred scoring tick runs after the
                     // frame's commit, so it must not reposition the playhead
                     // (the transport frame owns position and scrolling, and a
@@ -2622,9 +2728,8 @@ fn App() -> impl IntoView {
                         }
                     };
                     observed.set(vec![]);
-                    live.set(vec![]);
+                    presenter_done.replace(vec![]);
                     live_matched_expected.set(HashSet::new());
-                    feedback_dirty.set(true);
                     clear_score_feedback_preserve_viewport();
                     scoring_for_done.borrow_mut().take();
                     let advance = value.borrow().as_ref().cloned();
@@ -2636,10 +2741,9 @@ fn App() -> impl IntoView {
                 if !repeat_enabled {
                     if app_mode.get_untracked() == AppMode::Practice && loops.get_untracked() == 0 {
                         observed.set(vec![]);
-                        live.set(vec![]);
+                        presenter_done.replace(vec![]);
                         live_matched_expected.set(HashSet::new());
                         scoring_for_done.borrow_mut().take();
-                        feedback_dirty.set(true);
                         clear_score_feedback_preserve_viewport();
                         let next = repeat_launch.borrow().as_ref().cloned();
                         if let Some(launch) = next {
@@ -2685,7 +2789,7 @@ fn App() -> impl IntoView {
                         .collect::<Vec<_>>();
                     accepted_observed.update(|items| items.extend(accepted));
                     observed.set(vec![]);
-                    feedback_dirty.set(true);
+                    presenter_done.mark_dirty();
                     live_matched_expected.set(HashSet::new());
                     scoring_for_done.borrow_mut().take();
                     bar_attempt.set(1);
@@ -2694,7 +2798,7 @@ fn App() -> impl IntoView {
                         run_start_ms.set(canonical_origin);
                         done_finish();
                     } else {
-                        live.set(vec![]);
+                        presenter_done.replace(vec![]);
                         clear_score_feedback_preserve_viewport();
                         let next = repeat_launch.borrow().as_ref().cloned();
                         if let Some(launch) = next {
@@ -2703,8 +2807,7 @@ fn App() -> impl IntoView {
                     }
                 } else {
                     observed.set(vec![]);
-                    feedback_dirty.set(true);
-                    live.set(vec![]);
+                    presenter_done.replace(vec![]);
                     live_matched_expected.set(HashSet::new());
                     scoring_for_done.borrow_mut().take();
                     bar_attempt.update(|attempt| *attempt += 1);
@@ -2737,6 +2840,7 @@ fn App() -> impl IntoView {
     };
     *launch_holder.borrow_mut() = Some(launch_run.clone());
 
+    let presenter_for_pause = presenter.clone();
     let pause_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
         let current_phase = phase.get_untracked();
@@ -2752,6 +2856,12 @@ fn App() -> impl IntoView {
             paused_run_start_ms.set(Some(run_start_ms.get_untracked()));
         }
         stop_audio();
+        // A hit after the previous visual commit is still unserialized in the
+        // keyed presentation state; flush it here so pausing immediately
+        // after a hit cannot strand feedback.
+        if let Some(judgement_values) = presenter_for_pause.take_commit() {
+            queue_score_feedback(judgement_values);
+        }
         flush_score_feedback();
         phase.set("paused".into());
     });
@@ -2779,13 +2889,13 @@ fn App() -> impl IntoView {
     };
 
     let scoring_for_reset = scoring_engine.clone();
+    let presenter_for_reset = presenter.clone();
     let reset_run: Rc<dyn Fn()> = Rc::new(move || {
         set_practice_active(false);
         selection_changed.set(false);
         stop_audio();
         result_modal_open.set(false);
         observed.set(vec![]);
-        feedback_dirty.set(true);
         accepted_observed.set(vec![]);
         practice_origin_ms.set(0.0);
         paused_run_start_ms.set(None);
@@ -2793,7 +2903,7 @@ fn App() -> impl IntoView {
         failed_repeat_attempts.set(vec![]);
         repeat_attempt_summaries.set(vec![]);
         scoring_for_reset.borrow_mut().take();
-        live.set(vec![]);
+        presenter_for_reset.replace(vec![]);
         live_matched_expected.set(HashSet::new());
         result.set(None);
         progress.set(-1.0);
@@ -2811,6 +2921,7 @@ fn App() -> impl IntoView {
     });
 
     let scoring_for_navigation = scoring_engine.clone();
+    let presenter_for_navigation = presenter.clone();
     let stop_for_navigation: Rc<dyn Fn()> = Rc::new(move || {
         if matches!(
             phase.get_untracked().as_str(),
@@ -2820,7 +2931,6 @@ fn App() -> impl IntoView {
             set_practice_active(false);
             stop_audio();
             observed.set(vec![]);
-            feedback_dirty.set(true);
             accepted_observed.set(vec![]);
             practice_origin_ms.set(0.0);
             run_start_ms.set(0.0);
@@ -2829,7 +2939,7 @@ fn App() -> impl IntoView {
             failed_repeat_attempts.set(vec![]);
             repeat_attempt_summaries.set(vec![]);
             scoring_for_navigation.borrow_mut().take();
-            live.set(vec![]);
+            presenter_for_navigation.replace(vec![]);
             live_matched_expected.set(HashSet::new());
             result.set(None);
             progress.set(-1.0);
@@ -2920,6 +3030,7 @@ fn App() -> impl IntoView {
     let start_new_run: Rc<dyn Fn(u8)> = {
         let launch = launch_run.clone();
         let scoring_for_start = scoring_engine.clone();
+        let presenter_for_start = presenter.clone();
         Rc::new(move |count_bars| {
             result_modal_open.set(false);
             selection_changed.set(false);
@@ -2986,7 +3097,6 @@ fn App() -> impl IntoView {
                 configured_loops,
             )));
             observed.set(vec![]);
-            feedback_dirty.set(true);
             accepted_observed.set(vec![]);
             practice_origin_ms.set(0.0);
             run_start_ms.set(0.0);
@@ -2995,7 +3105,7 @@ fn App() -> impl IntoView {
             failed_repeat_attempts.set(vec![]);
             repeat_attempt_summaries.set(vec![]);
             scoring_for_start.borrow_mut().take();
-            live.set(vec![]);
+            presenter_for_start.replace(vec![]);
             live_matched_expected.set(HashSet::new());
             result.set(None);
             progress.set(-1.0);
@@ -3073,6 +3183,7 @@ fn App() -> impl IntoView {
     let save_for_hit = save_current_settings.clone();
     let start_for_hit = start_new_run.clone();
     let scoring_for_hit = scoring_engine.clone();
+    let presenter_hit = presenter.clone();
     let hit_input: HitInput = Rc::new(
         move |timestamp, instrument, articulation, velocity, source, raw_note, raw_channel| {
             if result_modal_open.get_untracked() {
@@ -3204,23 +3315,23 @@ fn App() -> impl IntoView {
                             judgement.iteration.is_none_or(|value| value >= iteration)
                         });
                     }
-                    let mut visible = live.get_untracked();
-                    merge_live_feedback(&mut visible, update);
-                    if !repeat_bar_until_good.get_untracked() {
-                        let iteration = visible_loop_index.get_untracked();
-                        visible.retain(|judgement| {
-                            judgement.iteration.is_none_or(|value| value == iteration)
-                        });
-                    }
-                    let judgement_values =
-                        serde_wasm_bindgen::to_value(&visible).unwrap_or(JsValue::NULL);
-                    live.set(visible);
-                    // Keep the authoritative projection in Rust in this input
-                    // turn, but coalesce DOM work at the browser's next paint.
-                    // This queue is independent of Tone's transport frame, so
-                    // pausing immediately after a hit cannot strand feedback.
-                    queue_score_feedback(judgement_values);
-                    feedback_dirty.set(false);
+                    // Keyed merge into the authoritative projection. The hit
+                    // turn performs no presentation work: no projection clone,
+                    // no whole-projection comparison and no serialization.
+                    // Changed entries are serialized once, at the next visual
+                    // commit (transport frame feedback turn or pause flush).
+                    presenter_hit.merge(update, |visible| {
+                        if !repeat_bar_until_good.get_untracked() {
+                            let iteration = visible_loop_index.get_untracked();
+                            let before = visible.len();
+                            visible.retain(|judgement| {
+                                judgement.iteration.is_none_or(|value| value == iteration)
+                            });
+                            before != visible.len()
+                        } else {
+                            false
+                        }
+                    });
                 }
                 Err(error) => {
                     set_practice_active(false);
@@ -3235,6 +3346,7 @@ fn App() -> impl IntoView {
     );
 
     let scoring_for_file = scoring_engine.clone();
+    let presenter_for_file = presenter.clone();
     let file_callback: Rc<MidiFileCallback> = Rc::new(Closure::wrap(Box::new(
         move |bytes: Uint8Array, name: String, error: String, save_to_library: JsValue| {
             if library_open.get_untracked() {
@@ -3256,7 +3368,7 @@ fn App() -> impl IntoView {
                 failed_repeat_attempts.set(vec![]);
                 repeat_attempt_summaries.set(vec![]);
                 scoring_for_file.borrow_mut().take();
-                live.set(vec![]);
+                presenter_for_file.replace(vec![]);
                 live_matched_expected.set(HashSet::new());
                 progress.set(-1.0);
                 timeline_beat.set(-1.0);
@@ -3898,6 +4010,7 @@ fn App() -> impl IntoView {
         );
     }
     outside_context_popup.forget();
+    let presenter_for_keys = presenter.clone();
     let keyboard = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
         // A held computer key generates synthetic keydown events at the OS
         // repeat interval. Those are not additional physical drum strikes and
@@ -4043,7 +4156,7 @@ fn App() -> impl IntoView {
                 match phase.get_untracked().as_str() {
                     "idle" | "complete" => {
                         observed.set(vec![]);
-                        live.set(vec![]);
+                        presenter_for_keys.replace(vec![]);
                         result.set(None);
                         key_start_new_run(count_in.get_untracked());
                     }
@@ -4139,6 +4252,7 @@ fn App() -> impl IntoView {
     let save_on_time = save_current_settings.clone();
     let save_excellent = save_current_settings.clone();
     let save_auto_statistics = save_current_settings.clone();
+    let presenter_view = presenter.clone();
     view! {
       <main class="app">
         <header class="topbar">
@@ -4247,14 +4361,14 @@ fn App() -> impl IntoView {
                   }.into_any()}).unwrap_or_else(||().into_any())}
                 </section>
                 </div>
-                <footer class="summary-footer"><p>{move || displayed_result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>{move || if historical_result.get().is_some(){"Back to history"}else{"Back to score"}}</button><button class=move || if historical_result.get().is_some(){"primary hidden"}else{"primary"} on:click={let start=start_new_run.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);live.set(vec![]);result.set(None);progress.set(-1.0);timeline_beat.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
+                <footer class="summary-footer"><p>{move || displayed_result.get().map(|session|format!("{} extra · {} wrong drum{}",session.summary.extras,session.summary.wrong_instrument,if session.summary.wrong_instrument==1{""}else{"s"})).unwrap_or_default()}</p><div class="result-actions"><button on:click=move |_|dismiss_result(result_modal_open,result_dismiss_after_ms,historical_result,stats_open)>{move || if historical_result.get().is_some(){"Back to history"}else{"Back to score"}}</button><button class=move || if historical_result.get().is_some(){"primary hidden"}else{"primary"} on:click={let start=start_new_run.clone();let presenter=presenter_view.clone();move |_|{result_modal_open.set(false);result_dismiss_after_ms.set(f64::INFINITY);observed.set(vec![]);presenter.replace(vec![]);result.set(None);progress.set(-1.0);timeline_beat.set(-1.0);start(count_in.get_untracked());}}>"Perform again"</button></div></footer>
                 </section>
               </div>
             </section>
             <section class="practice-controls">
               <div class="transport">
                 <button class="restart-button" on:click={let reset=reset_run.clone();move |_|reset()}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true"><RotateCcw size=24/></span><span>"Restart"</span></span><small>"Clear current run"</small></button>
-                <button class="primary start-button" aria-label=move || match phase.get().as_str(){"running"|"count_in"|"starting"=>String::from("Pause"),"paused" if selection_changed.get()=>String::from("Start selected bars"),"paused"=>String::from("Resume"),_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{String::from("Start performance Hit your drum or press J to start Start practice")}else{String::from("Start practice Hit your drum or press J to start Start performance")}}} on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"|"starting"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);live.set(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"|"starting"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"|"starting"=>"Pause","paused" if selection_changed.get()=>"Start selected bars","paused"=>"Resume",_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{"Start performance "}else{"Start practice "}}}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
+                <button class="primary start-button" aria-label=move || match phase.get().as_str(){"running"|"count_in"|"starting"=>String::from("Pause"),"paused" if selection_changed.get()=>String::from("Start selected bars"),"paused"=>String::from("Resume"),_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{String::from("Start performance Hit your drum or press J to start Start practice")}else{String::from("Start practice Hit your drum or press J to start Start performance")}}} on:click={let start=start_new_run.clone();let pause=button_pause.clone();let resume=button_resume.clone();let presenter=presenter_view.clone();move |_|match phase.get_untracked().as_str(){"running"|"count_in"|"starting"=>pause(),"paused"=>resume(),_=>{observed.set(vec![]);presenter.replace(vec![]);result.set(None);input_mode.set(if selected_midi.get_untracked().is_some(){InputSource::Midi}else{InputSource::Demo});start(count_in.get_untracked());}}}><span class="transport-action-label"><span class="transport-icon" aria-hidden="true">{move || if matches!(phase.get().as_str(),"running"|"count_in"|"starting"){view!{<Pause size=21/>}.into_any()}else{view!{<Play size=21 fill="currentColor"/>}.into_any()}}</span><span>{move || match phase.get().as_str(){"running"|"count_in"|"starting"=>"Pause","paused" if selection_changed.get()=>"Start selected bars","paused"=>"Resume",_=>{let sequence=bar_sequence.get();if sequence.bars.len()==sequence.total_bars&&loops.get()==1{"Start performance "}else{"Start practice "}}}}</span></span><small class=move || if phase.get()=="idle"{"start-instruction"}else{"start-instruction hidden"}>"Hit your drum or press J to start"</small></button>
                 <aside class="timing-key" aria-label="Timing feedback key">
                   <span class="perfect"><i aria-hidden="true"></i>"Perfect"</span>
                   <span class="good"><i aria-hidden="true"></i>"Good"</span>
@@ -5645,6 +5759,118 @@ mod tests {
         assert_eq!(visible[0].judgement, Judgement::Late);
         assert_eq!(visible[1].event_id.as_deref(), Some("extra"));
         assert_eq!(visible[1].judgement, Judgement::Extra);
+    }
+
+    #[test]
+    fn merge_live_feedback_reports_whether_the_projection_changed() {
+        let judgement = |event_id: &str, confirmed: bool| LiveJudgement {
+            expected_id: Some("expected".into()),
+            iteration: Some(0),
+            expected_beat: Some(0.0),
+            actual_beat: Some(0.0),
+            instrument: Instrument::Snare,
+            judgement: Judgement::Perfect,
+            error_ms: 0.0,
+            excellent: true,
+            note_score: 100.0,
+            event_id: Some(event_id.into()),
+            confirmed,
+        };
+
+        let mut projection = vec![judgement("first", true)];
+        // An empty update - a scoring turn that produced nothing - neither
+        // clones nor marks the projection, so no visual commit is scheduled.
+        assert!(!merge_live_feedback(&mut projection, vec![]));
+        assert_eq!(projection.len(), 1);
+        // A provisional correction replaces the keyed entry.
+        assert!(merge_live_feedback(
+            &mut projection,
+            vec![judgement("second", false)]
+        ));
+        assert_eq!(projection[0].event_id.as_deref(), Some("second"));
+        // A confirmation of the same entry is a change.
+        assert!(merge_live_feedback(
+            &mut projection,
+            vec![judgement("second", true)]
+        ));
+        assert_eq!(projection.len(), 1);
+        assert!(projection[0].confirmed);
+        // Dropping the last unmatched entry through the visual bound is also
+        // a change, even though nothing was appended.
+        let overflow = (0..LIVE_UNMATCHED_FEEDBACK_LIMIT + 1)
+            .map(|index| LiveJudgement {
+                expected_id: None,
+                iteration: None,
+                expected_beat: None,
+                actual_beat: Some(index as f64),
+                instrument: Instrument::Snare,
+                judgement: Judgement::Extra,
+                error_ms: 0.0,
+                excellent: false,
+                note_score: 0.0,
+                event_id: Some(format!("overflow-{index}")),
+                confirmed: true,
+            })
+            .collect();
+        assert!(merge_live_feedback(&mut projection, overflow));
+    }
+
+    /// Quantify the projection cost that each visual commit serializes at
+    /// early, middle and late positions of a long iteration. This is a
+    /// labelled proxy: serde_json bytes here stand in for the
+    /// serde_wasm_bindgen payload the browser receives. Per hit the presenter
+    /// performs none of this work - only the commit does.
+    #[test]
+    fn visual_commit_payload_proxy_across_long_iterations() {
+        let unmatched = |index: usize| LiveJudgement {
+            expected_id: None,
+            iteration: None,
+            expected_beat: None,
+            actual_beat: Some(index as f64),
+            instrument: Instrument::Snare,
+            judgement: Judgement::Extra,
+            error_ms: 0.0,
+            excellent: false,
+            note_score: 0.0,
+            event_id: Some(format!("unmatched:{index}")),
+            confirmed: true,
+        };
+        let mut projection = Vec::new();
+        for (position, count) in [("early", 32), ("middle", 128), ("late", 256)] {
+            while projection.len() < count {
+                let index = projection.len();
+                let update = if index % 8 == 0 {
+                    vec![LiveJudgement {
+                        expected_id: Some(format!("expected-{index}")),
+                        iteration: Some(0),
+                        expected_beat: Some(index as f64),
+                        actual_beat: Some(index as f64),
+                        instrument: Instrument::Snare,
+                        judgement: Judgement::Good,
+                        error_ms: 12.0,
+                        excellent: false,
+                        note_score: 90.0,
+                        event_id: Some(format!("expected-{index}:hit")),
+                        confirmed: true,
+                    }]
+                } else {
+                    vec![unmatched(index)]
+                };
+                assert!(merge_live_feedback(&mut projection, update));
+            }
+            let items = projection.len();
+            let bytes = serde_json::to_vec(&projection)
+                .expect("proxy serialization")
+                .len();
+            assert_eq!(items, count, "{position} position item count");
+            // The whole projection is still handed to the notation diff per
+            // commit; entry-level deltas are the coordinated F06/F07 follow-up.
+            assert!(bytes > 0, "{position} position must quantify payload bytes");
+            assert!(
+                bytes < 64 * 1024,
+                "{position} position payload {bytes} bytes"
+            );
+        }
     }
 
     #[test]
