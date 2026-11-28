@@ -46,11 +46,14 @@ The static release is written to `dist/`. `npm run build` and `npm run dev` dete
 Dependency security is checked separately by `.github/workflows/security.yml` on lockfile changes and every Monday. RustSec audits Cargo dependencies and npm audits the JavaScript lockfile; CodeQL scans JavaScript/TypeScript and Rust; Dependabot monitors Cargo, npm and GitHub Actions weekly with grouped updates.
 
 AI-generated pull requests support repeated, authorised review revisions on
-the same branch with `/ai revise <feedback>`. Each successful revision reruns
-Rudiment's existing checks and replaces the isolated PR preview; merging and
-production deployment remain manual. See
-[docs/ai-pr-previews.md](docs/ai-pr-previews.md) for the security model, status
-comments, App configuration, and retry procedure.
+the same branch with `/ai revise <feedback>` — or simply an ordinary
+actionable comment. Failed CI checks on AI pull requests are remediated
+automatically (bounded attempts per failure episode, escalation to a human);
+each successful revision reruns Rudiment's existing checks and replaces the
+isolated PR preview; merging and production deployment remain manual. See
+[docs/ai-pr-previews.md](docs/ai-pr-previews.md) for the security model,
+status comments, App configuration, remediation lifecycle, and retry
+procedure.
 
 ## Architecture
 

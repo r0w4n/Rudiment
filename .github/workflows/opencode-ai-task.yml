@@ -1,6 +1,8 @@
 name: OpenCode AI task
 
-# Immutable pin to the reviewed Central AI revision status fix (PR #8).
+# Immutable pin to the reviewed Central AI remediation and plain-comment
+# feedback capability (central-ai-workflow PR #10). Update the SHA only after
+# that implementation has been reviewed and merged; see docs/ai-pr-previews.md.
 
 on:
   issues:
@@ -10,22 +12,38 @@ on:
   workflow_dispatch:
     inputs:
       task_mode:
-        description: Initial issue implementation or failed revision retry
+        description: Implementation, PR revision, or automatic CI-failure remediation
         required: true
         default: implementation
         type: choice
-        options: [implementation, revision]
+        options: [implementation, revision, remediation]
       issue_number:
         description: Issue number (implementation mode)
         required: false
         type: string
       pr_number:
-        description: Existing PR number (revision retry)
+        description: Existing PR number (revision or remediation mode)
         required: false
         type: string
       comment_id:
-        description: Original /ai revise comment ID (revision retry)
+        description: Feedback comment ID (revision retry)
         required: false
+        type: string
+      remediation_event:
+        description: Remediation trigger outcome
+        required: false
+        default: checks-failed
+        type: choice
+        options: [checks-failed, checks-passed]
+      remediation_max_attempts:
+        description: Maximum remediation attempts per failure episode
+        required: false
+        default: '3'
+        type: string
+      remediation_run_id:
+        description: Router CI run id that triggered remediation (diagnostics only)
+        required: false
+        default: ''
         type: string
       dry_run:
         description: Run authorisation checks only
@@ -34,24 +52,35 @@ on:
         type: boolean
 
 # The reusable workflow narrows these permissions per job. GitHub does not
-# permit a called workflow to elevate beyond its caller.
+# permit a called workflow to elevate beyond its caller. actions: read lets
+# Central verify failing checks and read their job logs in remediation mode.
 permissions:
   contents: write
   issues: write
   pull-requests: write
+  actions: read
 
 jobs:
   ai-task:
+    # The Central workflow classifies every PR comment (explicit /ai revise,
+    # ordinary actionable feedback, bots and noise) and revalidates all
+    # authorisation itself; this caller only routes events.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'issues' && github.event.label.name == 'ai-task') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/ai revise'))
-    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@c67ae2faf349dbddb2bfff0c5e0261d86ecf2756
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+    uses: r0w4n/central-ai-workflow/.github/workflows/opencode-ai-task.yml@9bb180501496d3e0b59a201ae644b6862cc7e079
     with:
       task_mode: ${{ github.event_name == 'issue_comment' && 'revision' || inputs.task_mode || 'implementation' }}
       issue_number: ${{ format('{0}', github.event_name == 'issues' && github.event.issue.number || inputs.issue_number) }}
       pr_number: ${{ format('{0}', github.event_name == 'issue_comment' && github.event.issue.number || inputs.pr_number) }}
       comment_id: ${{ format('{0}', github.event_name == 'issue_comment' && github.event.comment.id || inputs.comment_id) }}
+      remediation_event: ${{ inputs.remediation_event || 'checks-failed' }}
+      remediation_max_attempts: ${{ inputs.remediation_max_attempts || '3' }}
+      remediation_run_id: ${{ inputs.remediation_run_id }}
+      # Lets Central dispatch bounded automatic retries after a failed
+      # remediation attempt.
+      caller_workflow: opencode-ai-task.yml
       automation_pr_author: central-ai-publisher[bot]
       approved_base_branch: main
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}

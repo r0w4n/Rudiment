@@ -13,15 +13,36 @@ grep -Eq 'opencode-ai-task\.yml@[0-9a-f]{40}$' "$caller"
 ! grep -q 'toolchain_profile' "$caller"
 grep -q 'issue_comment:' "$caller"
 grep -q 'types: \[created\]' "$caller"
-grep -q "startsWith(github.event.comment.body, '/ai revise')" "$caller"
+# All PR comments are routed; Central owns the comment classification.
+grep -q "github.event_name == 'issue_comment' && github.event.issue.pull_request" "$caller"
+! grep -q "startsWith(github.event.comment.body" "$caller"
 grep -q "task_mode:.*revision" "$caller"
 grep -q 'pr_number:' "$caller"
 grep -q 'comment_id:' "$caller"
+grep -q "options: \[implementation, revision, remediation\]" "$caller"
+grep -q 'remediation_event:' "$caller"
+grep -q 'remediation_max_attempts:' "$caller"
+grep -q 'caller_workflow: opencode-ai-task\.yml' "$caller"
+grep -Eq 'actions: read' "$caller"
 grep -q 'automation_pr_author: central-ai-publisher\[bot\]' "$caller"
 grep -q 'approved_base_branch: main' "$caller"
-grep -q 'options: \[implementation, revision\]' "$caller"
 grep -q 'APP_ID: \${{ secrets.APP_ID }}' "$caller"
 grep -q 'APP_PRIVATE_KEY: \${{ secrets.APP_PRIVATE_KEY }}' "$caller"
+
+# The CI remediation router only routes events; Central owns remediation
+# policy, state, agent execution and publication.
+router="$root/.github/workflows/ai-ci-remediation.yml"
+grep -q 'workflow_run:' "$router"
+for workflow in 'Quality assurance' 'Performance regression checks' 'CodeQL static security analysis' 'Dependency security'; do
+  grep -qF -- "- $workflow" "$router"
+done
+grep -q 'types: \[completed\]' "$router"
+grep -qF 'AUTOMATION_PR_AUTHOR: central-ai-publisher[bot]' "$router"
+grep -qF 'task_mode=remediation' "$router"
+grep -qF 'remediation_event' "$router"
+# The router never runs PR code, pushes branches, or merges.
+! grep -Eq 'git push|gh pr merge|gh pr (review|checkout)' "$router"
+! grep -Eq 'runs-on.*\$\{|uses: [^.]' "$router"
 
 grep -q "save-cache: 'false'" "$ai_setup"
 grep -q 'uses: \./\.github/actions/setup-rudiment' "$ai_setup"
@@ -42,4 +63,4 @@ grep -q 'pull_request:' "$root/.github/workflows/performance.yml"
 grep -q 'pull_request:' "$root/.github/workflows/codeql.yml"
 grep -q 'pull_request:' "$root/.github/workflows/security.yml"
 
-echo 'PASS: generic AI implementation and revision events use immutable Central orchestration; Rudiment owns setup, checks and preview regeneration'
+echo 'PASS: generic AI implementation, revision, remediation routing and feedback use immutable Central orchestration; Rudiment owns setup, checks and preview regeneration'
