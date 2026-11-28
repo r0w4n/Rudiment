@@ -52,13 +52,15 @@ on:
         type: boolean
 
 # The reusable workflow narrows these permissions per job. GitHub does not
-# permit a called workflow to elevate beyond its caller. actions: read lets
-# Central verify failing checks and read their job logs in remediation mode.
+# permit a called workflow to elevate beyond its caller. actions: write is
+# required: the Central notify job dispatches bounded remediation retries
+# through this workflow, and a called job may never request more than its
+# caller grants (write also covers the failed-check log reads).
 permissions:
   contents: write
   issues: write
   pull-requests: write
-  actions: read
+  actions: write
 
 jobs:
   ai-task:
